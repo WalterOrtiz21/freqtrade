@@ -61,20 +61,30 @@ class DynamicAggressiveHighTP(IStrategy):
     # Run "populate_indicators" only for new candle
     process_only_new_candles = True
 
-    # Startup candle count (need 14 for RSI)
-    startup_candle_count = 20
+    # Startup candle count (need at least max RSI period)
+    startup_candle_count = 30  # Increased to accommodate max RSI period (20) + buffer
 
-    # Hyperopt parameter spaces
-    buy_rsi_threshold = IntParameter(20, 40, default=30, space='buy', optimize=True)
-    buy_momentum_threshold = DecimalParameter(-0.05, -0.01, default=-0.02, decimals=3, space='buy', optimize=True)
+    # ========== HYPEROPT PARAMETERS - ALL OPTIMIZABLE ==========
 
-    # Exit parameters
-    stop_loss_pnl = DecimalParameter(-0.10, -0.02, default=-0.05, decimals=2, space='sell', optimize=True)
-    take_profit_pnl = DecimalParameter(0.30, 1.50, default=0.80, decimals=2, space='sell', optimize=True)
-    trailing_activation_pnl = DecimalParameter(0.01, 0.05, default=0.02, decimals=2, space='sell', optimize=True)
+    # Entry signal thresholds (BUY SPACE)
+    buy_rsi_threshold = IntParameter(15, 50, default=37, space='buy', optimize=True)
+    buy_momentum_threshold = DecimalParameter(-0.10, -0.005, default=-0.028, decimals=3, space='buy', optimize=True)
 
-    # Emergency SL - keep fixed for safety
-    emergency_sl_pnl = -0.08  # -8% PnL (fixed, don't optimize)
+    # Indicator periods (BUY SPACE)
+    rsi_period = IntParameter(10, 20, default=14, space='buy', optimize=True)
+    momentum_period = IntParameter(3, 10, default=5, space='buy', optimize=True)
+    ma_period = IntParameter(3, 15, default=5, space='buy', optimize=True)
+
+    # Exit parameters (SELL SPACE)
+    emergency_sl_pnl = DecimalParameter(-0.15, -0.05, default=-0.08, decimals=2, space='sell', optimize=True)
+    stop_loss_pnl = DecimalParameter(-0.15, -0.01, default=-0.03, decimals=2, space='sell', optimize=True)
+    take_profit_pnl = DecimalParameter(0.20, 2.00, default=0.70, decimals=2, space='sell', optimize=True)
+    trailing_activation_pnl = DecimalParameter(0.005, 0.10, default=0.02, decimals=3, space='sell', optimize=True)
+
+    # Dynamic trailing distances (SELL SPACE) - Key levels
+    trailing_dist_low = DecimalParameter(0.001, 0.01, default=0.002, decimals=3, space='sell', optimize=True)    # For +2% PnL
+    trailing_dist_mid = DecimalParameter(0.01, 0.05, default=0.03, decimals=3, space='sell', optimize=True)      # For +7% PnL
+    trailing_dist_high = DecimalParameter(0.05, 0.20, default=0.10, decimals=2, space='sell', optimize=True)     # For +15% PnL
 
     # Position sizing
     position_size_pct = 0.05  # 5% of balance per trade
@@ -106,15 +116,16 @@ class DynamicAggressiveHighTP(IStrategy):
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
         Add indicators needed for entry signals.
+        Uses optimizable periods for RSI, Momentum, and MA.
         """
-        # RSI
-        dataframe['rsi'] = ta.RSI(dataframe, timeperiod=14)
+        # RSI with optimizable period
+        dataframe['rsi'] = ta.RSI(dataframe, timeperiod=self.rsi_period.value)
 
-        # Momentum (5-period price change)
-        dataframe['momentum'] = (dataframe['close'] - dataframe['close'].shift(5)) / dataframe['close'].shift(5)
+        # Momentum with optimizable period
+        dataframe['momentum'] = (dataframe['close'] - dataframe['close'].shift(self.momentum_period.value)) / dataframe['close'].shift(self.momentum_period.value)
 
-        # MA5
-        dataframe['ma5'] = ta.SMA(dataframe, timeperiod=5)
+        # MA with optimizable period
+        dataframe['ma'] = ta.SMA(dataframe, timeperiod=self.ma_period.value)
 
         return dataframe
 
@@ -123,12 +134,12 @@ class DynamicAggressiveHighTP(IStrategy):
         Entry signal: Requires 2 of 3 conditions:
         1. RSI < threshold
         2. Momentum < threshold
-        3. Price > MA(5)
+        3. Price > MA
         """
         # Calculate individual signals
         signal_rsi = dataframe['rsi'] < self.buy_rsi_threshold.value
         signal_momentum = dataframe['momentum'] < self.buy_momentum_threshold.value
-        signal_price_above_ma = dataframe['close'] > dataframe['ma5']
+        signal_price_above_ma = dataframe['close'] > dataframe['ma']
 
         # Require 2 of 3 signals
         signal_count = (
@@ -154,29 +165,26 @@ class DynamicAggressiveHighTP(IStrategy):
     def calculate_dynamic_trailing_distance(self, profit_pnl: float) -> float:
         """
         Calculate trailing distance based on current PnL level.
-        This is the aggressive strategy from the validated backtest.
+        Uses optimizable trailing distances that scale with profit.
 
         Returns trailing distance as a decimal (e.g., 0.05 = 5%)
         Returns None if trailing not active yet.
         """
-        if profit_pnl >= 0.25:  # 25%+ PnL
-            return 0.20
-        elif profit_pnl >= 0.20:  # 20%+ PnL
-            return 0.15
-        elif profit_pnl >= 0.15:  # 15%+ PnL
-            return 0.10
-        elif profit_pnl >= 0.13:  # 13%+ PnL
-            return 0.07
-        elif profit_pnl >= 0.10:  # 10%+ PnL
-            return 0.05
-        elif profit_pnl >= 0.07:  # 7%+ PnL
-            return 0.03
-        elif profit_pnl >= 0.05:  # 5%+ PnL
-            return 0.01
-        elif profit_pnl >= 0.02:  # 2%+ PnL
-            return 0.002
-        else:
+        if profit_pnl < self.trailing_activation_pnl.value:
             return None  # Trailing not active yet
+
+        # Three key levels with optimizable distances
+        # Low profit (activation to 7% PnL): Use trailing_dist_low
+        if profit_pnl < 0.07:
+            return self.trailing_dist_low.value
+
+        # Medium profit (7% to 15% PnL): Use trailing_dist_mid
+        elif profit_pnl < 0.15:
+            return self.trailing_dist_mid.value
+
+        # High profit (15%+ PnL): Use trailing_dist_high
+        else:
+            return self.trailing_dist_high.value
 
     def custom_exit(self, pair: str, trade, current_time, current_rate,
                     current_profit, **kwargs) -> str:
@@ -201,8 +209,8 @@ class DynamicAggressiveHighTP(IStrategy):
         # So we use current_profit directly as our leveraged PnL
         leveraged_pnl = current_profit  # DO NOT multiply by leverage!
 
-        # Priority 0: Emergency Stop Loss (-8% PnL)
-        if leveraged_pnl <= self.emergency_sl_pnl:
+        # Priority 0: Emergency Stop Loss (optimizable)
+        if leveraged_pnl <= self.emergency_sl_pnl.value:
             return 'emergency_stop_loss'
 
         # Priority 1: Stop Loss (optimizable)
