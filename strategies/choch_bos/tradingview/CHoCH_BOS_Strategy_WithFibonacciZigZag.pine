@@ -1,7 +1,7 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
-// © LudoGH68 (SMC Base) + LonesomeTheBlue (ZigZag with Fibonacci) + LuxAlgo (SFP) + OmegaTools (Smooth Trail) + Claude Code (Strategy Integration)
+// © LudoGH68 (SMC Base) + LonesomeTheBlue (ZigZag with Fibonacci) + LuxAlgo (SFP + MST) + OmegaTools (Smooth Trail) + Claude Code (Strategy Integration)
 //@version=6
-strategy("CHoCH/BOS + Fibo + SFP + Smooth Trail", shorttitle="CHoCH Complete", overlay=true, initial_capital=12, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.075, pyramiding=0, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
+strategy("CHoCH/BOS + Fibo + SFP + MST + Smooth Trail", shorttitle="CHoCH Complete", overlay=true, initial_capital=12, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.075, pyramiding=0, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
 
 // ============================================================================
 // ZIGZAG WITH FIBONACCI LEVELS (Adapted from LonesomeTheBlue)
@@ -504,6 +504,151 @@ if st_enabled and st_use_as_confirmation
         st_zone_touched_short := false
 
 // ============================================================================
+// MARKET STRUCTURE TARGETS (MST) - Dynamic TP Calculation
+// ============================================================================
+
+// MST Inputs
+mst_enabled = input.bool(true, "Enable MST Targets", group="MST - Market Structure Targets")
+mst_exit_mode = input.string("Visual Only", "Exit Mode", options=["Visual Only", "Simple TP", "Multiple TP"], group="MST - Market Structure Targets", tooltip="Visual Only: Just show targets\nSimple TP: Close 100% at first target\nMultiple TP: Close 50% at CHoCH target, 50% at BOS target")
+mst_show_choch_targets = input.bool(true, "Show CHoCH Targets", group="MST - Market Structure Targets", tooltip="Calculate targets for CHoCH (structure shift)")
+mst_show_bos_targets = input.bool(true, "Show BOS Targets", group="MST - Market Structure Targets", tooltip="Calculate targets for BOS (continuation)")
+mst_choch_percentage = input.float(100.0, "CHoCH Target %", minval=10, maxval=300, step=10, group="MST - Market Structure Targets", tooltip="Projection percentage for CHoCH targets")
+mst_bos_percentage = input.float(100.0, "BOS Target %", minval=10, maxval=300, step=10, group="MST - Market Structure Targets", tooltip="Projection percentage for BOS targets")
+mst_max_duration = input.int(300, "Max Target Duration", minval=50, maxval=1000, group="MST - Market Structure Targets", tooltip="Maximum bars before target expires")
+mst_choch_bull_color = input.color(#089981, "CHoCH Bullish", inline="choch", group="MST - Market Structure Targets")
+mst_choch_bear_color = input.color(#f23645, "CHoCH Bearish", inline="choch", group="MST - Market Structure Targets")
+mst_bos_bull_color = input.color(color.new(#089981, 50), "BOS Bullish", inline="bos", group="MST - Market Structure Targets")
+mst_bos_bear_color = input.color(color.new(#f23645, 50), "BOS Bearish", inline="bos", group="MST - Market Structure Targets")
+
+// MST User Defined Types
+//@type Target tracking for MST
+type mst_target
+    line target_line       // Horizontal target line
+    line vertical_line     // Vertical line from structure to target
+    bool active           // Is target still active?
+    int created_bar       // Bar index when target was created
+    float target_price    // Target price level
+
+// MST Variables
+var array<mst_target> mst_choch_bull_targets = array.new<mst_target>()
+var array<mst_target> mst_choch_bear_targets = array.new<mst_target>()
+var array<mst_target> mst_bos_bull_targets = array.new<mst_target>()
+var array<mst_target> mst_bos_bear_targets = array.new<mst_target>()
+
+// MST Methods
+//@function Calculate and create bullish target
+//@param target_array Array to store target
+//@param structure_bar Bar index of structure break
+//@param structure_price Price level of structure break
+//@param percentage Projection percentage
+//@param color_line Color for target lines
+mst_create_bull_target(array<mst_target> target_array, int structure_bar, float structure_price, float percentage, color color_line) =>
+    // Find lowest point from structure_bar to current bar
+    float lowest_price = high
+    int bars_back = bar_index - structure_bar
+
+    for i = 0 to bars_back
+        if low[i] < lowest_price
+            lowest_price := low[i]
+
+    // Calculate target: HighLevel + (HighLevel - LowestPoint) × Percentage
+    float price_diff = structure_price - lowest_price
+    float target_price = structure_price + (price_diff * percentage / 100)
+
+    // Create horizontal target line (extends to the right)
+    line target_ln = line.new(
+         structure_bar, target_price,
+         bar_index + 10, target_price,
+         color=color_line,
+         style=line.style_dashed,
+         width=2)
+
+    // Create vertical projection line
+    line vertical_ln = line.new(
+         bar_index, structure_price,
+         bar_index, target_price,
+         color=color_line,
+         style=line.style_dotted,
+         width=1)
+
+    // Store target (mark as active only if target is above current price)
+    bool is_active = target_price > close
+    array.push(target_array, mst_target.new(
+         target_ln,
+         vertical_ln,
+         is_active,
+         bar_index,
+         target_price))
+
+//@function Calculate and create bearish target
+//@param target_array Array to store target
+//@param structure_bar Bar index of structure break
+//@param structure_price Price level of structure break
+//@param percentage Projection percentage
+//@param color_line Color for target lines
+mst_create_bear_target(array<mst_target> target_array, int structure_bar, float structure_price, float percentage, color color_line) =>
+    // Find highest point from structure_bar to current bar
+    float highest_price = low
+    int bars_back = bar_index - structure_bar
+
+    for i = 0 to bars_back
+        if high[i] > highest_price
+            highest_price := high[i]
+
+    // Calculate target: LowLevel - (HighestPoint - LowLevel) × Percentage
+    float price_diff = highest_price - structure_price
+    float target_price = structure_price - (price_diff * percentage / 100)
+
+    // Create horizontal target line (extends to the right)
+    line target_ln = line.new(
+         structure_bar, target_price,
+         bar_index + 10, target_price,
+         color=color_line,
+         style=line.style_dashed,
+         width=2)
+
+    // Create vertical projection line
+    line vertical_ln = line.new(
+         bar_index, structure_price,
+         bar_index, target_price,
+         color=color_line,
+         style=line.style_dotted,
+         width=1)
+
+    // Store target (mark as active only if target is below current price)
+    bool is_active = target_price < close
+    array.push(target_array, mst_target.new(
+         target_ln,
+         vertical_ln,
+         is_active,
+         bar_index,
+         target_price))
+
+//@function Update targets and check if reached or expired
+//@param target_array Array of targets to update
+//@param is_bullish True for bullish targets, false for bearish
+mst_update_targets(array<mst_target> target_array, bool is_bullish) =>
+    if array.size(target_array) > 0
+        for tgt in target_array
+            if tgt.active
+                // Extend target line to current bar
+                tgt.target_line.set_x2(bar_index)
+
+                // Check if target reached
+                bool target_hit = is_bullish ? (high >= tgt.target_price) : (low <= tgt.target_price)
+
+                if target_hit
+                    // Target reached - deactivate
+                    tgt.active := false
+
+                // Check if target expired (max duration)
+                if bar_index - tgt.created_bar > mst_max_duration
+                    // Target expired - delete and deactivate
+                    tgt.target_line.delete()
+                    tgt.vertical_line.delete()
+                    tgt.active := false
+
+// ============================================================================
 // SMC STRUCTURE DETECTION (Based on ZigZag Pivots)
 // ============================================================================
 
@@ -566,6 +711,16 @@ var bool exit_by_stoploss_long = false
 var bool exit_by_stoploss_short = false
 var bool exit_by_trailing_long = false
 var bool exit_by_trailing_short = false
+var bool exit_by_mst_tp1_long = false
+var bool exit_by_mst_tp1_short = false
+var bool exit_by_mst_tp2_long = false
+var bool exit_by_mst_tp2_short = false
+
+// MST TP tracking (reset when entering new position)
+var bool mst_tp1_hit_long = false   // CHoCH target hit for long
+var bool mst_tp2_hit_long = false   // BOS target hit for long
+var bool mst_tp1_hit_short = false  // CHoCH target hit for short
+var bool mst_tp2_hit_short = false  // BOS target hit for short
 
 // HMA filter tracking
 var bool hma_touched_long = false   // Tracks if price touched HMA while waiting for long entry
@@ -588,6 +743,10 @@ exit_by_stoploss_long := false
 exit_by_stoploss_short := false
 exit_by_trailing_long := false
 exit_by_trailing_short := false
+exit_by_mst_tp1_long := false
+exit_by_mst_tp1_short := false
+exit_by_mst_tp2_long := false
+exit_by_mst_tp2_short := false
 
 // Process pivot detections from ZigZag
 // When a new pivot HIGH is confirmed
@@ -617,6 +776,9 @@ if not na(ph)
                 if showBOS
                     array.push(structureLines, line.new(lastPivotHighBar, lastPivotHigh, pivotBar, lastPivotHigh, color=bullishBosColor, style=line.style_solid, width=1))
                     array.push(structureLabels, label.new((pivotBar + lastPivotHighBar) / 2, lastPivotHigh, "BOS", style=label.style_none, textcolor=bullishBosColor))
+                // Create MST target for BOS bullish
+                if mst_enabled and mst_show_bos_targets
+                    mst_create_bull_target(mst_bos_bull_targets, lastPivotHighBar, lastPivotHigh, mst_bos_percentage, mst_bos_bull_color)
             else if structureDirection != 2
                 // Was bearish/neutral → CHoCH (reversal)
                 choch_bullish := true
@@ -626,6 +788,9 @@ if not na(ph)
                 if showCHoCH
                     array.push(structureLines, line.new(lastPivotHighBar, lastPivotHigh, pivotBar, lastPivotHigh, color=bullishChochColor, style=line.style_solid, width=2))
                     array.push(structureLabels, label.new((pivotBar + lastPivotHighBar) / 2, lastPivotHigh, "CHoCH", style=label.style_none, textcolor=bullishChochColor))
+                // Create MST target for CHoCH bullish
+                if mst_enabled and mst_show_choch_targets
+                    mst_create_bull_target(mst_choch_bull_targets, lastPivotHighBar, lastPivotHigh, mst_choch_percentage, mst_choch_bull_color)
 
     // Update last pivot high
     lastPivotHigh := pivotPrice
@@ -658,6 +823,9 @@ if not na(pl)
                 if showBOS
                     array.push(structureLines, line.new(lastPivotLowBar, lastPivotLow, pivotBar, lastPivotLow, color=bearishBosColor, style=line.style_solid, width=1))
                     array.push(structureLabels, label.new((pivotBar + lastPivotLowBar) / 2, lastPivotLow, "BOS", style=label.style_none, textcolor=bearishBosColor))
+                // Create MST target for BOS bearish
+                if mst_enabled and mst_show_bos_targets
+                    mst_create_bear_target(mst_bos_bear_targets, lastPivotLowBar, lastPivotLow, mst_bos_percentage, mst_bos_bear_color)
             else if structureDirection != 1
                 // Was bullish/neutral → CHoCH (reversal)
                 choch_bearish := true
@@ -667,10 +835,83 @@ if not na(pl)
                 if showCHoCH
                     array.push(structureLines, line.new(lastPivotLowBar, lastPivotLow, pivotBar, lastPivotLow, color=bearishChochColor, style=line.style_solid, width=2))
                     array.push(structureLabels, label.new((pivotBar + lastPivotLowBar) / 2, lastPivotLow, "CHoCH", style=label.style_none, textcolor=bearishChochColor))
+                // Create MST target for CHoCH bearish
+                if mst_enabled and mst_show_choch_targets
+                    mst_create_bear_target(mst_choch_bear_targets, lastPivotLowBar, lastPivotLow, mst_choch_percentage, mst_choch_bear_color)
 
     // Update last pivot low
     lastPivotLow := pivotPrice
     lastPivotLowBar := pivotBar
+
+// ============================================================================
+// MST TARGET UPDATES (Run every bar)
+// ============================================================================
+
+if mst_enabled
+    // Update all target arrays
+    mst_update_targets(mst_choch_bull_targets, true)
+    mst_update_targets(mst_choch_bear_targets, false)
+    mst_update_targets(mst_bos_bull_targets, true)
+    mst_update_targets(mst_bos_bear_targets, false)
+
+// ============================================================================
+// MST TP EXECUTION (Close positions when targets are hit)
+// ============================================================================
+
+if mst_enabled and mst_exit_mode != "Visual Only"
+    // LONG positions - check for bullish targets hit
+    if strategy.position_size > 0
+        // Check CHoCH targets (TP1)
+        if not mst_tp1_hit_long and array.size(mst_choch_bull_targets) > 0
+            for tgt in mst_choch_bull_targets
+                if tgt.active and high >= tgt.target_price
+                    mst_tp1_hit_long := true
+                    if mst_exit_mode == "Simple TP"
+                        // Close 100% on first target
+                        strategy.close("Long", comment="MST TP")
+                        exit_by_mst_tp1_long := true
+                    else if mst_exit_mode == "Multiple TP"
+                        // Close 50% on CHoCH target
+                        strategy.close("Long", qty_percent=50, comment="MST TP1")
+                        exit_by_mst_tp1_long := true
+                    break
+
+        // Check BOS targets (TP2) - only in Multiple TP mode
+        if not mst_tp2_hit_long and mst_exit_mode == "Multiple TP" and array.size(mst_bos_bull_targets) > 0
+            for tgt in mst_bos_bull_targets
+                if tgt.active and high >= tgt.target_price
+                    mst_tp2_hit_long := true
+                    // Close remaining 50% on BOS target
+                    strategy.close("Long", comment="MST TP2")
+                    exit_by_mst_tp2_long := true
+                    break
+
+    // SHORT positions - check for bearish targets hit
+    if strategy.position_size < 0
+        // Check CHoCH targets (TP1)
+        if not mst_tp1_hit_short and array.size(mst_choch_bear_targets) > 0
+            for tgt in mst_choch_bear_targets
+                if tgt.active and low <= tgt.target_price
+                    mst_tp1_hit_short := true
+                    if mst_exit_mode == "Simple TP"
+                        // Close 100% on first target
+                        strategy.close("Short", comment="MST TP")
+                        exit_by_mst_tp1_short := true
+                    else if mst_exit_mode == "Multiple TP"
+                        // Close 50% on CHoCH target
+                        strategy.close("Short", qty_percent=50, comment="MST TP1")
+                        exit_by_mst_tp1_short := true
+                    break
+
+        // Check BOS targets (TP2) - only in Multiple TP mode
+        if not mst_tp2_hit_short and mst_exit_mode == "Multiple TP" and array.size(mst_bos_bear_targets) > 0
+            for tgt in mst_bos_bear_targets
+                if tgt.active and low <= tgt.target_price
+                    mst_tp2_hit_short := true
+                    // Close remaining 50% on BOS target
+                    strategy.close("Short", comment="MST TP2")
+                    exit_by_mst_tp2_short := true
+                    break
 
 // ============================================================================
 // STRATEGY LOGIC
@@ -822,10 +1063,14 @@ if strategy.position_size < 0
 if long_entry and enable_longs
     strategy.entry("Long", strategy.long)
     max_profit_long := 0.0  // Reset max profit tracker
+    mst_tp1_hit_long := false  // Reset MST TP tracking
+    mst_tp2_hit_long := false
 
 if short_entry and enable_shorts
     strategy.entry("Short", strategy.short)
     max_profit_short := 0.0  // Reset max profit tracker
+    mst_tp1_hit_short := false  // Reset MST TP tracking
+    mst_tp2_hit_short := false
 
 if long_exit
     strategy.close("Long", comment=long_exit_reason)
@@ -937,6 +1182,14 @@ plotshape(showExitSignals and exit_by_stoploss_short, "Short SL", shape.circle, 
 // Exit signals - Trailing Stop
 plotshape(showExitSignals and exit_by_trailing_long, "Long Trail", shape.triangledown, location.abovebar, color.new(color.orange, 0), size=size.tiny, text="TRAIL")
 plotshape(showExitSignals and exit_by_trailing_short, "Short Trail", shape.triangleup, location.belowbar, color.new(color.orange, 0), size=size.tiny, text="TRAIL")
+
+// Exit signals - MST TP1
+plotshape(showExitSignals and exit_by_mst_tp1_long, "Long MST TP1", shape.diamond, location.abovebar, color.new(#089981, 0), size=size.small, text="MST TP1")
+plotshape(showExitSignals and exit_by_mst_tp1_short, "Short MST TP1", shape.diamond, location.belowbar, color.new(#f23645, 0), size=size.small, text="MST TP1")
+
+// Exit signals - MST TP2
+plotshape(showExitSignals and exit_by_mst_tp2_long, "Long MST TP2", shape.diamond, location.abovebar, color.new(#089981, 50), size=size.small, text="MST TP2")
+plotshape(showExitSignals and exit_by_mst_tp2_short, "Short MST TP2", shape.diamond, location.belowbar, color.new(#f23645, 50), size=size.small, text="MST TP2")
 
 // Information table
 var table info_table = table.new(position.top_right, 2, 10, border_width=1, border_color=color.gray, frame_width=1, frame_color=color.gray)
