@@ -1,0 +1,576 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © LudoGH68
+// Adapted to Strategy by Claude Code
+//@version=6
+strategy("CHoCH/BOS Strategy - From SMC Indicator", shorttitle="CHoCH/BOS SMC", overlay=true, initial_capital=12, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.075, pyramiding=0)
+
+getLineStyle(lineOption) =>
+    lineOption == "┈" ? line.style_dotted : lineOption == "╌" ? line.style_dashed : line.style_solid
+
+get_structure_highest_bar(lookback) =>
+	var int idx = 0
+    maxBar = bar_index > lookback ? ta.highestbars(high, lookback) : ta.highestbars(high, bar_index + 1)
+	for i = 0 to lookback - 1 by 1
+		if high[i+1] > high[i+2] and high[i] <= high[i+1] and ((i+1) * -1) >= maxBar
+			idx := (i+1) * -1
+	idx := idx == 0 ? maxBar : idx
+
+get_structure_lowest_bar(lookback) =>
+	var int idx = 0
+    minBar = bar_index > lookback ? ta.lowestbars(low, lookback) : ta.lowestbars(low, bar_index + 1)
+	for i = 0 to lookback - 1 by 1
+		if low[i+1] < low[i+2] and low[i] >= low[i+1]  and ((i+1) * -1) >= minBar
+			idx := (i+1) * -1
+	idx := idx == 0 ? minBar : idx
+
+is_structure_high_broken(_highStructBreakPrice, _structureHigh, _structureHighStartIndex, _structureDirection) =>
+    var bool res = false
+    if (_highStructBreakPrice > _structureHigh and  bar_index[1] >  _structureHighStartIndex) or (_structureDirection == 1 and _highStructBreakPrice > _structureHigh)
+        res := true
+    else
+        res := false
+    res
+
+// Fear Value Gap
+isFvgToShow =  input(false, title='Display FVG', group="Fear Value Gap")
+bullishFvgColor = input(color.new(color.green, 50), 'Bullish FVG Color', group="Fear Value Gap")
+bearishFvgColor = input(color.new(color.red, 50), 'Bearish FVG Color', group="Fear Value Gap")
+mitigatedFvgColor = input(color.new(color.gray, 50), 'Mitigated FVG Color', group="Fear Value Gap")
+fvgHistoryNbr = input.int(5, 'Number of FVG to show', minval=1, maxval=50, group="Fear Value Gap")
+isMitigatedFvgToReduce = input(false, title='Reduce mitigated FVG', group="Fear Value Gap")
+
+// Structures
+isStructBodyCandleBreak = input(true, title='Break with candle\'s body', group="Structures")
+isCurrentStructToShow = input(true, title='Display current structure', group="Structures")
+bullishBosColor = input(color.silver, 'Bullish BOS Color', group="Structures")
+bearishBosColor = input(color.silver, 'Bearish BOS Color', group="Structures")
+bosLineStyleOption = input.string("─", title="BOS Style", group="Structures", options=["─", "┈", "╌"])
+bosLineStyle = getLineStyle(bosLineStyleOption)
+bosLineWidth = input.int(1, title="BOS Width", group="Structures", minval=1, maxval=5)
+bullishChochColor = input(color.yellow, 'Bullish CHoCH Color', group="Structures")
+bearishChochColor = input(color.yellow, 'Bearish CHoCH Color', group="Structures")
+chochLineStyleOption = input.string("─", title="CHoCH Style", group="Structures", options=["─", "┈", "╌"])
+chochLineStyle = getLineStyle(chochLineStyleOption)
+chochLineWidth = input.int(1, title="MSB Width", group="Structures", minval=1, maxval=5)
+currentStructColor = input(color.blue, 'Current structure Color', group="Structures")
+currentStructLineStyleOption = input.string("─", title="Current structure Style", group="Structures", options=["─", "┈", "╌"])
+currentStructLineStyle = getLineStyle(currentStructLineStyleOption)
+currentStructLineWidth = input.int(1, title="Current structure Width", group="Structures", minval=1, maxval=5)
+structHistoryNbr = input.int(10, 'Number of break to show', minval=1, maxval=50, group="Structures")
+zigzagLookback = input.int(21, 'ZigZag Lookback Period', minval=2, maxval=100, group="Structures", tooltip="Periodo para detectar pivotes del ZigZag. Valores Fibonacci recomendados:\n• 5, 8: Ultra sensible (scalping)\n• 13, 21: Balance (swing trading) - Default: 21\n• 34, 55: Conservador (position trading)\n• 89: Muy conservador\nPuedes usar cualquier valor entre 2-100.")
+showZigZag = input.bool(true, 'Show ZigZag', group="Structures", tooltip="Mostrar líneas del ZigZag conectando pivotes")
+zigzagColor = input(color.new(color.purple, 0), 'ZigZag Color', group="Structures")
+zigzagWidth = input.int(2, 'ZigZag Width', minval=1, maxval=5, group="Structures")
+
+// Fibonacci (deshabilitados por defecto para estrategia)
+isFibo1ToShow = input(false, title = "", group="Structure Fibonacci", inline = "Fibo1")
+fibo1Value = input.float(0.786, title = "", group="Structure Fibonacci", inline = "Fibo1")
+fibo1Color = input(#64b5f6, title = "", group="Structure Fibonacci", inline = "Fibo1")
+fibo1StyleOption = input.string("─", title = "", group="Structure Fibonacci", options=["─", "┈", "╌"], inline = "Fibo1")
+fibo1Style = getLineStyle(fibo1StyleOption)
+fibo1LineWidth = input.int(1, title = "", group="Structure Fibonacci", minval=1, maxval=5, inline = "Fibo1")
+
+isFibo2ToShow = input(false, title = "", group="Structure Fibonacci", inline = "Fibo2")
+fibo2Value = input.float(0.705, title = "", group="Structure Fibonacci", inline = "Fibo2")
+fibo2Color = input(#f23645, title = "", group="Structure Fibonacci", inline = "Fibo2")
+fibo2StyleOption = input.string("─", title = "", group="Structure Fibonacci", options=["─", "┈", "╌"], inline = "Fibo2")
+fibo2Style = getLineStyle(fibo2StyleOption)
+fibo2LineWidth = input.int(1, title = "", group="Structure Fibonacci", minval=1, maxval=5, inline = "Fibo2")
+
+isFibo3ToShow = input(false, title = "", group="Structure Fibonacci", inline = "Fibo3")
+fibo3Value = input.float(0.618, title = "", group="Structure Fibonacci", inline = "Fibo3")
+fibo3Color = input(#089981, title = "", group="Structure Fibonacci", inline = "Fibo3")
+fibo3StyleOption = input.string("─", title = "", group="Structure Fibonacci", options=["─", "┈", "╌"], inline = "Fibo3")
+fibo3Style = getLineStyle(fibo3StyleOption)
+fibo3LineWidth = input.int(1, title = "", group="Structure Fibonacci", minval=1, maxval=5, inline = "Fibo3")
+
+isFibo4ToShow = input(false, title = "", group="Structure Fibonacci", inline = "Fibo4")
+fibo4Value = input.float(0.5, title = "", group="Structure Fibonacci", inline = "Fibo4")
+fibo4Color = input(#4caf50, title = "", group="Structure Fibonacci", inline = "Fibo4")
+fibo4StyleOption = input.string("─", title = "", group="Structure Fibonacci", options=["─", "┈", "╌"], inline = "Fibo4")
+fibo4Style = getLineStyle(fibo4StyleOption)
+fibo4LineWidth = input.int(1, title = "", group="Structure Fibonacci", minval=1, maxval=5, inline = "Fibo4")
+
+isFibo5ToShow = input(false, title = "", group="Structure Fibonacci", inline = "Fibo5")
+fibo5Value = input.float(0.382, title = "", group="Structure Fibonacci", inline = "Fibo5")
+fibo5Color = input(#81c784, title = "", group="Structure Fibonacci", inline = "Fibo5")
+fibo5StyleOption = input.string("─", title = "", group="Structure Fibonacci", options=["─", "┈", "╌"], inline = "Fibo5")
+fibo5Style = getLineStyle(fibo5StyleOption)
+fibo5LineWidth = input.int(1, title = "", group="Structure Fibonacci", minval=1, maxval=5, inline = "Fibo5")
+
+// Risk Management (nuevo para strategy)
+stoploss_pct = input.float(-5.8, "Stop Loss %", minval=-10, maxval=-1, step=0.1, group="Strategy")
+
+// Visual Signals
+showEntrySignals = input.bool(true, "Show Entry Signals", group="Strategy", tooltip="Mostrar labels de LONG/SHORT en el gráfico")
+showExitSignals = input.bool(true, "Show Exit Signals", group="Strategy", tooltip="Mostrar labels de EXIT en el gráfico")
+showBackgroundStates = input.bool(true, "Show Waiting States Background", group="Strategy", tooltip="Mostrar fondo coloreado cuando está esperando confirmación BOS")
+
+// Draw FVG into graph
+FVGDraw(_boxes, _fvgTypes, _isFvgMitigated, _fvgLabels) =>
+    for [index, value] in _boxes
+        if(array.get(_fvgTypes, index))
+            if(low <= box.get_bottom(value))
+                array.remove(_boxes, index)
+                array.remove(_fvgTypes, index)
+                array.remove(_isFvgMitigated, index)
+                label.delete(array.get(_fvgLabels, index))
+                array.remove(_fvgLabels, index)
+                box.delete(value)
+            else
+                if(low < box.get_top((value)))
+                    box.set_bgcolor(value, mitigatedFvgColor)
+                    if(not(array.get(_isFvgMitigated, index)))
+                        alert("FVG has been mitigated", alert.freq_once_per_bar)
+                        array.set(_isFvgMitigated, index, true)
+                    if(isMitigatedFvgToReduce)
+                        box.set_top(value, low)
+                box.set_right(value, bar_index)
+                label.set_x(array.get(_fvgLabels, index), (box.get_left(value) + box.get_right(value)) / 2 )
+                label.set_y(array.get(_fvgLabels, index), box.get_top(value) - (box.get_top(value) - box.get_bottom(value)) / 2)
+        else
+            if(high >= box.get_top(value))
+                array.remove(_boxes, index)
+                array.remove(_fvgTypes, index)
+                array.remove(_isFvgMitigated, index)
+                label.delete(array.get(_fvgLabels, index))
+                array.remove(_fvgLabels, index)
+                box.delete(value)
+            else
+                if(high > box.get_bottom((value)))
+                    box.set_bgcolor(value, mitigatedFvgColor)
+                    if(not(array.get(_isFvgMitigated, index)))
+                        alert("FVG has been mitigated", alert.freq_once_per_bar)
+                        array.set(_isFvgMitigated, index, true)
+                    if(isMitigatedFvgToReduce)
+                        box.set_bottom(value, high)
+                box.set_right(value, bar_index)
+                label.set_x(array.get(_fvgLabels, index), (box.get_left(value) + box.get_right(value)) / 2 )
+                label.set_y(array.get(_fvgLabels, index), box.get_top(value) - (box.get_top(value) - box.get_bottom(value)) / 2)
+
+// Arrays variable
+var array<line> structureLines = array.new_line(0)
+var array<label> structureLabels = array.new_label(0)
+var array<box>  fvgBoxes = array.new_box(0)
+var array<bool> fvgTypes = array.new_bool(0)
+var array<label> fvgLabels = array.new_label(0)
+var array<bool> isFvgMitigated = array.new_bool(0)
+
+// Price variables
+var float structureHigh = 0.0
+var float structureLow = 0.0
+var float fibo1Price = 0.0
+var float fibo2Price = 0.0
+var float fibo3Price = 0.0
+var float fibo4Price = 0.0
+var float fibo5Price = 0.0
+
+// Index variable
+var int structureHighStartIndex = 0
+var int structureLowStartIndex = 0
+var int structureDirection = 0
+var int fibo1StartIndex = 0
+var int fibo2StartIndex = 0
+var int fibo3StartIndex = 0
+var int fibo4StartIndex = 0
+var int fibo5StartIndex = 0
+
+// Line variable
+var line structureHighLine = na
+var line structureLowLine = na
+var line fibo1Line = na
+var line fibo2Line = na
+var line fibo3Line = na
+var line fibo4Line = na
+var line fibo5Line = na
+
+// Label variable
+var label fibo1Label = na
+var label fibo2Label = na
+var label fibo3Label = na
+var label fibo4Label = na
+var label fibo5Label = na
+
+var bool isBOSAlert = false
+var bool isCHOCHAlert = false
+
+// ZigZag variables
+var float lastZigZagPrice = na
+var int lastZigZagBar = na
+var bool lastZigZagWasHigh = false
+var bool hasFirstZigZagPoint = false
+var array<line> zigzagLines = array.new_line(0)
+
+// ==========================================================================================
+//                              FAIR VALUE GAP FINDER PROCESSING
+// ==========================================================================================
+
+isBullishFVG = high[3] < low[1]
+isBearishFVG = low[3] > high[1]
+
+if(isBullishFVG and isFvgToShow)
+    box _box = box.new(left=bar_index - 2, top=low[1], right=bar_index[1], bottom=high[3], border_style=line.style_solid, border_width=1, bgcolor=bullishFvgColor, border_color=color.new(color.green, 100))
+    label _label = label.new(math.ceil((_box.get_left() + _box.get_right()) / 2), _box.get_top() - (_box.get_top() - _box.get_bottom()) / 2, text = "FVG", style = label.style_none, textcolor = color.white)
+    array.push(fvgBoxes, _box)
+    array.push(fvgTypes, true)
+    array.push(isFvgMitigated, false)
+    array.push(fvgLabels, _label)
+    if(array.size(fvgBoxes) > fvgHistoryNbr + 1)
+        box.delete(array.get(fvgBoxes, 0))
+        label.delete(array.get(fvgLabels, 0))
+        array.remove(fvgLabels, 0)
+        array.remove(fvgBoxes, 0)
+        array.remove(fvgTypes, 0)
+        array.remove(isFvgMitigated, 0)
+
+if(isBearishFVG and isFvgToShow)
+    box _box = box.new(left=bar_index - 2, top=low[3], right=bar_index[1], bottom=high[1], border_style=line.style_solid, border_width=1, bgcolor=bearishFvgColor, border_color=color.new(color.red, 100))
+    label _label = label.new(math.ceil((_box.get_left() + _box.get_right()) / 2), _box.get_top() - (_box.get_top() - _box.get_bottom()) / 2, text = "FVG", style = label.style_none, textcolor = color.white)
+    array.push(fvgBoxes, _box)
+    array.push(fvgTypes, false)
+    array.push(isFvgMitigated, false)
+    array.push(fvgLabels, _label)
+    if(array.size(fvgBoxes) > fvgHistoryNbr + 1)
+        box.delete(array.get(fvgBoxes, 0))
+        label.delete(array.get(fvgLabels, 0))
+        array.remove(fvgLabels, 0)
+        array.remove(fvgBoxes, 0)
+        array.remove(fvgTypes, 0)
+        array.remove(isFvgMitigated, 0)
+
+FVGDraw(fvgBoxes, fvgTypes, isFvgMitigated, fvgLabels)
+
+// ==========================================================================================
+//                                   STRUCTURES PROCESSING
+// ==========================================================================================
+
+if(bar_index == 0)
+    structureHighStartIndex := bar_index
+    structureLowStartIndex  := bar_index
+    structureHigh := high
+    structureLow  := low
+
+highest = bar_index > zigzagLookback ? ta.highest(zigzagLookback) : ta.highest(bar_index + 1)
+highestBar = bar_index > zigzagLookback ? ta.highestbars(high, zigzagLookback) : ta.highestbars(high, bar_index + 1)
+lowest = bar_index > zigzagLookback ? ta.lowest(zigzagLookback) : ta.lowest(bar_index + 1)
+lowestBar = bar_index > zigzagLookback ? ta.lowestbars(low, zigzagLookback) : ta.lowestbars(low, bar_index + 1)
+structureMaxBar = bar_index + get_structure_highest_bar(zigzagLookback)
+structureMinBar = bar_index + get_structure_lowest_bar(zigzagLookback)
+lowStructBreakPrice = isStructBodyCandleBreak ? close : low
+highStructBreakPrice = isStructBodyCandleBreak ? close : high
+isStuctureLowBroken = ((lowStructBreakPrice < structureLow and lowStructBreakPrice[1] >= structureLow and lowStructBreakPrice[2] >= structureLow and lowStructBreakPrice[3] >= structureLow and bar_index[1] >  structureLowStartIndex and bar_index[2] >  structureLowStartIndex and bar_index[3] >  structureLowStartIndex) or (structureDirection == 2 and lowStructBreakPrice < structureLow))
+isStructureHighBroken = ((highStructBreakPrice > structureHigh and highStructBreakPrice[1] <= structureHigh and highStructBreakPrice[2] <= structureHigh and highStructBreakPrice[3] <= structureHigh and bar_index[1] >  structureHighStartIndex and bar_index[2] >  structureHighStartIndex and bar_index[3] >  structureHighStartIndex) or (structureDirection == 1 and highStructBreakPrice > structureHigh))
+
+if(isStuctureLowBroken)
+    if(array.size(structureLines) >= structHistoryNbr)
+        line.delete(array.get(structureLines, 0))
+        label.delete(array.get(structureLabels, 0))
+        array.remove(structureLabels, 0)
+        array.remove(structureLines, 0)
+    if(structureDirection == 1)
+        array.push(structureLines, line.new(structureLowStartIndex, structureLow, bar_index, structureLow, xloc=xloc.bar_index, extend=extend.none, color=bearishBosColor, style=bosLineStyle, width=bosLineWidth))
+        array.push(structureLabels, label.new((bar_index + structureLowStartIndex) / 2, structureLow, text="BOS", style=label.style_none, textcolor=bearishBosColor))
+        isBOSAlert := true
+    else
+        array.push(structureLines, line.new(structureLowStartIndex, structureLow, bar_index, structureLow, xloc=xloc.bar_index, extend=extend.none, color=bearishChochColor, style=chochLineStyle, width=chochLineWidth))
+        array.push(structureLabels, label.new((bar_index + structureLowStartIndex) / 2, structureLow, text="CHoCH", style=label.style_none, textcolor=bearishChochColor))
+        isCHOCHAlert := true
+    structureDirection := 1
+    structureHighStartIndex := structureMaxBar
+    structureLowStartIndex  := bar_index
+    structureHigh :=  high[bar_index - structureHighStartIndex]
+    structureLow  := low
+
+else if(isStructureHighBroken)
+    if(array.size(structureLines) >= structHistoryNbr)
+        line.delete(array.get(structureLines, 0))
+        label.delete(array.get(structureLabels, 0))
+        array.remove(structureLabels, 0)
+        array.remove(structureLines, 0)
+    if(structureDirection == 2)
+        array.push(structureLines, line.new(structureHighStartIndex, structureHigh, bar_index, structureHigh, xloc=xloc.bar_index, extend=extend.none, color=bullishBosColor, style=bosLineStyle, width=bosLineWidth))
+        array.push(structureLabels, label.new((bar_index + structureHighStartIndex) / 2, structureHigh, text="BOS", style=label.style_none, textcolor=bullishBosColor))
+        isBOSAlert := true
+    else
+        array.push(structureLines, line.new(structureHighStartIndex, structureHigh, bar_index, structureHigh, xloc=xloc.bar_index, extend=extend.none, color=bullishChochColor, style=chochLineStyle, width=chochLineWidth))
+        array.push(structureLabels, label.new((bar_index + structureHighStartIndex) / 2, structureHigh, text="CHoCH", style=label.style_none, textcolor=bullishChochColor))
+        isCHOCHAlert := true
+    structureDirection := 2
+    structureHighStartIndex := bar_index
+    structureLowStartIndex  := structureMinBar
+    structureHigh := high
+    structureLow  := low[bar_index - structureLowStartIndex]
+else
+    isBOSAlert := false
+    isCHOCHAlert := false
+    if(high > structureHigh and (structureDirection == 0 or structureDirection == 2))
+        if(not(isStructBodyCandleBreak) or not(isStructBodyCandleBreak and bar_index[1] > structureHighStartIndex and bar_index[2] >  structureHighStartIndex and bar_index[3] > structureHighStartIndex))
+            structureHigh := high
+            structureHighStartIndex := bar_index
+    else if(low < structureLow and (structureDirection == 0 or structureDirection == 1))
+        if(not(isStructBodyCandleBreak) or not(isStructBodyCandleBreak and bar_index[1] > structureLowStartIndex and bar_index[2] > structureLowStartIndex and bar_index[3] > structureLowStartIndex))
+            structureLow := low
+            structureLowStartIndex := bar_index
+
+structureRange = math.abs(structureHigh - structureLow)
+
+if(isCurrentStructToShow)
+    line.delete(structureHighLine)
+    label.delete(na)
+    line.delete(structureLowLine)
+    label.delete(na)
+    structureHighLine := line.new(structureHighStartIndex, structureHigh, bar_index, structureHigh, xloc.bar_index, color=currentStructColor, style = currentStructLineStyle, width = currentStructLineWidth)
+    structureLowLine := line.new(structureLowStartIndex, structureLow, bar_index, structureLow, xloc.bar_index, color=currentStructColor, style = currentStructLineStyle, width = currentStructLineWidth)
+
+    if(isFibo1ToShow)
+        line.delete(fibo1Line)
+        label.delete(fibo1Label)
+        fibo1Price := structureDirection == 1 ? structureHigh - (structureRange - structureRange * fibo1Value) : structureLow + (structureRange - structureRange * fibo1Value)
+        fibo1StartIndex := structureDirection == 1 ? structureHighStartIndex : structureLowStartIndex
+        fibo1Line := line.new(fibo1StartIndex, fibo1Price, bar_index, fibo1Price, xloc.bar_index, color = fibo1Color, style = fibo1Style, width = fibo1LineWidth)
+        fibo1Label := label.new(bar_index + 20, fibo1Price, text = str.tostring(fibo1Value) + "(" + str.tostring(fibo1Price) + ")", style = label.style_none, textcolor = fibo1Color)
+
+    if(isFibo2ToShow)
+        line.delete(fibo2Line)
+        label.delete(fibo2Label)
+        fibo2Price := structureDirection == 1 ? structureHigh - (structureRange - structureRange * fibo2Value) : structureLow + (structureRange - structureRange * fibo2Value)
+        fibo2StartIndex := structureDirection == 1 ? structureHighStartIndex : structureLowStartIndex
+        fibo2Line := line.new(fibo2StartIndex, fibo2Price, bar_index, fibo2Price, xloc.bar_index, color = fibo2Color, style = fibo2Style, width = fibo2LineWidth)
+        fibo2Label := label.new(bar_index + 20, fibo2Price, text = str.tostring(fibo2Value) + "(" + str.tostring(fibo2Price) + ")", style = label.style_none, textcolor = fibo2Color)
+
+    if(isFibo3ToShow)
+        line.delete(fibo3Line)
+        label.delete(fibo3Label)
+        fibo3Price := structureDirection == 1 ? structureHigh - (structureRange - structureRange * fibo3Value) : structureLow + (structureRange - structureRange * fibo3Value)
+        fibo3StartIndex := structureDirection == 1 ? structureHighStartIndex : structureLowStartIndex
+        fibo3Line := line.new(fibo3StartIndex, fibo3Price, bar_index, fibo3Price, xloc.bar_index, color = fibo3Color, style = fibo3Style, width = fibo3LineWidth)
+        fibo3Label := label.new(bar_index + 20, fibo3Price, text = str.tostring(fibo3Value) + "(" + str.tostring(fibo3Price) + ")", style = label.style_none, textcolor = fibo3Color)
+
+    if(isFibo4ToShow)
+        line.delete(fibo4Line)
+        label.delete(fibo4Label)
+        fibo4Price := structureDirection == 1 ? structureHigh - (structureRange - structureRange * fibo4Value) : structureLow + (structureRange - structureRange * fibo4Value)
+        fibo4StartIndex := structureDirection == 1 ? structureHighStartIndex : structureLowStartIndex
+        fibo4Line := line.new(fibo4StartIndex, fibo4Price, bar_index, fibo4Price, xloc.bar_index, color = fibo4Color, style = fibo4Style, width = fibo4LineWidth)
+        fibo4Label := label.new(bar_index + 20, fibo4Price, text = str.tostring(fibo4Value) + "(" + str.tostring(fibo4Price) + ")", style = label.style_none, textcolor = fibo4Color)
+
+    if(isFibo5ToShow)
+        line.delete(fibo5Line)
+        label.delete(fibo5Label)
+        fibo5Price := structureDirection == 1 ? structureHigh - (structureRange - structureRange * fibo5Value) : structureLow + (structureRange - structureRange * fibo5Value)
+        fibo5StartIndex := structureDirection == 1 ? structureHighStartIndex : structureLowStartIndex
+        fibo5Line := line.new(fibo5StartIndex, fibo5Price, bar_index, fibo5Price, xloc.bar_index, color = fibo5Color, style = fibo5Style, width = fibo5LineWidth)
+        fibo5Label := label.new(bar_index + 20, fibo5Price, text = str.tostring(fibo5Value) + "(" + str.tostring(fibo5Price) + ")", style = label.style_none, textcolor = fibo5Color)
+
+alertcondition(condition = isBOSAlert , title = "BOS", message = "BOS")
+alertcondition(condition = isCHOCHAlert , title = "CHOCH",message = "CHOCH")
+
+// ==========================================================================================
+//                                   ZIGZAG DRAWING
+// ==========================================================================================
+
+if showZigZag
+    // Detectar pivote high confirmado
+    pivotHigh = ta.pivothigh(high, zigzagLookback, zigzagLookback)
+    pivotLow = ta.pivotlow(low, zigzagLookback, zigzagLookback)
+
+    // Si se confirma un pivot high
+    if not na(pivotHigh)
+        currentPrice = pivotHigh
+        currentBar = bar_index - zigzagLookback
+
+        // Si hay un pivot anterior
+        if hasFirstZigZagPoint
+            if not lastZigZagWasHigh
+                // Cambio de dirección: Low → High, dibujar línea nueva
+                newLine = line.new(lastZigZagBar, lastZigZagPrice, currentBar, currentPrice, color=zigzagColor, width=zigzagWidth)
+                array.push(zigzagLines, newLine)
+
+                // Limitar cantidad de líneas
+                if array.size(zigzagLines) > 100
+                    line.delete(array.shift(zigzagLines))
+            else
+                // Mismo tipo (High → High más alto/bajo), actualizar última línea
+                if array.size(zigzagLines) > 0
+                    lastLine = array.get(zigzagLines, array.size(zigzagLines) - 1)
+                    line.set_xy2(lastLine, currentBar, currentPrice)
+
+        // Actualizar último pivot
+        lastZigZagPrice := currentPrice
+        lastZigZagBar := currentBar
+        lastZigZagWasHigh := true
+        hasFirstZigZagPoint := true
+
+    // Si se confirma un pivot low
+    if not na(pivotLow)
+        currentPrice = pivotLow
+        currentBar = bar_index - zigzagLookback
+
+        // Si hay un pivot anterior
+        if hasFirstZigZagPoint
+            if lastZigZagWasHigh
+                // Cambio de dirección: High → Low, dibujar línea nueva
+                newLine = line.new(lastZigZagBar, lastZigZagPrice, currentBar, currentPrice, color=zigzagColor, width=zigzagWidth)
+                array.push(zigzagLines, newLine)
+
+                // Limitar cantidad de líneas
+                if array.size(zigzagLines) > 100
+                    line.delete(array.shift(zigzagLines))
+            else
+                // Mismo tipo (Low → Low más alto/bajo), actualizar última línea
+                if array.size(zigzagLines) > 0
+                    lastLine = array.get(zigzagLines, array.size(zigzagLines) - 1)
+                    line.set_xy2(lastLine, currentBar, currentPrice)
+
+        // Actualizar último pivot
+        lastZigZagPrice := currentPrice
+        lastZigZagBar := currentBar
+        lastZigZagWasHigh := false
+        hasFirstZigZagPoint := true
+
+// ==========================================================================================
+//                                   STRATEGY LOGIC
+// ==========================================================================================
+
+// Variables para tracking de señales
+var bool choch_bullish = false
+var bool choch_bearish = false
+var bool bos_bullish = false
+var bool bos_bearish = false
+
+// Determinar señales actuales
+choch_bullish := false
+choch_bearish := false
+bos_bullish := false
+bos_bearish := false
+
+// CHoCH = cambio de dirección
+if isStructureHighBroken and structureDirection == 2
+    if structureDirection[1] != 2
+        choch_bullish := true
+
+if isStuctureLowBroken and structureDirection == 1
+    if structureDirection[1] != 1
+        choch_bearish := true
+
+// BOS = continuación en misma dirección
+if isStructureHighBroken and structureDirection == 2
+    if structureDirection[1] == 2
+        bos_bullish := true
+
+if isStuctureLowBroken and structureDirection == 1
+    if structureDirection[1] == 1
+        bos_bearish := true
+
+// Estados de confirmación
+var bool waiting_long_confirmation = false
+var bool waiting_short_confirmation = false
+
+// Detectar CHoCH
+if choch_bullish
+    waiting_long_confirmation := true
+    waiting_short_confirmation := false
+
+if choch_bearish
+    waiting_short_confirmation := true
+    waiting_long_confirmation := false
+
+// Entry signals
+var bool long_entry = false
+var bool short_entry = false
+
+long_entry := false
+short_entry := false
+
+// LONG: CHoCH bullish confirmado por BOS bullish
+if waiting_long_confirmation and bos_bullish
+    long_entry := true
+    waiting_long_confirmation := false
+
+// SHORT: CHoCH bearish confirmado por BOS bearish
+if waiting_short_confirmation and bos_bearish
+    short_entry := true
+    waiting_short_confirmation := false
+
+// Invalidación
+if waiting_long_confirmation and choch_bearish
+    waiting_long_confirmation := false
+
+if waiting_short_confirmation and choch_bullish
+    waiting_short_confirmation := false
+
+// Exit signals
+var bool long_exit = false
+var bool short_exit = false
+
+long_exit := false
+short_exit := false
+
+if strategy.position_size > 0 and choch_bearish
+    long_exit := true
+
+if strategy.position_size < 0 and choch_bullish
+    short_exit := true
+
+// STRATEGY EXECUTION
+if long_entry
+    strategy.entry("Long", strategy.long)
+
+if short_entry
+    strategy.entry("Short", strategy.short)
+
+if long_exit
+    strategy.close("Long", comment="CHoCH Bearish")
+
+if short_exit
+    strategy.close("Short", comment="CHoCH Bullish")
+
+// Stop loss
+strategy.exit("SL Long", "Long", stop=strategy.position_avg_price * (1 + stoploss_pct/100))
+strategy.exit("SL Short", "Short", stop=strategy.position_avg_price * (1 - stoploss_pct/100))
+
+// VISUAL ELEMENTS
+bgcolor(showBackgroundStates and waiting_long_confirmation ? color.new(color.lime, 95) : na)
+bgcolor(showBackgroundStates and waiting_short_confirmation ? color.new(color.orange, 95) : na)
+
+plotshape(showEntrySignals and long_entry, "Long Entry", shape.labelup, location.belowbar, color.new(color.lime, 0), size=size.large, text="LONG\n(CHoCH+BOS)", textcolor=color.white)
+plotshape(showEntrySignals and short_entry, "Short Entry", shape.labeldown, location.abovebar, color.new(color.red, 0), size=size.large, text="SHORT\n(CHoCH+BOS)", textcolor=color.white)
+plotshape(showExitSignals and long_exit, "Long Exit", shape.xcross, location.abovebar, color.new(color.red, 0), size=size.small, text="EXIT")
+plotshape(showExitSignals and short_exit, "Short Exit", shape.xcross, location.belowbar, color.new(color.lime, 0), size=size.small, text="EXIT")
+
+// INFORMATION TABLE
+var table info_table = table.new(position.top_right, 2, 5, border_width=1, border_color=color.gray, frame_width=1, frame_color=color.gray)
+
+if barstate.islast
+    table.cell(info_table, 0, 0, "Status", text_color=color.white, bgcolor=color.gray)
+    string status_text = "NEUTRAL"
+    color status_color = color.gray
+    if strategy.position_size > 0
+        status_text := "IN LONG"
+        status_color := color.green
+    else if strategy.position_size < 0
+        status_text := "IN SHORT"
+        status_color := color.red
+    else if waiting_long_confirmation
+        status_text := "WAIT LONG BOS"
+        status_color := color.lime
+    else if waiting_short_confirmation
+        status_text := "WAIT SHORT BOS"
+        status_color := color.orange
+    table.cell(info_table, 1, 0, status_text, text_color=color.white, bgcolor=status_color)
+
+    table.cell(info_table, 0, 1, "Direction", text_color=color.white, bgcolor=color.gray)
+    string dir_text = structureDirection == 2 ? "BULLISH" : structureDirection == 1 ? "BEARISH" : "NEUTRAL"
+    color dir_color = structureDirection == 2 ? color.green : structureDirection == 1 ? color.red : color.gray
+    table.cell(info_table, 1, 1, dir_text, text_color=color.white, bgcolor=dir_color)
+
+    table.cell(info_table, 0, 2, "Structure High", text_color=color.white, bgcolor=color.gray)
+    table.cell(info_table, 1, 2, str.tostring(structureHigh, "#.####"), text_color=color.red, bgcolor=color.new(color.gray, 70))
+
+    table.cell(info_table, 0, 3, "Structure Low", text_color=color.white, bgcolor=color.gray)
+    table.cell(info_table, 1, 3, str.tostring(structureLow, "#.####"), text_color=color.green, bgcolor=color.new(color.gray, 70))
+
+    table.cell(info_table, 0, 4, "Stop Loss", text_color=color.white, bgcolor=color.gray)
+    table.cell(info_table, 1, 4, str.tostring(stoploss_pct) + "%", text_color=color.red, bgcolor=color.new(color.gray, 70))
+
+plot(na)

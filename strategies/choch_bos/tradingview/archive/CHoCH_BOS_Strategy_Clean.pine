@@ -1,0 +1,356 @@
+//@version=6
+// Basado en "SMC Structures and FVG" por LudoGH68
+// Adaptado para strategy con lógica de confirmación CHoCH → BOS
+
+strategy("CHoCH/BOS Strategy - Clean SMC",
+     shorttitle="CHoCH/BOS Clean",
+     overlay=true,
+     initial_capital=12,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100,
+     commission_type=strategy.commission.percent,
+     commission_value=0.075,
+     pyramiding=0)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+
+// Estructura
+lookback = input.int(10, "Structure Lookback", minval=5, maxval=50,
+     tooltip="Periodo de lookback para detectar estructura")
+isStructBodyCandleBreak = input.bool(true, "Break with candle's body",
+     tooltip="Usar cierre de vela en lugar de high/low para confirmar ruptura")
+
+// Visualización
+showCurrentStruct = input.bool(true, "Show Current Structure")
+showBOS = input.bool(true, "Show BOS")
+showCHoCH = input.bool(true, "Show CHoCH")
+structHistoryNbr = input.int(10, "Number of breaks to show", minval=1, maxval=50)
+
+// Colores
+bullishBosColor = input(color.silver, "Bullish BOS Color")
+bearishBosColor = input(color.silver, "Bearish BOS Color")
+bullishChochColor = input(color.yellow, "Bullish CHoCH Color")
+bearishChochColor = input(color.yellow, "Bearish CHoCH Color")
+currentStructColor = input(color.blue, "Current Structure Color")
+
+// Risk Management
+stoploss_pct = input.float(-5.8, "Stop Loss %", minval=-10, maxval=-1, step=0.1)
+
+// ============================================================================
+// HELPER FUNCTIONS (Del indicador SMC original)
+// ============================================================================
+
+get_structure_highest_bar(lookback_period) =>
+    var int idx = 0
+    maxBar = bar_index > lookback_period ? ta.highestbars(high, lookback_period) : ta.highestbars(high, bar_index + 1)
+
+    for i = 0 to lookback_period - 1 by 1
+        if high[i+1] > high[i+2] and high[i] <= high[i+1] and ((i+1) * -1) >= maxBar
+            idx := (i+1) * -1
+
+    idx := idx == 0 ? maxBar : idx
+
+get_structure_lowest_bar(lookback_period) =>
+    var int idx = 0
+    minBar = bar_index > lookback_period ? ta.lowestbars(low, lookback_period) : ta.lowestbars(low, bar_index + 1)
+
+    for i = 0 to lookback_period - 1 by 1
+        if low[i+1] < low[i+2] and low[i] >= low[i+1] and ((i+1) * -1) >= minBar
+            idx := (i+1) * -1
+
+    idx := idx == 0 ? minBar : idx
+
+// ============================================================================
+// STRUCTURE DETECTION
+// ============================================================================
+
+// Variables de precio y estructura
+var float structureHigh = 0.0
+var float structureLow = 0.0
+var int structureHighStartIndex = 0
+var int structureLowStartIndex = 0
+var int structureDirection = 0  // 0=neutral, 1=bajista, 2=alcista
+
+// Variables para tracking
+var array<line> structureLines = array.new_line(0)
+var array<label> structureLabels = array.new_label(0)
+
+// Líneas de estructura actual
+var line structureHighLine = na
+var line structureLowLine = na
+
+// Señales para alerts y strategy
+var bool choch_bullish = false
+var bool choch_bearish = false
+var bool bos_bullish = false
+var bool bos_bearish = false
+
+// Initialize valores en barra 0
+if bar_index == 0
+    structureHighStartIndex := bar_index
+    structureLowStartIndex := bar_index
+    structureHigh := high
+    structureLow := low
+
+// Calcular max y min bars
+structureMaxBar = bar_index + get_structure_highest_bar(lookback)
+structureMinBar = bar_index + get_structure_lowest_bar(lookback)
+
+// Precio de ruptura (body o wick)
+lowStructBreakPrice = isStructBodyCandleBreak ? close : low
+highStructBreakPrice = isStructBodyCandleBreak ? close : high
+
+// Detectar rupturas (lógica del indicador SMC original)
+isStuctureLowBroken = ((lowStructBreakPrice < structureLow and lowStructBreakPrice[1] >= structureLow and lowStructBreakPrice[2] >= structureLow and lowStructBreakPrice[3] >= structureLow and bar_index[1] > structureLowStartIndex and bar_index[2] > structureLowStartIndex and bar_index[3] > structureLowStartIndex) or (structureDirection == 2 and lowStructBreakPrice < structureLow))
+
+isStructureHighBroken = ((highStructBreakPrice > structureHigh and highStructBreakPrice[1] <= structureHigh and highStructBreakPrice[2] <= structureHigh and highStructBreakPrice[3] <= structureHigh and bar_index[1] > structureHighStartIndex and bar_index[2] > structureHighStartIndex and bar_index[3] > structureHighStartIndex) or (structureDirection == 1 and highStructBreakPrice > structureHigh))
+
+// Reset señales
+choch_bullish := false
+choch_bearish := false
+bos_bullish := false
+bos_bearish := false
+
+// ============================================================================
+// PROCESAMIENTO DE RUPTURAS
+// ============================================================================
+
+// RUPTURA DE LOW (Bearish)
+if isStuctureLowBroken
+
+    // Limitar historial
+    if array.size(structureLines) >= structHistoryNbr
+        line.delete(array.get(structureLines, 0))
+        label.delete(array.get(structureLabels, 0))
+        array.remove(structureLines, 0)
+        array.remove(structureLabels, 0)
+
+    // BOS Bearish: estructura ya era bajista (direction == 1)
+    if structureDirection == 1 and showBOS
+        array.push(structureLines, line.new(structureLowStartIndex, structureLow, bar_index, structureLow,
+                   color=bearishBosColor, style=line.style_solid, width=1))
+        array.push(structureLabels, label.new((bar_index + structureLowStartIndex) / 2, structureLow,
+                   "BOS", style=label.style_none, textcolor=bearishBosColor))
+        bos_bearish := true
+
+    // CHoCH Bearish: estructura era alcista o neutral (direction != 1)
+    else if showCHoCH
+        array.push(structureLines, line.new(structureLowStartIndex, structureLow, bar_index, structureLow,
+                   color=bearishChochColor, style=line.style_solid, width=2))
+        array.push(structureLabels, label.new((bar_index + structureLowStartIndex) / 2, structureLow,
+                   "CHoCH", style=label.style_none, textcolor=bearishChochColor))
+        choch_bearish := true
+
+    // Actualizar estructura
+    structureDirection := 1
+    structureHighStartIndex := structureMaxBar
+    structureLowStartIndex := bar_index
+    structureHigh := high[bar_index - structureHighStartIndex]
+    structureLow := low
+
+// RUPTURA DE HIGH (Bullish)
+else if isStructureHighBroken
+
+    // Limitar historial
+    if array.size(structureLines) >= structHistoryNbr
+        line.delete(array.get(structureLines, 0))
+        label.delete(array.get(structureLabels, 0))
+        array.remove(structureLines, 0)
+        array.remove(structureLabels, 0)
+
+    // BOS Bullish: estructura ya era alcista (direction == 2)
+    if structureDirection == 2 and showBOS
+        array.push(structureLines, line.new(structureHighStartIndex, structureHigh, bar_index, structureHigh,
+                   color=bullishBosColor, style=line.style_solid, width=1))
+        array.push(structureLabels, label.new((bar_index + structureHighStartIndex) / 2, structureHigh,
+                   "BOS", style=label.style_none, textcolor=bullishBosColor))
+        bos_bullish := true
+
+    // CHoCH Bullish: estructura era bajista o neutral (direction != 2)
+    else if showCHoCH
+        array.push(structureLines, line.new(structureHighStartIndex, structureHigh, bar_index, structureHigh,
+                   color=bullishChochColor, style=line.style_solid, width=2))
+        array.push(structureLabels, label.new((bar_index + structureHighStartIndex) / 2, structureHigh,
+                   "CHoCH", style=label.style_none, textcolor=bullishChochColor))
+        choch_bullish := true
+
+    // Actualizar estructura
+    structureDirection := 2
+    structureHighStartIndex := bar_index
+    structureLowStartIndex := structureMinBar
+    structureHigh := high
+    structureLow := low[bar_index - structureLowStartIndex]
+
+// Actualizar estructura actual si no hay ruptura
+else
+    if high > structureHigh and (structureDirection == 0 or structureDirection == 2)
+        if (not isStructBodyCandleBreak or not (isStructBodyCandleBreak and bar_index[1] > structureHighStartIndex and bar_index[2] > structureHighStartIndex and bar_index[3] > structureHighStartIndex))
+            structureHigh := high
+            structureHighStartIndex := bar_index
+    else if low < structureLow and (structureDirection == 0 or structureDirection == 1)
+        if (not isStructBodyCandleBreak or not (isStructBodyCandleBreak and bar_index[1] > structureLowStartIndex and bar_index[2] > structureLowStartIndex and bar_index[3] > structureLowStartIndex))
+            structureLow := low
+            structureLowStartIndex := bar_index
+
+// Mostrar estructura actual
+if showCurrentStruct
+    line.delete(structureHighLine)
+    line.delete(structureLowLine)
+    structureHighLine := line.new(structureHighStartIndex, structureHigh, bar_index, structureHigh,
+                         color=currentStructColor, style=line.style_solid, width=1)
+    structureLowLine := line.new(structureLowStartIndex, structureLow, bar_index, structureLow,
+                        color=currentStructColor, style=line.style_solid, width=1)
+
+// ============================================================================
+// STRATEGY LOGIC: CHoCH → BOS → ENTRY
+// ============================================================================
+
+// Estados de confirmación
+var bool waiting_long_confirmation = false
+var bool waiting_short_confirmation = false
+
+// Detectar CHoCH
+if choch_bullish
+    waiting_long_confirmation := true
+    waiting_short_confirmation := false
+
+if choch_bearish
+    waiting_short_confirmation := true
+    waiting_long_confirmation := false
+
+// Entry signals
+var bool long_entry = false
+var bool short_entry = false
+
+long_entry := false
+short_entry := false
+
+// LONG: CHoCH bullish confirmado por BOS bullish
+if waiting_long_confirmation and bos_bullish
+    long_entry := true
+    waiting_long_confirmation := false
+
+// SHORT: CHoCH bearish confirmado por BOS bearish
+if waiting_short_confirmation and bos_bearish
+    short_entry := true
+    waiting_short_confirmation := false
+
+// Invalidación
+if waiting_long_confirmation and choch_bearish
+    waiting_long_confirmation := false
+
+if waiting_short_confirmation and choch_bullish
+    waiting_short_confirmation := false
+
+// Exit signals
+var bool long_exit = false
+var bool short_exit = false
+
+long_exit := false
+short_exit := false
+
+if strategy.position_size > 0 and choch_bearish
+    long_exit := true
+
+if strategy.position_size < 0 and choch_bullish
+    short_exit := true
+
+// ============================================================================
+// STRATEGY EXECUTION
+// ============================================================================
+
+if long_entry
+    strategy.entry("Long", strategy.long)
+
+if short_entry
+    strategy.entry("Short", strategy.short)
+
+if long_exit
+    strategy.close("Long", comment="CHoCH Bearish")
+
+if short_exit
+    strategy.close("Short", comment="CHoCH Bullish")
+
+// Stop loss
+strategy.exit("SL Long", "Long", stop=strategy.position_avg_price * (1 + stoploss_pct/100))
+strategy.exit("SL Short", "Short", stop=strategy.position_avg_price * (1 - stoploss_pct/100))
+
+// ============================================================================
+// VISUAL ELEMENTS
+// ============================================================================
+
+// Background para estados de espera
+bgcolor(waiting_long_confirmation ? color.new(color.lime, 95) : na)
+bgcolor(waiting_short_confirmation ? color.new(color.orange, 95) : na)
+
+// Entry/Exit labels
+plotshape(long_entry, "Long Entry", shape.labelup, location.belowbar,
+          color.new(color.lime, 0), size=size.large, text="LONG\n(CHoCH+BOS)", textcolor=color.white)
+plotshape(short_entry, "Short Entry", shape.labeldown, location.abovebar,
+          color.new(color.red, 0), size=size.large, text="SHORT\n(CHoCH+BOS)", textcolor=color.white)
+plotshape(long_exit, "Long Exit", shape.xcross, location.abovebar,
+          color.new(color.red, 0), size=size.small, text="EXIT")
+plotshape(short_exit, "Short Exit", shape.xcross, location.belowbar,
+          color.new(color.lime, 0), size=size.small, text="EXIT")
+
+// ============================================================================
+// INFORMATION TABLE
+// ============================================================================
+
+var table info_table = table.new(position.top_right, 2, 5,
+     border_width=1, border_color=color.gray, frame_width=1, frame_color=color.gray)
+
+if barstate.islast
+    table.cell(info_table, 0, 0, "Status", text_color=color.white, bgcolor=color.gray)
+
+    string status_text = "NEUTRAL"
+    color status_color = color.gray
+
+    if strategy.position_size > 0
+        status_text := "IN LONG"
+        status_color := color.green
+    else if strategy.position_size < 0
+        status_text := "IN SHORT"
+        status_color := color.red
+    else if waiting_long_confirmation
+        status_text := "WAIT LONG BOS"
+        status_color := color.lime
+    else if waiting_short_confirmation
+        status_text := "WAIT SHORT BOS"
+        status_color := color.orange
+
+    table.cell(info_table, 1, 0, status_text, text_color=color.white, bgcolor=status_color)
+
+    table.cell(info_table, 0, 1, "Direction", text_color=color.white, bgcolor=color.gray)
+    string dir_text = structureDirection == 2 ? "BULLISH" :
+                      structureDirection == 1 ? "BEARISH" : "NEUTRAL"
+    color dir_color = structureDirection == 2 ? color.green :
+                      structureDirection == 1 ? color.red : color.gray
+    table.cell(info_table, 1, 1, dir_text, text_color=color.white, bgcolor=dir_color)
+
+    table.cell(info_table, 0, 2, "Structure High", text_color=color.white, bgcolor=color.gray)
+    table.cell(info_table, 1, 2, str.tostring(structureHigh, "#.####"),
+         text_color=color.red, bgcolor=color.new(color.gray, 70))
+
+    table.cell(info_table, 0, 3, "Structure Low", text_color=color.white, bgcolor=color.gray)
+    table.cell(info_table, 1, 3, str.tostring(structureLow, "#.####"),
+         text_color=color.green, bgcolor=color.new(color.gray, 70))
+
+    table.cell(info_table, 0, 4, "Lookback", text_color=color.white, bgcolor=color.gray)
+    table.cell(info_table, 1, 4, str.tostring(lookback) + " bars",
+         text_color=color.white, bgcolor=color.new(color.gray, 70))
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+
+alertcondition(choch_bullish, "CHoCH Bullish", "CHoCH Bullish - prepare for long")
+alertcondition(choch_bearish, "CHoCH Bearish", "CHoCH Bearish - prepare for short")
+alertcondition(bos_bullish, "BOS Bullish", "BOS Bullish - trend continuation")
+alertcondition(bos_bearish, "BOS Bearish", "BOS Bearish - trend continuation")
+alertcondition(long_entry, "Long Entry", "ENTRY LONG: CHoCH + BOS confirmed")
+alertcondition(short_entry, "Short Entry", "ENTRY SHORT: CHoCH + BOS confirmed")
+alertcondition(long_exit, "Long Exit", "EXIT LONG: CHoCH Bearish")
+alertcondition(short_exit, "Short Exit", "EXIT SHORT: CHoCH Bullish")

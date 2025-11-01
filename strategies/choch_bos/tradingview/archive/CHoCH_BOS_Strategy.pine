@@ -1,0 +1,336 @@
+//@version=6
+strategy("CHoCH/BOS Strategy - Correct Implementation",
+     shorttitle="CHoCH/BOS v2",
+     overlay=true,
+     initial_capital=12,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100,
+     commission_type=strategy.commission.percent,
+     commission_value=0.075,
+     pyramiding=0)
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+
+// Pivot Detection (ZigZag: 5 back + 5 forward = standard)
+pivot_lookback = input.int(5, "Pivot Lookback", minval=1, maxval=20,
+     tooltip="Velas hacia atrás y adelante para confirmar pivote (estándar: 5)")
+
+// Structure Types
+internal_structure_bars = input.int(5, "Internal Structure (min bars)", minval=3, maxval=20,
+     tooltip="Mínimo de velas para estructura interna")
+swing_structure_bars = input.int(50, "Swing Structure (min bars)", minval=20, maxval=100,
+     tooltip="Mínimo de velas para estructura swing (más confiable)")
+
+// Risk Management
+stoploss_pct = input.float(-5.8, "Stop Loss %", minval=-10, maxval=-1, step=0.1)
+trailing_stop = input.bool(true, "Enable Trailing Stop")
+trailing_stop_positive = input.float(9.9, "Trailing Stop Positive %", minval=0.5, maxval=20, step=0.1)
+trailing_stop_positive_offset = input.float(19.5, "Trailing Stop Offset %", minval=1, maxval=30, step=0.1)
+
+// Visual Settings
+show_pivots = input.bool(true, "Show Pivot Points")
+show_structure = input.bool(true, "Show Structure Lines")
+show_bos = input.bool(true, "Show BOS (small breaks)")
+show_choch = input.bool(true, "Show CHoCH (large breaks)")
+
+// ============================================================================
+// PIVOT DETECTION (ZigZag Standard: 5+5+1)
+// ============================================================================
+
+// Detect swing highs and lows
+pivot_high = ta.pivothigh(high, pivot_lookback, pivot_lookback)
+pivot_low = ta.pivotlow(low, pivot_lookback, pivot_lookback)
+
+// Track last confirmed pivots
+var float last_high = na
+var int last_high_bar = na
+var float last_low = na
+var int last_low_bar = na
+
+// Update pivots when confirmed
+if not na(pivot_high)
+    last_high := pivot_high
+    last_high_bar := bar_index - pivot_lookback
+if not na(pivot_low)
+    last_low := pivot_low
+    last_low_bar := bar_index - pivot_lookback
+
+// ============================================================================
+// TREND DETECTION (Higher Highs/Lower Lows)
+// ============================================================================
+
+var float prev_high = na
+var float prev_low = na
+var int trend = 0  // 1 = alcista, -1 = bajista, 0 = neutral
+
+// Detect Higher Highs / Lower Lows
+var bool is_higher_high = false
+var bool is_lower_low = false
+var bool is_lower_high = false
+var bool is_higher_low = false
+
+if not na(pivot_high) and not na(prev_high)
+    is_higher_high := pivot_high > prev_high
+    is_lower_high := pivot_high < prev_high
+if not na(pivot_low) and not na(prev_low)
+    is_higher_low := pivot_low > prev_low
+    is_lower_low := pivot_low < prev_low
+
+// Update previous pivots
+if not na(pivot_high)
+    prev_high := pivot_high
+if not na(pivot_low)
+    prev_low := pivot_low
+
+// ============================================================================
+// CHoCH AND BOS DETECTION
+// ============================================================================
+
+// Variables to track breaks
+var bool choch_bullish = false
+var bool choch_bearish = false
+var bool bos_bullish = false
+var bool bos_bearish = false
+
+// Variables to track structure type
+var int bars_since_last_pivot = 0
+bars_since_last_pivot += 1
+
+if not na(pivot_high) or not na(pivot_low)
+    bars_since_last_pivot := 0
+
+// Reset signals each bar
+choch_bullish := false
+choch_bearish := false
+bos_bullish := false
+bos_bearish := false
+
+// LOGIC: Detect breaks and classify as BOS or CHoCH
+if not na(last_high) and not na(last_low)
+
+    // BULLISH BREAK (precio rompe último high)
+    if close > last_high
+        int bars_in_structure = bar_index - last_high_bar
+
+        // Clasificar como CHoCH o BOS según tamaño de estructura
+        if bars_in_structure >= swing_structure_bars
+            // CHoCH: Estructura grande (50+ velas) - CAMBIO DE CARÁCTER
+            choch_bullish := true
+        else if bars_in_structure >= internal_structure_bars
+            // BOS: Estructura pequeña (5+ velas) - CONTINUACIÓN
+            bos_bullish := true
+
+    // BEARISH BREAK (precio rompe último low)
+    if close < last_low
+        int bars_in_structure = bar_index - last_low_bar
+
+        // Clasificar como CHoCH o BOS según tamaño de estructura
+        if bars_in_structure >= swing_structure_bars
+            // CHoCH: Estructura grande (50+ velas) - CAMBIO DE CARÁCTER
+            choch_bearish := true
+        else if bars_in_structure >= internal_structure_bars
+            // BOS: Estructura pequeña (5+ velas) - CONTINUACIÓN
+            bos_bearish := true
+
+// ============================================================================
+// ENTRY LOGIC: CHoCH → BOS CONFIRMATION (LA REGLA DE ORO)
+// ============================================================================
+
+// Estados para seguimiento de confirmación
+var bool waiting_long_confirmation = false
+var bool waiting_short_confirmation = false
+var int choch_bullish_bar = na
+var int choch_bearish_bar = na
+
+// DETECCIÓN DE CHoCH: Preparar para esperar confirmación
+if choch_bullish
+    waiting_long_confirmation := true
+    waiting_short_confirmation := false
+    choch_bullish_bar := bar_index
+
+if choch_bearish
+    waiting_short_confirmation := true
+    waiting_long_confirmation := false
+    choch_bearish_bar := bar_index
+
+// CONFIRMACIÓN CON BOS: Entry signals
+var bool long_entry = false
+var bool short_entry = false
+
+long_entry := false
+short_entry := false
+
+// LONG ENTRY: CHoCH bullish confirmado por BOS bullish
+if waiting_long_confirmation and bos_bullish
+    long_entry := true
+    waiting_long_confirmation := false
+
+// SHORT ENTRY: CHoCH bearish confirmado por BOS bearish
+if waiting_short_confirmation and bos_bearish
+    short_entry := true
+    waiting_short_confirmation := false
+
+// INVALIDACIÓN: Si aparece CHoCH opuesto, cancelar espera
+if waiting_long_confirmation and choch_bearish
+    waiting_long_confirmation := false
+
+if waiting_short_confirmation and choch_bullish
+    waiting_short_confirmation := false
+
+// ============================================================================
+// EXIT LOGIC: CHoCH OPUESTO
+// ============================================================================
+
+var bool long_exit = false
+var bool short_exit = false
+
+long_exit := false
+short_exit := false
+
+// EXIT LONG: CHoCH bearish mientras en posición long
+if strategy.position_size > 0 and choch_bearish
+    long_exit := true
+
+// EXIT SHORT: CHoCH bullish mientras en posición short
+if strategy.position_size < 0 and choch_bullish
+    short_exit := true
+
+// ============================================================================
+// STRATEGY EXECUTION
+// ============================================================================
+
+// Entry orders
+if long_entry
+    strategy.entry("Long", strategy.long)
+
+if short_entry
+    strategy.entry("Short", strategy.short)
+
+// Exit orders
+if long_exit
+    strategy.close("Long", comment="CHoCH Bearish")
+
+if short_exit
+    strategy.close("Short", comment="CHoCH Bullish")
+
+// Stop loss
+strategy.exit("SL Long", "Long", stop=strategy.position_avg_price * (1 + stoploss_pct/100))
+strategy.exit("SL Short", "Short", stop=strategy.position_avg_price * (1 - stoploss_pct/100))
+
+// ============================================================================
+// VISUAL ELEMENTS
+// ============================================================================
+
+// Plot Pivot Points
+plotshape(show_pivots and not na(pivot_high), "Pivot High", shape.triangledown,
+     location.abovebar, color.new(color.red, 0), size=size.tiny)
+plotshape(show_pivots and not na(pivot_low), "Pivot Low", shape.triangleup,
+     location.belowbar, color.new(color.green, 0), size=size.tiny)
+
+// Plot Structure Lines
+plot(show_structure ? last_high : na, "Last High", color.new(color.red, 70), 2, plot.style_stepline)
+plot(show_structure ? last_low : na, "Last Low", color.new(color.green, 70), 2, plot.style_stepline)
+
+// Plot CHoCH Signals (círculos grandes)
+plotshape(show_choch and choch_bullish, "CHoCH Bullish", shape.circle,
+     location.belowbar, color.new(color.lime, 0), size=size.normal, text="CHoCH↑")
+plotshape(show_choch and choch_bearish, "CHoCH Bearish", shape.circle,
+     location.abovebar, color.new(color.red, 0), size=size.normal, text="CHoCH↓")
+
+// Plot BOS Signals (diamantes pequeños)
+plotshape(show_bos and bos_bullish, "BOS Bullish", shape.diamond,
+     location.belowbar, color.new(color.green, 50), size=size.tiny, text="BOS↑")
+plotshape(show_bos and bos_bearish, "BOS Bearish", shape.diamond,
+     location.abovebar, color.new(color.orange, 50), size=size.tiny, text="BOS↓")
+
+// Plot Waiting for Confirmation
+bgcolor(waiting_long_confirmation ? color.new(color.lime, 95) : na, title="Waiting Long Confirmation")
+bgcolor(waiting_short_confirmation ? color.new(color.orange, 95) : na, title="Waiting Short Confirmation")
+
+// Plot Entry Signals
+plotshape(long_entry, "Long Entry", shape.labelup,
+     location.belowbar, color.new(color.lime, 0), size=size.large,
+     text="LONG\n(CHoCH+BOS)", textcolor=color.white)
+plotshape(short_entry, "Short Entry", shape.labeldown,
+     location.abovebar, color.new(color.red, 0), size=size.large,
+     text="SHORT\n(CHoCH+BOS)", textcolor=color.white)
+
+// Plot Exit Signals
+plotshape(long_exit, "Long Exit", shape.xcross,
+     location.abovebar, color.new(color.red, 0), size=size.small, text="EXIT")
+plotshape(short_exit, "Short Exit", shape.xcross,
+     location.belowbar, color.new(color.lime, 0), size=size.small, text="EXIT")
+
+// ============================================================================
+// INFORMATION TABLE
+// ============================================================================
+
+var table info_table = table.new(position.top_right, 2, 8,
+     border_width=1, border_color=color.gray, frame_width=1, frame_color=color.gray)
+
+if barstate.islast
+    table.cell(info_table, 0, 0, "Status", text_color=color.white, bgcolor=color.gray)
+
+    string status_text = "NEUTRAL"
+    color status_color = color.gray
+
+    if strategy.position_size > 0
+        status_text := "IN LONG"
+        status_color := color.green
+    else if strategy.position_size < 0
+        status_text := "IN SHORT"
+        status_color := color.red
+    else if waiting_long_confirmation
+        status_text := "WAIT LONG BOS"
+        status_color := color.lime
+    else if waiting_short_confirmation
+        status_text := "WAIT SHORT BOS"
+        status_color := color.orange
+
+    table.cell(info_table, 1, 0, status_text, text_color=color.white, bgcolor=status_color)
+
+    table.cell(info_table, 0, 1, "Last High", text_color=color.white, bgcolor=color.gray)
+    table.cell(info_table, 1, 1, str.tostring(last_high, "#.####"),
+         text_color=color.red, bgcolor=color.new(color.gray, 70))
+
+    table.cell(info_table, 0, 2, "Last Low", text_color=color.white, bgcolor=color.gray)
+    table.cell(info_table, 1, 2, str.tostring(last_low, "#.####"),
+         text_color=color.green, bgcolor=color.new(color.gray, 70))
+
+    table.cell(info_table, 0, 3, "Pivot Lookback", text_color=color.white, bgcolor=color.gray)
+    table.cell(info_table, 1, 3, str.tostring(pivot_lookback) + " bars",
+         text_color=color.white, bgcolor=color.new(color.gray, 70))
+
+    table.cell(info_table, 0, 4, "Internal Struct", text_color=color.white, bgcolor=color.gray)
+    table.cell(info_table, 1, 4, str.tostring(internal_structure_bars) + " bars",
+         text_color=color.white, bgcolor=color.new(color.gray, 70))
+
+    table.cell(info_table, 0, 5, "Swing Struct", text_color=color.white, bgcolor=color.gray)
+    table.cell(info_table, 1, 5, str.tostring(swing_structure_bars) + " bars",
+         text_color=color.white, bgcolor=color.new(color.gray, 70))
+
+    table.cell(info_table, 0, 6, "Stop Loss", text_color=color.white, bgcolor=color.gray)
+    table.cell(info_table, 1, 6, str.tostring(stoploss_pct) + "%",
+         text_color=color.red, bgcolor=color.new(color.gray, 70))
+
+    table.cell(info_table, 0, 7, "Position", text_color=color.white, bgcolor=color.gray)
+    string pos_text = strategy.position_size == 0 ? "None" :
+                      strategy.position_size > 0 ? "LONG" : "SHORT"
+    color pos_color = strategy.position_size == 0 ? color.gray :
+                      strategy.position_size > 0 ? color.green : color.red
+    table.cell(info_table, 1, 7, pos_text, text_color=color.white, bgcolor=pos_color)
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+
+alertcondition(choch_bullish, "CHoCH Bullish", "CHoCH Bullish detected - prepare for long")
+alertcondition(choch_bearish, "CHoCH Bearish", "CHoCH Bearish detected - prepare for short")
+alertcondition(bos_bullish, "BOS Bullish", "BOS Bullish - trend continuation up")
+alertcondition(bos_bearish, "BOS Bearish", "BOS Bearish - trend continuation down")
+alertcondition(long_entry, "Long Entry", "ENTRY LONG: CHoCH + BOS confirmed")
+alertcondition(short_entry, "Short Entry", "ENTRY SHORT: CHoCH + BOS confirmed")
+alertcondition(long_exit, "Long Exit", "EXIT LONG: CHoCH Bearish detected")
+alertcondition(short_exit, "Short Exit", "EXIT SHORT: CHoCH Bullish detected")
