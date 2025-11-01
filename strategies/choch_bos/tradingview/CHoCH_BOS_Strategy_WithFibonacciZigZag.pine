@@ -509,12 +509,15 @@ if st_enabled and st_use_as_confirmation
 
 // MST Inputs
 mst_enabled = input.bool(true, "Enable MST Targets", group="MST - Market Structure Targets")
-mst_exit_mode = input.string("Visual Only", "Exit Mode", options=["Visual Only", "Simple TP", "Multiple TP"], group="MST - Market Structure Targets", tooltip="Visual Only: Just show targets\nSimple TP: Close 100% at first target\nMultiple TP: Close 50% at CHoCH target, 50% at BOS target")
+mst_exit_mode = input.string("BOS Counting", "Exit Mode", options=["Visual Only", "Simple TP", "Multiple TP", "BOS Counting"], group="MST - Market Structure Targets", tooltip="Visual Only: Show targets only\nSimple TP: Close 100% at first target\nMultiple TP: Close 50% at CHoCH, 50% at BOS\nBOS Counting: Close at 1st BOS (TP1%), 2nd BOS (TP2%), CHoCH (rest)")
 mst_show_choch_targets = input.bool(true, "Show CHoCH Targets", group="MST - Market Structure Targets", tooltip="Calculate targets for CHoCH (structure shift)")
 mst_show_bos_targets = input.bool(true, "Show BOS Targets", group="MST - Market Structure Targets", tooltip="Calculate targets for BOS (continuation)")
 mst_choch_percentage = input.float(100.0, "CHoCH Target %", minval=10, maxval=300, step=10, group="MST - Market Structure Targets", tooltip="Projection percentage for CHoCH targets")
 mst_bos_percentage = input.float(100.0, "BOS Target %", minval=10, maxval=300, step=10, group="MST - Market Structure Targets", tooltip="Projection percentage for BOS targets")
 mst_max_duration = input.int(300, "Max Target Duration", minval=50, maxval=1000, group="MST - Market Structure Targets", tooltip="Maximum bars before target expires")
+mst_tp1_percentage = input.float(50.0, "BOS Counting: TP1 %", minval=10, maxval=90, step=5, group="MST - Market Structure Targets", tooltip="% of position to close at 1st BOS after entry")
+mst_tp2_percentage = input.float(30.0, "BOS Counting: TP2 %", minval=10, maxval=70, step=5, group="MST - Market Structure Targets", tooltip="% of position to close at 2nd BOS after entry")
+mst_move_to_be = input.bool(true, "BOS Counting: Move to BE after TP1", group="MST - Market Structure Targets", tooltip="Move stop loss to breakeven after TP1 hit")
 mst_choch_bull_color = input.color(#089981, "CHoCH Bullish", inline="choch", group="MST - Market Structure Targets")
 mst_choch_bear_color = input.color(#f23645, "CHoCH Bearish", inline="choch", group="MST - Market Structure Targets")
 mst_bos_bull_color = input.color(color.new(#089981, 50), "BOS Bullish", inline="bos", group="MST - Market Structure Targets")
@@ -722,6 +725,10 @@ var bool mst_tp2_hit_long = false   // BOS target hit for long
 var bool mst_tp1_hit_short = false  // CHoCH target hit for short
 var bool mst_tp2_hit_short = false  // BOS target hit for short
 
+// BOS Counting mode tracking
+var int bos_count_long = 0   // Count of BOS bullish after long entry
+var int bos_count_short = 0  // Count of BOS bearish after short entry
+
 // HMA filter tracking
 var bool hma_touched_long = false   // Tracks if price touched HMA while waiting for long entry
 var bool hma_touched_short = false  // Tracks if price touched HMA while waiting for short entry
@@ -858,7 +865,44 @@ if mst_enabled
 // MST TP EXECUTION (Close positions when targets are hit)
 // ============================================================================
 
-if mst_enabled and mst_exit_mode != "Visual Only"
+if mst_enabled and mst_exit_mode == "BOS Counting"
+    // BOS COUNTING MODE - Count BOS after entry and close at specific counts
+
+    // LONG positions - count BOS bullish
+    if strategy.position_size > 0
+        // Increment counter when BOS bullish is detected
+        if bos_bullish
+            bos_count_long := bos_count_long + 1
+
+            // TP1: First BOS after entry
+            if bos_count_long == 1
+                strategy.close("Long", qty_percent=mst_tp1_percentage, comment="BOS TP1")
+                exit_by_mst_tp1_long := true
+
+            // TP2: Second BOS after entry
+            else if bos_count_long == 2
+                strategy.close("Long", qty_percent=mst_tp2_percentage, comment="BOS TP2")
+                exit_by_mst_tp2_long := true
+
+    // SHORT positions - count BOS bearish
+    if strategy.position_size < 0
+        // Increment counter when BOS bearish is detected
+        if bos_bearish
+            bos_count_short := bos_count_short + 1
+
+            // TP1: First BOS after entry
+            if bos_count_short == 1
+                strategy.close("Short", qty_percent=mst_tp1_percentage, comment="BOS TP1")
+                exit_by_mst_tp1_short := true
+
+            // TP2: Second BOS after entry
+            else if bos_count_short == 2
+                strategy.close("Short", qty_percent=mst_tp2_percentage, comment="BOS TP2")
+                exit_by_mst_tp2_short := true
+
+else if mst_enabled and mst_exit_mode != "Visual Only"
+    // MST TARGET-BASED MODE - Close when price reaches projected targets
+
     // LONG positions - check for bullish targets hit
     if strategy.position_size > 0
         // Check CHoCH targets (TP1)
@@ -1065,12 +1109,14 @@ if long_entry and enable_longs
     max_profit_long := 0.0  // Reset max profit tracker
     mst_tp1_hit_long := false  // Reset MST TP tracking
     mst_tp2_hit_long := false
+    bos_count_long := 0  // Reset BOS counter
 
 if short_entry and enable_shorts
     strategy.entry("Short", strategy.short)
     max_profit_short := 0.0  // Reset max profit tracker
     mst_tp1_hit_short := false  // Reset MST TP tracking
     mst_tp2_hit_short := false
+    bos_count_short := 0  // Reset BOS counter
 
 if long_exit
     strategy.close("Long", comment=long_exit_reason)
@@ -1078,7 +1124,7 @@ if long_exit
 if short_exit
     strategy.close("Short", comment=short_exit_reason)
 
-// Risk Management: Stop Loss + Trailing Stop
+// Risk Management: Stop Loss + Trailing Stop + Break Even
 // Calculate stops for active positions
 if strategy.position_size > 0
     // LONG position
@@ -1091,7 +1137,12 @@ if strategy.position_size > 0
 
     // Calculate stop price
     float stop_price = na
-    if use_trailing and max_profit_long >= trailing_offset
+
+    // BOS Counting: Move to BE after TP1
+    if mst_exit_mode == "BOS Counting" and mst_move_to_be and bos_count_long >= 1
+        // Move stop to breakeven + 0.1%
+        stop_price := entry_price * 1.001
+    else if use_trailing and max_profit_long >= trailing_offset
         // Trailing stop: keep stop at (max_profit - trailing_distance)%
         float trailing_stop_pct = max_profit_long - trailing_distance
         stop_price := entry_price * (1 + trailing_stop_pct / 100)
@@ -1113,7 +1164,12 @@ else if strategy.position_size < 0
 
     // Calculate stop price
     float stop_price = na
-    if use_trailing and max_profit_short >= trailing_offset
+
+    // BOS Counting: Move to BE after TP1
+    if mst_exit_mode == "BOS Counting" and mst_move_to_be and bos_count_short >= 1
+        // Move stop to breakeven + 0.1%
+        stop_price := entry_price * 0.999
+    else if use_trailing and max_profit_short >= trailing_offset
         // Trailing stop: keep stop at (max_profit - trailing_distance)%
         float trailing_stop_pct = max_profit_short - trailing_distance
         stop_price := entry_price * (1 - trailing_stop_pct / 100)
