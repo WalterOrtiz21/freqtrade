@@ -1,28 +1,28 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
-// © LudoGH68 (SMC Base) + LonesomeTheBlue (ZigZag with Fibonacci) + Claude Code (Strategy Integration)
+// © LudoGH68 (SMC Base) + LonesomeTheBlue (ZigZag with Fibonacci) + LuxAlgo (SFP) + OmegaTools (Smooth Trail) + Claude Code (Strategy Integration)
 //@version=6
-strategy("CHoCH/BOS Strategy with Fibonacci ZigZag", shorttitle="CHoCH Fibo", overlay=true, initial_capital=12, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.075, pyramiding=0, max_lines_count=300)
+strategy("CHoCH/BOS + Fibo + SFP + Smooth Trail", shorttitle="CHoCH Complete", overlay=true, initial_capital=12, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.075, pyramiding=0, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
 
 // ============================================================================
 // ZIGZAG WITH FIBONACCI LEVELS (Adapted from LonesomeTheBlue)
 // ============================================================================
 
 // ZigZag Parameters
-prd = input.int(defval=15, title="ZigZag Period", minval=2, maxval=50, group="ZigZag")
+prd = input.int(defval=23, title="ZigZag Period", minval=2, maxval=50, group="ZigZag")
 showzigzag = input.bool(defval=true, title="Show Zig Zag", group="ZigZag")
 showfibo = input.bool(defval=true, title="Show Fibonacci Ratios", group="ZigZag")
 labelcol = input.color(defval=color.blue, title="Text Color for Fibo Levels", group="ZigZag")
 fibolinecol = input.color(defval=color.lime, title="Line Color for Fibo Levels", group="ZigZag")
 upcol = input.color(defval=color.lime, title="Zigzag Up Color", group="ZigZag", inline="zzcol")
 dncol = input.color(defval=color.red, title="Down Color", group="ZigZag", inline="zzcol")
-labelloc = input.string(defval="Left", title="Label Location", options=["Left", "Right"], group="ZigZag")
+labelloc = input.string(defval="Right", title="Fibo Label Location", options=["Left", "Right", "Above Right"], group="ZigZag")
 
 // Fibonacci Level Toggles
-enable236 = input.bool(defval=true, title="Enable Level 0.236", group="Fibonacci Levels")
+enable236 = input.bool(defval=false, title="Enable Level 0.236", group="Fibonacci Levels")
 enable382 = input.bool(defval=true, title="Enable Level 0.382", group="Fibonacci Levels")
 enable500 = input.bool(defval=true, title="Enable Level 0.500", group="Fibonacci Levels")
 enable618 = input.bool(defval=true, title="Enable Level 0.618", group="Fibonacci Levels")
-enable786 = input.bool(defval=true, title="Enable Level 0.786", group="Fibonacci Levels")
+enable786 = input.bool(defval=false, title="Enable Level 0.786", group="Fibonacci Levels")
 
 // Build Fibonacci ratios array
 var fibo_ratios = array.new<float>(0)
@@ -45,12 +45,7 @@ if barstate.isfirst
     if enable786
         array.push(fibo_ratios, 0.786)
         shownlevels += 1
-    // Add extension levels
-    for x = 1 to 5
-        array.push(fibo_ratios, x)
-        array.push(fibo_ratios, x + 0.272)
-        array.push(fibo_ratios, x + 0.414)
-        array.push(fibo_ratios, x + 0.618)
+    array.push(fibo_ratios, 1.000)
 
 // ZigZag calculation using ta.highestbars/lowestbars (v6 compatible)
 float ph = ta.highestbars(high, prd) == 0 ? high : na
@@ -102,52 +97,85 @@ if showzigzag and array.size(zigzag) >= 4 and array.size(oldzigzag) >= 4
              color=dir == 1 ? upcol : dncol,
              width=2)
 
-// Draw Fibonacci levels
+// Draw Fibonacci levels - ONLY for current zigzag move (last pivot to current price)
 var array<line> fibolines = array.new<line>(0)
 var array<label> fibolabels = array.new<label>(0)
+var int lastFiboPivotBar = na
 
-if showfibo and array.size(zigzag) >= 6 and barstate.islast
-    // Clear previous Fibonacci drawings
-    if array.size(fibolines) > 0
-        for i = 0 to array.size(fibolines) - 1
-            line.delete(array.get(fibolines, i))
-            label.delete(array.get(fibolabels, i))
-        array.clear(fibolines)
-        array.clear(fibolabels)
+if showfibo and array.size(zigzag) >= 4
+    // Get last two confirmed pivots (in chronological order)
+    float pivot1_price = array.get(zigzag, 2)      // First pivot (older)
+    int pivot1_bar = math.round(array.get(zigzag, 3))
+    float pivot2_price = array.get(zigzag, 0)      // Second pivot (newer)
+    int pivot2_bar = math.round(array.get(zigzag, 1))
 
-    // Calculate Fibonacci levels between last two zigzag pivots
-    float diff = array.get(zigzag, 4) - array.get(zigzag, 2)
-    bool stopit = false
+    // Determine start and end bars (chronologically)
+    int startBar = pivot1_bar  // Older pivot
+    int endBar = pivot2_bar    // Newer pivot
 
-    for x = 0 to array.size(fibo_ratios) - 1
-        if stopit and x > shownlevels
-            break
+    // Determine direction and calculate fibonacci accordingly
+    bool isBullishMove = pivot2_price > pivot1_price  // Price went up
+    float basePrice = isBullishMove ? pivot2_price : pivot2_price  // Start from the newest pivot
+    float targetPrice = isBullishMove ? pivot1_price : pivot1_price  // Retrace towards the older pivot
+    float diff = math.abs(pivot2_price - pivot1_price)
 
-        float fiboLevel = array.get(zigzag, 2) + diff * array.get(fibo_ratios, x)
+    // Clear and redraw only when pivot changes
+    if na(lastFiboPivotBar) or pivot2_bar != lastFiboPivotBar
+        // Delete old drawings
+        if array.size(fibolines) > 0
+            for i = 0 to array.size(fibolines) - 1
+                line.delete(array.get(fibolines, i))
+                label.delete(array.get(fibolabels, i))
+            array.clear(fibolines)
+            array.clear(fibolabels)
 
-        // Draw Fibonacci line
-        array.unshift(fibolines,
-             line.new(
-                 x1=math.round(array.get(zigzag, 5)),
-                 y1=fiboLevel,
-                 x2=bar_index,
-                 y2=fiboLevel,
-                 color=fibolinecol,
-                 extend=extend.right))
+        lastFiboPivotBar := pivot2_bar
 
-        // Draw Fibonacci label
-        int label_x_loc = labelloc == "Left" ? math.round(array.get(zigzag, 5)) - 1 : bar_index + 15
-        array.unshift(fibolabels,
-             label.new(
-                 x=label_x_loc,
-                 y=fiboLevel,
-                 text=str.tostring(array.get(fibo_ratios, x), '#.###') + "(" + str.tostring(math.round(fiboLevel, 2)) + ")",
-                 textcolor=labelcol,
-                 style=label.style_none))
+        // Create new lines and labels for each fibonacci level
+        for x = 0 to array.size(fibo_ratios) - 1
+            float fiboRatio = array.get(fibo_ratios, x)
 
-        // Stop drawing when price is reached
-        if (dir == 1 and fiboLevel > array.get(zigzag, 0)) or (dir == -1 and fiboLevel < array.get(zigzag, 0))
-            stopit := true
+            // Skip 0.000 and 1.000 levels
+            if fiboRatio == 0.000 or fiboRatio == 1.000
+                continue
+
+            // Calculate fibonacci level based on direction
+            // For bullish move (LOW to HIGH): retracement levels go DOWN from HIGH
+            // For bearish move (HIGH to LOW): retracement levels go UP from LOW
+            float fiboLevel = isBullishMove ? (pivot2_price - diff * fiboRatio) : (pivot2_price + diff * fiboRatio)
+
+            // Determine color based on fibonacci level
+            color lineColor = fibolinecol  // default
+            if fiboRatio == 0.618
+                lineColor := color.green
+            else if fiboRatio == 0.500
+                lineColor := color.red
+            else if fiboRatio == 0.382
+                lineColor := #2962ff  // Smooth Trail color
+
+            // Create line that extends 25 bars to the right
+            array.push(fibolines,
+                 line.new(
+                     x1=startBar,
+                     y1=fiboLevel,
+                     x2=endBar + 25,
+                     y2=fiboLevel,
+                     color=lineColor,
+                     width=2))
+
+            // Create label with ratio and price (simple, at line end)
+            string labelText = str.tostring(fiboRatio, '#.###') + ' (' + str.tostring(fiboLevel, format.mintick) + ')'
+
+            array.push(fibolabels,
+                 label.new(
+                     x=endBar + 25,
+                     y=fiboLevel,
+                     text=labelText,
+                     textcolor=lineColor,
+                     style=label.style_label_left,
+                     color=color.new(color.white, 100),
+                     size=size.small,
+                     yloc=yloc.price))
 
 // ============================================================================
 // HULL MOVING AVERAGE INPUTS & CALCULATION
@@ -156,7 +184,7 @@ if showfibo and array.size(zigzag) >= 6 and barstate.islast
 // Hull Moving Average Filter Inputs
 hma_length = input.int(200, "HMA Length", minval=1, maxval=500, group="HMA Filter", tooltip="Hull Moving Average period")
 use_hma_filter_long = input.bool(false, "Enable HMA Filter for Longs", group="HMA Filter", tooltip="Require price to touch HMA before long entry")
-use_hma_filter_short = input.bool(true, "Enable HMA Filter for Shorts", group="HMA Filter", tooltip="Require price to touch HMA before short entry")
+use_hma_filter_short = input.bool(false, "Enable HMA Filter for Shorts", group="HMA Filter", tooltip="Require price to touch HMA before short entry")
 show_hma = input.bool(true, "Show HMA on Chart", group="HMA Filter")
 
 // Hull Moving Average formula: HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
@@ -167,6 +195,313 @@ hma = ta.wma(hma_diff, math.round(math.sqrt(hma_length)))
 
 // Plot HMA
 plot(show_hma ? hma : na, "HMA", color=color.blue, linewidth=2)
+
+// ============================================================================
+// SWING FAILURE PATTERN (SFP) - Adapted from LuxAlgo
+// ============================================================================
+
+// SFP Inputs
+sp = '            '
+sfp_len = input.int(5, 'Swings', minval=1, group='SFP Settings')
+sfp_bull = input.bool(true, 'Bullish SFP', group='SFP Settings')
+sfp_bear = input.bool(true, 'Bearish SFP', group='SFP Settings')
+
+sfp_iVal = input.string('None', 'Validation' + sp + '   ', group='SFP Volume Validation', options=['Volume outside swing < Threshold', 'Volume outside swing > Threshold', 'None'])
+sfp_percent = input.float(25, 'Volume Threshold %', inline='valy', group='SFP Volume Validation', tooltip='% of Total Volume', minval=0, maxval=100)
+sfp_auto = input.bool(true, '', inline='auto', group='SFP Volume Validation')
+sfp_mlt = input.int(50, '      Auto' + sp, inline='auto', group='SFP Volume Validation')
+sfp_res = input.timeframe('', sp + '   LTF' + sp + '  ', inline='ltf', group='SFP Volume Validation')
+sfp_prem = input.bool(false, '    Premium', group='SFP Volume Validation', tooltip='Premium Plan or higher')
+sfp_showDash = input.bool(false, 'Show Dashboard', group='SFP Dashboard')
+sfp_dashLoc = input.string('Top Right', 'Location', options=['Top Right', 'Bottom Right', 'Bottom Left'], group='SFP Dashboard')
+sfp_textSize = input.string('Normal', 'Size', options=['Tiny', 'Small', 'Normal'], group='SFP Dashboard')
+sfp_dSwingLine = input.bool(true, 'Swing Lines', group='SFP Style')
+sfp_dOpposLine = input.bool(true, 'Confirmation Lines', group='SFP Style')
+sfp_dSFP_Line = input.bool(true, 'Swing Failure Wick', group='SFP Style')
+sfp_dSFP_Label = input.bool(true, 'Swing Failure Label', group='SFP Style')
+sfp_colBl = input.color(#089981, 'Lines / Labels', inline='lin', group='SFP Style')
+sfp_colBr = input.color(#f23645, '', inline='lin', group='SFP Style', tooltip='Bullish/Bearish')
+sfp_colBl2 = input.color(#08998180, 'SFP Wicks      ', inline='wic', group='SFP Style')
+sfp_colBr2 = input.color(#f2364580, '', inline='wic', group='SFP Style', tooltip='Wick outside Swing, Bullish/Bearish')
+
+// SFP User Defined Types
+//@type Custom type for tracking pivot information
+type piv
+    float swing_prc   // price
+    int swing_bix     // bar_index
+    float oppos_prc   // price
+    int oppos_bix     // bar_index
+    bool active
+    bool confirmed
+    line swing_line
+    line oppos_line
+    line wicky_line
+    label wicky_label
+
+//@type Custom type for swing tracking
+type swing
+    int bix
+    float prc
+
+// SFP Variables
+n = bar_index
+INV = color(na)
+FGc = chart.fg_color
+
+sfp_table_position = sfp_dashLoc == 'Bottom Left' ? position.bottom_left : sfp_dashLoc == 'Top Right' ? position.top_right : position.bottom_right
+
+sfp_table_size = sfp_textSize == 'Tiny' ? size.tiny : sfp_textSize == 'Small' ? size.small : size.normal
+
+var sfp_tb = table.new(sfp_table_position, 2, 3, bgcolor=#1e222d, border_color=#373a46, border_width=1, frame_color=#373a46, frame_width=1)
+
+var swingH = swing.new()
+var swingL = swing.new()
+var pivH = piv.new()
+var pivL = piv.new()
+
+sfp_validate = sfp_iVal != 'None'
+sfp_valHigher = sfp_iVal == 'Volume outside swing > Threshold'
+sfp_valLower = sfp_iVal == 'Volume outside swing < Threshold'
+
+// SFP Method
+n(float piv) =>
+    bool out = not na(piv)
+
+// SFP Execution
+sfp_tfS = timeframe.in_seconds(sfp_res)
+sfp_tfC = timeframe.in_seconds(timeframe.period)
+sfp_rs = sfp_auto ? sfp_tfC / sfp_mlt : sfp_tfS
+if not sfp_validate
+    sfp_res := timeframe.period
+else
+    sfp_rs := sfp_prem ? sfp_rs : math.max(60, sfp_rs)
+    sfp_res := timeframe.from_seconds(math.min(sfp_tfC, sfp_rs))
+
+sfp_ph = ta.pivothigh(sfp_len, 1)
+sfp_pl = ta.pivotlow(sfp_len, 1)
+
+[ltf_close, ltf_volume] = request.security_lower_tf(syminfo.tickerid, sfp_res, [close, volume])
+
+ltf_size = ltf_close.size()
+
+if sfp_validate
+    if ltf_size > 0 and ltf_size[1] == 0
+        line.new(n, close, n, close + syminfo.mintick, color=color.silver, style=line.style_dotted, extend=extend.both)
+
+// Bearish SFP Pattern
+if sfp_bear
+    if n(sfp_ph)
+        swingH.bix := n - 1
+        swingH.prc := sfp_ph
+
+    sw = swingH.prc
+    bx = swingH.bix
+    if high > sw and open < sw and close < sw
+        valid = true
+        if sfp_validate
+            if ltf_close.size() > 0
+                outsideVolume = 0.
+                totalVolume = ltf_volume.sum()
+                for j = 0 to ltf_close.size() - 1
+                    if ltf_close.get(j) > sw
+                        outsideVolume += ltf_volume.get(j)
+                if (sfp_valHigher ? 100 / totalVolume * outsideVolume < sfp_percent : 100 / totalVolume * outsideVolume > sfp_percent)
+                    valid := false
+
+        if valid
+            opposL = sw
+            opposB = n
+
+            for i = 1 to n - bx - 1
+                if low[i] < opposL
+                    opposL := low[i]
+                    opposB := n - i
+
+            if not pivH.confirmed
+                pivH.swing_line.delete()
+                pivH.oppos_line.delete()
+                pivH.wicky_line.delete()
+                pivH.wicky_label.delete()
+
+            pivH := piv.new(sw, bx, opposL, opposB, true, false)
+
+            if sfp_dSwingLine
+                pivH.swing_line := line.new(bx, sw, n, sw, color=sfp_colBr)
+            if sfp_dOpposLine
+                pivH.oppos_line := line.new(opposB, opposL, n, opposL, color=sfp_colBr, style=line.style_dotted)
+            if sfp_dSFP_Line
+                pivH.wicky_line := line.new(n, high, n, sw, color=sfp_colBr2, width=3)
+            if sfp_dSFP_Label
+                pivH.wicky_label := label.new(n, high, style=label.style_label_down, text='SFP', textcolor=sfp_colBr, color=INV, size=size.normal)
+
+    if pivH.active and not pivH.confirmed
+        pivH.swing_line.set_x2(n)
+        pivH.oppos_line.set_x2(n)
+
+        if close < pivH.oppos_prc
+            pivH.confirmed := true
+
+            if pivH.wicky_label.get_x() == n
+                pivH.wicky_label.set_text('SFP\n▼')
+            else
+                label.new(n, high, style=label.style_label_down, text='▼', textcolor=sfp_colBr, color=INV, size=size.normal)
+
+    if n - pivH.swing_bix > 500 or close > pivH.swing_prc
+        pivH.active := false
+        if not pivH.confirmed
+            pivH.swing_line.delete()
+            pivH.oppos_line.delete()
+            pivH.wicky_line.delete()
+            pivH.wicky_label.delete()
+
+// Bullish SFP Pattern
+if sfp_bull
+    if n(sfp_pl)
+        swingL.bix := n - 1
+        swingL.prc := sfp_pl
+
+    sw = swingL.prc
+    bx = swingL.bix
+    if low < sw and open > sw and close > sw
+        valid = true
+        if sfp_validate
+            if ltf_close.size() > 0
+                outsideVolume = 0.
+                totalVolume = ltf_volume.sum()
+                for j = 0 to ltf_close.size() - 1
+                    if ltf_close.get(j) < sw
+                        outsideVolume += ltf_volume.get(j)
+                if (sfp_valHigher ? 100 / totalVolume * outsideVolume < sfp_percent : 100 / totalVolume * outsideVolume > sfp_percent)
+                    valid := false
+        if valid
+            opposH = sw
+            opposB = n
+
+            for i = 1 to n - bx - 1
+                if high[i] > opposH
+                    opposH := high[i]
+                    opposB := n - i
+
+            if not pivL.confirmed
+                pivL.swing_line.delete()
+                pivL.oppos_line.delete()
+                pivL.wicky_line.delete()
+                pivL.wicky_label.delete()
+
+            pivL := piv.new(sw, bx, opposH, opposB, true, false)
+
+            if sfp_dSwingLine
+                pivL.swing_line := line.new(bx, sw, n, sw, color=sfp_colBl)
+            if sfp_dOpposLine
+                pivL.oppos_line := line.new(opposB, opposH, n, opposH, color=sfp_colBl, style=line.style_dotted)
+            if sfp_dSFP_Line
+                pivL.wicky_line := line.new(n, low, n, sw, color=sfp_colBl2, width=3)
+            if sfp_dSFP_Label
+                pivL.wicky_label := label.new(n, low, style=label.style_label_up, text='SFP', textcolor=sfp_colBl, color=INV, size=size.normal)
+
+    if pivL.active and not pivL.confirmed
+        pivL.swing_line.set_x2(n)
+        pivL.oppos_line.set_x2(n)
+
+        if close > pivL.oppos_prc
+            pivL.confirmed := true
+
+            if pivL.wicky_label.get_x() == n
+                pivL.wicky_label.set_text('▲\nSFP')
+            else
+                label.new(n, low, style=label.style_label_up, text='▲', textcolor=sfp_colBl, color=INV, size=size.normal)
+
+    if n - pivL.swing_bix > 500 or close < pivL.swing_prc
+        pivL.active := false
+        if not pivL.confirmed
+            pivL.swing_line.delete()
+            pivL.oppos_line.delete()
+            pivL.wicky_line.delete()
+            pivL.wicky_label.delete()
+
+// SFP Dashboard
+if barstate.islast and sfp_validate and sfp_showDash
+    sfp_tb.cell(0, 0, str.format("LTF: {0}", sfp_res), text_color=color.white, text_size=sfp_table_size)
+
+// ============================================================================
+// SMOOTH TRAIL - Adapted from OmegaTools
+// ============================================================================
+
+// Smooth Trail Inputs
+st_enabled = input.bool(true, "Enable Smooth Trail", group="Smooth Trail")
+st_use_as_confirmation = input.bool(false, "Use as Entry Confirmation", group="Smooth Trail", tooltip="Require price to touch Smooth Trail zone before entry")
+st_multiplier = input.float(1.00, "Multiplier", minval=0.1, maxval=10, step=0.1, group="Smooth Trail")
+st_length = input.int(34, "Length", minval=1, maxval=200, group="Smooth Trail")
+st_zone_width = input.float(1.00, "Zone Width", minval=0.1, maxval=5, step=0.1, group="Smooth Trail")
+st_show_opposite_area = input.bool(false, "Show Opposite Area", group="Smooth Trail")
+st_show_crossing_lines = input.bool(false, "Show Crossing Lines", group="Smooth Trail")
+
+// Smooth Trail Calculation
+st_atrs = ta.atr(100)
+[st_supertrend, st_direction] = ta.supertrend(math.round(math.avg(7, st_multiplier)), st_length * 2)
+st_hullup = ta.hma(high, math.round(math.avg(21, st_length))) + st_atrs * math.round(st_multiplier / 2.5)
+st_hulldown = ta.hma(low, math.round(math.avg(21, st_length))) - st_atrs * math.round(st_multiplier / 2.5)
+st_hline = ta.highest(close, st_length) + st_atrs
+st_lline = ta.lowest(close, st_length) + st_atrs
+
+st_supert = 0.00
+st_supert := if close > st_supertrend
+    math.avg(st_supertrend, st_supertrend, st_supertrend, st_hulldown, st_lline)
+else if close < st_supertrend
+    math.avg(st_supertrend, st_supertrend, st_supertrend, st_hullup, st_hline)
+else
+    nz(st_supert[1])
+
+st_supert2 = 0.00
+st_supert2 := if close > st_supert
+    st_supert + st_atrs * st_zone_width
+else if close < st_supert
+    st_supert - st_atrs * st_zone_width
+else
+    nz(st_supert2[1])
+
+// Target calculation
+st_mid = ta.ema(close, 21)
+st_dist = (st_supert - st_mid) * st_zone_width
+st_tpl = ta.sma(st_mid - st_dist, 2)
+
+// Visual elements
+st_tool = st_direction > 0 or st_direction < 0
+st_toolx = st_show_crossing_lines ? true : (st_direction < 0 and st_direction[1] < 0) or (st_direction > 0 and st_direction[1] > 0)
+
+st_bullish = close > st_supert
+st_line_color = st_bullish ? #2962ff : #e91e63
+st_fill_color = st_bullish ? color.new(#2962ff, 80) : color.new(#e91e63, 80)
+
+st_tool12 = plot(st_enabled and st_toolx ? st_supert : na, "ST Extreme line", color=st_line_color, style=plot.style_linebr, linewidth=2)
+st_tool2 = plot(st_enabled and st_toolx ? st_supert2 : na, "ST Zone line", color=color.new(color.gray, 100), display=display.none, editable=false, style=plot.style_linebr)
+fill(st_tool12, st_tool2, color=st_enabled ? st_fill_color : na, fillgaps=false, title="ST Zone Fill")
+
+plot(st_enabled and st_toolx and st_show_opposite_area ? st_tpl : na, "ST Target", st_line_color, style=plot.style_linebr)
+
+// Smooth Trail zone touch detection
+var bool st_zone_touched_long = false   // Price touched ST bullish zone
+var bool st_zone_touched_short = false  // Price touched ST bearish zone
+
+// Detect zone touch for LONG: price in bullish zone (between supert and supert2 when bullish)
+if st_enabled and st_use_as_confirmation
+    if st_bullish
+        // Bullish zone: price between supert (extreme) and supert2 (zone)
+        if close >= st_supert and close <= st_supert2
+            st_zone_touched_long := true
+    else
+        // Reset if not in bullish trend
+        st_zone_touched_long := false
+
+// Detect zone touch for SHORT: price in bearish zone (between supert2 and supert when bearish)
+if st_enabled and st_use_as_confirmation
+    if not st_bullish
+        // Bearish zone: price between supert2 (zone) and supert (extreme)
+        if close <= st_supert and close >= st_supert2
+            st_zone_touched_short := true
+    else
+        // Reset if not in bearish trend
+        st_zone_touched_short := false
 
 // ============================================================================
 // SMC STRUCTURE DETECTION (Based on ZigZag Pivots)
@@ -188,12 +523,12 @@ bearishChochColor = input.color(color.yellow, "Bearish CHoCH Color", group="Colo
 stoploss_pct = input.float(-5.8, "Stop Loss %", minval=-10, maxval=-1, step=0.1, group="Strategy")
 
 // Trailing Stop (validated with hyperopt)
-use_trailing = input.bool(true, "Enable Trailing Stop", group="Strategy", tooltip="Activate trailing stop when trade is in profit")
+use_trailing = input.bool(false, "Enable Trailing Stop", group="Strategy", tooltip="Activate trailing stop when trade is in profit")
 trailing_offset = input.float(2.0, "Trailing Offset %", minval=0.5, maxval=10, step=0.1, group="Strategy", tooltip="Activate trailing when profit > this %")
 trailing_distance = input.float(1.0, "Trailing Distance %", minval=0.1, maxval=5, step=0.1, group="Strategy", tooltip="Keep stop this % below highest profit")
 
 // Exit Options
-exit_on_bos_opposite = input.bool(false, "Require BOS Confirmation to Exit", group="Strategy", tooltip="More conservative: Wait for BOS confirmation after CHoCH before exiting (CHoCH → wait BOS → exit)")
+exit_on_bos_opposite = input.bool(true, "Require BOS Confirmation to Exit", group="Strategy", tooltip="More conservative: Wait for BOS confirmation after CHoCH before exiting (CHoCH → wait BOS → exit)")
 
 // Enable/Disable Trade Directions
 enable_longs = input.bool(true, "Enable Long Trades", group="Strategy", tooltip="Allow opening long positions")
@@ -202,7 +537,7 @@ enable_shorts = input.bool(true, "Enable Short Trades", group="Strategy", toolti
 // Visual Signals
 showEntrySignals = input.bool(true, "Show Entry Signals", group="Strategy")
 showExitSignals = input.bool(true, "Show Exit Signals", group="Strategy")
-showBackgroundStates = input.bool(true, "Show Waiting States Background", group="Strategy")
+showBackgroundStates = input.bool(false, "Show Waiting States Background", group="Strategy")
 
 // Structure tracking variables
 var float lastPivotHigh = na
@@ -348,11 +683,13 @@ if choch_bullish
     waiting_long_confirmation := true
     waiting_short_confirmation := false
     hma_touched_long := false  // Reset HMA touch flag
+    st_zone_touched_long := false  // Reset ST touch flag
 
 if choch_bearish
     waiting_short_confirmation := true
     waiting_long_confirmation := false
     hma_touched_short := false  // Reset HMA touch flag
+    st_zone_touched_short := false  // Reset ST touch flag
 
 // ============================================================================
 // HMA FILTER - Detect if price touches HMA while waiting for confirmation
@@ -376,39 +713,55 @@ var bool short_entry = false
 long_entry := false
 short_entry := false
 
-// LONG entry: CHoCH + BOS + HMA filter (if enabled)
+// LONG entry: CHoCH + BOS + HMA filter (if enabled) + Smooth Trail (if enabled)
 if waiting_long_confirmation and bos_bullish
     // Check HMA filter condition
     bool hma_condition_met = true
     if use_hma_filter_long
         hma_condition_met := hma_touched_long
 
-    if hma_condition_met
+    // Check Smooth Trail condition
+    bool st_condition_met = true
+    if st_enabled and st_use_as_confirmation
+        st_condition_met := st_zone_touched_long
+
+    // Entry requires all enabled conditions to be met
+    if hma_condition_met and st_condition_met
         long_entry := true
         waiting_long_confirmation := false
         hma_touched_long := false
+        st_zone_touched_long := false
 
-// SHORT entry: CHoCH + BOS + HMA filter (if enabled)
+// SHORT entry: CHoCH + BOS + HMA filter (if enabled) + Smooth Trail (if enabled)
 if waiting_short_confirmation and bos_bearish
     // Check HMA filter condition
     bool hma_condition_met = true
     if use_hma_filter_short
         hma_condition_met := hma_touched_short
 
-    if hma_condition_met
+    // Check Smooth Trail condition
+    bool st_condition_met = true
+    if st_enabled and st_use_as_confirmation
+        st_condition_met := st_zone_touched_short
+
+    // Entry requires all enabled conditions to be met
+    if hma_condition_met and st_condition_met
         short_entry := true
         waiting_short_confirmation := false
         hma_touched_short := false
+        st_zone_touched_short := false
 
 // Invalidate long setup if opposite CHoCH appears
 if waiting_long_confirmation and choch_bearish
     waiting_long_confirmation := false
     hma_touched_long := false
+    st_zone_touched_long := false
 
 // Invalidate short setup if opposite CHoCH appears
 if waiting_short_confirmation and choch_bullish
     waiting_short_confirmation := false
     hma_touched_short := false
+    st_zone_touched_short := false
 
 var bool long_exit = false
 var bool short_exit = false
@@ -586,7 +939,7 @@ plotshape(showExitSignals and exit_by_trailing_long, "Long Trail", shape.triangl
 plotshape(showExitSignals and exit_by_trailing_short, "Short Trail", shape.triangleup, location.belowbar, color.new(color.orange, 0), size=size.tiny, text="TRAIL")
 
 // Information table
-var table info_table = table.new(position.top_right, 2, 9, border_width=1, border_color=color.gray, frame_width=1, frame_color=color.gray)
+var table info_table = table.new(position.top_right, 2, 10, border_width=1, border_color=color.gray, frame_width=1, frame_color=color.gray)
 
 if barstate.islast
     table.cell(info_table, 0, 0, "Status", text_color=color.white, bgcolor=color.gray)
@@ -680,6 +1033,28 @@ if barstate.islast
             hma_color := color.blue
 
     table.cell(info_table, 1, 8, hma_text, text_color=color.white, bgcolor=hma_color)
+
+    // Smooth Trail Status
+    table.cell(info_table, 0, 9, "Smooth Trail", text_color=color.white, bgcolor=color.gray)
+    string st_text = "OFF"
+    color st_color = color.gray
+
+    if st_enabled
+        if st_use_as_confirmation
+            if waiting_long_confirmation
+                st_text := st_zone_touched_long ? "LONG OK ✓" : "WAIT ZONE"
+                st_color := st_zone_touched_long ? color.green : color.orange
+            else if waiting_short_confirmation
+                st_text := st_zone_touched_short ? "SHORT OK ✓" : "WAIT ZONE"
+                st_color := st_zone_touched_short ? color.green : color.orange
+            else
+                st_text := st_bullish ? "BULLISH" : "BEARISH"
+                st_color := st_bullish ? color.green : color.red
+        else
+            st_text := st_bullish ? "BULLISH" : "BEARISH"
+            st_color := st_bullish ? color.green : color.red
+
+    table.cell(info_table, 1, 9, st_text, text_color=color.white, bgcolor=st_color)
 
 // Alerts
 alertcondition(choch_bullish, "CHoCH Bullish", "CHoCH Bullish - prepare for long")
