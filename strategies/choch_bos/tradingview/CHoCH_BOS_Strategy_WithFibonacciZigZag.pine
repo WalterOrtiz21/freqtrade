@@ -1,0 +1,692 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © LudoGH68 (SMC Base) + LonesomeTheBlue (ZigZag with Fibonacci) + Claude Code (Strategy Integration)
+//@version=6
+strategy("CHoCH/BOS Strategy with Fibonacci ZigZag", shorttitle="CHoCH Fibo", overlay=true, initial_capital=12, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.075, pyramiding=0, max_lines_count=300)
+
+// ============================================================================
+// ZIGZAG WITH FIBONACCI LEVELS (Adapted from LonesomeTheBlue)
+// ============================================================================
+
+// ZigZag Parameters
+prd = input.int(defval=15, title="ZigZag Period", minval=2, maxval=50, group="ZigZag")
+showzigzag = input.bool(defval=true, title="Show Zig Zag", group="ZigZag")
+showfibo = input.bool(defval=true, title="Show Fibonacci Ratios", group="ZigZag")
+labelcol = input.color(defval=color.blue, title="Text Color for Fibo Levels", group="ZigZag")
+fibolinecol = input.color(defval=color.lime, title="Line Color for Fibo Levels", group="ZigZag")
+upcol = input.color(defval=color.lime, title="Zigzag Up Color", group="ZigZag", inline="zzcol")
+dncol = input.color(defval=color.red, title="Down Color", group="ZigZag", inline="zzcol")
+labelloc = input.string(defval="Left", title="Label Location", options=["Left", "Right"], group="ZigZag")
+
+// Fibonacci Level Toggles
+enable236 = input.bool(defval=true, title="Enable Level 0.236", group="Fibonacci Levels")
+enable382 = input.bool(defval=true, title="Enable Level 0.382", group="Fibonacci Levels")
+enable500 = input.bool(defval=true, title="Enable Level 0.500", group="Fibonacci Levels")
+enable618 = input.bool(defval=true, title="Enable Level 0.618", group="Fibonacci Levels")
+enable786 = input.bool(defval=true, title="Enable Level 0.786", group="Fibonacci Levels")
+
+// Build Fibonacci ratios array
+var fibo_ratios = array.new<float>(0)
+var shownlevels = 1
+
+if barstate.isfirst
+    array.push(fibo_ratios, 0.000)
+    if enable236
+        array.push(fibo_ratios, 0.236)
+        shownlevels += 1
+    if enable382
+        array.push(fibo_ratios, 0.382)
+        shownlevels += 1
+    if enable500
+        array.push(fibo_ratios, 0.500)
+        shownlevels += 1
+    if enable618
+        array.push(fibo_ratios, 0.618)
+        shownlevels += 1
+    if enable786
+        array.push(fibo_ratios, 0.786)
+        shownlevels += 1
+    // Add extension levels
+    for x = 1 to 5
+        array.push(fibo_ratios, x)
+        array.push(fibo_ratios, x + 0.272)
+        array.push(fibo_ratios, x + 0.414)
+        array.push(fibo_ratios, x + 0.618)
+
+// ZigZag calculation using ta.highestbars/lowestbars (v6 compatible)
+float ph = ta.highestbars(high, prd) == 0 ? high : na
+float pl = ta.lowestbars(low, prd) == 0 ? low : na
+
+var int dir = 0
+dir := not na(ph) and na(pl) ? 1 : not na(pl) and na(ph) ? -1 : dir
+
+var int max_array_size = 10
+var array<float> zigzag = array.new<float>(0)
+array<float> oldzigzag = array.copy(zigzag)
+
+// Functions to manage zigzag array
+add_to_zigzag(float value, int bindex) =>
+    array.unshift(zigzag, bindex)
+    array.unshift(zigzag, value)
+    if array.size(zigzag) > max_array_size
+        array.pop(zigzag)
+        array.pop(zigzag)
+
+update_zigzag(float value, int bindex) =>
+    if array.size(zigzag) == 0
+        add_to_zigzag(value, bindex)
+    else
+        if (dir == 1 and value > array.get(zigzag, 0)) or (dir == -1 and value < array.get(zigzag, 0))
+            array.set(zigzag, 0, value)
+            array.set(zigzag, 1, bindex)
+    0.0
+
+bool dirchanged = dir != dir[1]
+
+if not na(ph) or not na(pl)
+    if dirchanged
+        add_to_zigzag(dir == 1 ? ph : pl, bar_index)
+    else
+        update_zigzag(dir == 1 ? ph : pl, bar_index)
+
+// Draw ZigZag lines
+if showzigzag and array.size(zigzag) >= 4 and array.size(oldzigzag) >= 4
+    var line zzline = na
+    if array.get(zigzag, 0) != array.get(oldzigzag, 0) or array.get(zigzag, 1) != array.get(oldzigzag, 1)
+        if array.get(zigzag, 2) == array.get(oldzigzag, 2) and array.get(zigzag, 3) == math.round(array.get(oldzigzag, 3))
+            line.delete(zzline)
+        zzline := line.new(
+             x1=math.round(array.get(zigzag, 1)),
+             y1=array.get(zigzag, 0),
+             x2=math.round(array.get(zigzag, 3)),
+             y2=array.get(zigzag, 2),
+             color=dir == 1 ? upcol : dncol,
+             width=2)
+
+// Draw Fibonacci levels
+var array<line> fibolines = array.new<line>(0)
+var array<label> fibolabels = array.new<label>(0)
+
+if showfibo and array.size(zigzag) >= 6 and barstate.islast
+    // Clear previous Fibonacci drawings
+    if array.size(fibolines) > 0
+        for i = 0 to array.size(fibolines) - 1
+            line.delete(array.get(fibolines, i))
+            label.delete(array.get(fibolabels, i))
+        array.clear(fibolines)
+        array.clear(fibolabels)
+
+    // Calculate Fibonacci levels between last two zigzag pivots
+    float diff = array.get(zigzag, 4) - array.get(zigzag, 2)
+    bool stopit = false
+
+    for x = 0 to array.size(fibo_ratios) - 1
+        if stopit and x > shownlevels
+            break
+
+        float fiboLevel = array.get(zigzag, 2) + diff * array.get(fibo_ratios, x)
+
+        // Draw Fibonacci line
+        array.unshift(fibolines,
+             line.new(
+                 x1=math.round(array.get(zigzag, 5)),
+                 y1=fiboLevel,
+                 x2=bar_index,
+                 y2=fiboLevel,
+                 color=fibolinecol,
+                 extend=extend.right))
+
+        // Draw Fibonacci label
+        int label_x_loc = labelloc == "Left" ? math.round(array.get(zigzag, 5)) - 1 : bar_index + 15
+        array.unshift(fibolabels,
+             label.new(
+                 x=label_x_loc,
+                 y=fiboLevel,
+                 text=str.tostring(array.get(fibo_ratios, x), '#.###') + "(" + str.tostring(math.round(fiboLevel, 2)) + ")",
+                 textcolor=labelcol,
+                 style=label.style_none))
+
+        // Stop drawing when price is reached
+        if (dir == 1 and fiboLevel > array.get(zigzag, 0)) or (dir == -1 and fiboLevel < array.get(zigzag, 0))
+            stopit := true
+
+// ============================================================================
+// HULL MOVING AVERAGE INPUTS & CALCULATION
+// ============================================================================
+
+// Hull Moving Average Filter Inputs
+hma_length = input.int(200, "HMA Length", minval=1, maxval=500, group="HMA Filter", tooltip="Hull Moving Average period")
+use_hma_filter_long = input.bool(false, "Enable HMA Filter for Longs", group="HMA Filter", tooltip="Require price to touch HMA before long entry")
+use_hma_filter_short = input.bool(true, "Enable HMA Filter for Shorts", group="HMA Filter", tooltip="Require price to touch HMA before short entry")
+show_hma = input.bool(true, "Show HMA on Chart", group="HMA Filter")
+
+// Hull Moving Average formula: HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+hma_wma1 = ta.wma(close, hma_length / 2)
+hma_wma2 = ta.wma(close, hma_length)
+hma_diff = 2 * hma_wma1 - hma_wma2
+hma = ta.wma(hma_diff, math.round(math.sqrt(hma_length)))
+
+// Plot HMA
+plot(show_hma ? hma : na, "HMA", color=color.blue, linewidth=2)
+
+// ============================================================================
+// SMC STRUCTURE DETECTION (Based on ZigZag Pivots)
+// ============================================================================
+
+// Structure Display Settings
+showBOS = input.bool(true, "Show BOS", group="Structure Labels")
+showCHoCH = input.bool(true, "Show CHoCH", group="Structure Labels")
+structHistoryNbr = input.int(20, "Number of breaks to show", minval=1, maxval=100, group="Structure Labels")
+minBarsBetweenBreaks = input.int(5, "Min bars between breaks", minval=1, maxval=50, group="Structure Labels", tooltip="Minimum candles between BOS/CHoCH detections to reduce noise")
+
+// Colors
+bullishBosColor = input.color(color.silver, "Bullish BOS Color", group="Colors")
+bearishBosColor = input.color(color.silver, "Bearish BOS Color", group="Colors")
+bullishChochColor = input.color(color.yellow, "Bullish CHoCH Color", group="Colors")
+bearishChochColor = input.color(color.yellow, "Bearish CHoCH Color", group="Colors")
+
+// Risk Management
+stoploss_pct = input.float(-5.8, "Stop Loss %", minval=-10, maxval=-1, step=0.1, group="Strategy")
+
+// Trailing Stop (validated with hyperopt)
+use_trailing = input.bool(true, "Enable Trailing Stop", group="Strategy", tooltip="Activate trailing stop when trade is in profit")
+trailing_offset = input.float(2.0, "Trailing Offset %", minval=0.5, maxval=10, step=0.1, group="Strategy", tooltip="Activate trailing when profit > this %")
+trailing_distance = input.float(1.0, "Trailing Distance %", minval=0.1, maxval=5, step=0.1, group="Strategy", tooltip="Keep stop this % below highest profit")
+
+// Exit Options
+exit_on_bos_opposite = input.bool(false, "Require BOS Confirmation to Exit", group="Strategy", tooltip="More conservative: Wait for BOS confirmation after CHoCH before exiting (CHoCH → wait BOS → exit)")
+
+// Enable/Disable Trade Directions
+enable_longs = input.bool(true, "Enable Long Trades", group="Strategy", tooltip="Allow opening long positions")
+enable_shorts = input.bool(true, "Enable Short Trades", group="Strategy", tooltip="Allow opening short positions")
+
+// Visual Signals
+showEntrySignals = input.bool(true, "Show Entry Signals", group="Strategy")
+showExitSignals = input.bool(true, "Show Exit Signals", group="Strategy")
+showBackgroundStates = input.bool(true, "Show Waiting States Background", group="Strategy")
+
+// Structure tracking variables
+var float lastPivotHigh = na
+var float lastPivotLow = na
+var int lastPivotHighBar = na
+var int lastPivotLowBar = na
+var int structureDirection = 0  // 0=neutral, 1=bearish (downtrend), 2=bullish (uptrend)
+var int lastBreakBar = 0  // Track last break detection to avoid noise
+
+var array<line> structureLines = array.new<line>(0)
+var array<label> structureLabels = array.new<label>(0)
+
+// Trailing stop tracking
+var float max_profit_long = 0.0
+var float max_profit_short = 0.0
+
+// Exit confirmation tracking (for BOS confirmation mode)
+var bool waiting_exit_long_confirmation = false
+var bool waiting_exit_short_confirmation = false
+
+// Track position state to detect closes
+var float prev_position_size = 0.0
+
+// Exit type tracking for markers
+var bool exit_by_stoploss_long = false
+var bool exit_by_stoploss_short = false
+var bool exit_by_trailing_long = false
+var bool exit_by_trailing_short = false
+
+// HMA filter tracking
+var bool hma_touched_long = false   // Tracks if price touched HMA while waiting for long entry
+var bool hma_touched_short = false  // Tracks if price touched HMA while waiting for short entry
+
+// Signal variables
+var bool choch_bullish = false
+var bool choch_bearish = false
+var bool bos_bullish = false
+var bool bos_bearish = false
+
+// Reset signals every bar
+choch_bullish := false
+choch_bearish := false
+bos_bullish := false
+bos_bearish := false
+
+// Reset exit markers
+exit_by_stoploss_long := false
+exit_by_stoploss_short := false
+exit_by_trailing_long := false
+exit_by_trailing_short := false
+
+// Process pivot detections from ZigZag
+// When a new pivot HIGH is confirmed
+if not na(ph)
+    int pivotBar = bar_index
+    float pivotPrice = ph
+
+    // Manage history
+    if array.size(structureLines) >= structHistoryNbr * 2
+        line.delete(array.get(structureLines, 0))
+        label.delete(array.get(structureLabels, 0))
+        array.remove(structureLines, 0)
+        array.remove(structureLabels, 0)
+
+    // Only detect if enough bars passed since last break (reduce noise)
+    bool canDetectBreak = (bar_index - lastBreakBar) >= minBarsBetweenBreaks
+
+    // Determine if this is CHoCH or BOS
+    if not na(lastPivotHigh) and canDetectBreak
+        if pivotPrice > lastPivotHigh
+            // Price broke above previous high
+            if structureDirection == 2
+                // Already bullish → BOS (continuation)
+                bos_bullish := true
+                lastBreakBar := bar_index
+                // Visual elements (optional)
+                if showBOS
+                    array.push(structureLines, line.new(lastPivotHighBar, lastPivotHigh, pivotBar, lastPivotHigh, color=bullishBosColor, style=line.style_solid, width=1))
+                    array.push(structureLabels, label.new((pivotBar + lastPivotHighBar) / 2, lastPivotHigh, "BOS", style=label.style_none, textcolor=bullishBosColor))
+            else if structureDirection != 2
+                // Was bearish/neutral → CHoCH (reversal)
+                choch_bullish := true
+                structureDirection := 2
+                lastBreakBar := bar_index
+                // Visual elements (optional)
+                if showCHoCH
+                    array.push(structureLines, line.new(lastPivotHighBar, lastPivotHigh, pivotBar, lastPivotHigh, color=bullishChochColor, style=line.style_solid, width=2))
+                    array.push(structureLabels, label.new((pivotBar + lastPivotHighBar) / 2, lastPivotHigh, "CHoCH", style=label.style_none, textcolor=bullishChochColor))
+
+    // Update last pivot high
+    lastPivotHigh := pivotPrice
+    lastPivotHighBar := pivotBar
+
+// When a new pivot LOW is confirmed
+if not na(pl)
+    int pivotBar = bar_index
+    float pivotPrice = pl
+
+    // Manage history
+    if array.size(structureLines) >= structHistoryNbr * 2
+        line.delete(array.get(structureLines, 0))
+        label.delete(array.get(structureLabels, 0))
+        array.remove(structureLines, 0)
+        array.remove(structureLabels, 0)
+
+    // Only detect if enough bars passed since last break (reduce noise)
+    bool canDetectBreak = (bar_index - lastBreakBar) >= minBarsBetweenBreaks
+
+    // Determine if this is CHoCH or BOS
+    if not na(lastPivotLow) and canDetectBreak
+        if pivotPrice < lastPivotLow
+            // Price broke below previous low
+            if structureDirection == 1
+                // Already bearish → BOS (continuation)
+                bos_bearish := true
+                lastBreakBar := bar_index
+                // Visual elements (optional)
+                if showBOS
+                    array.push(structureLines, line.new(lastPivotLowBar, lastPivotLow, pivotBar, lastPivotLow, color=bearishBosColor, style=line.style_solid, width=1))
+                    array.push(structureLabels, label.new((pivotBar + lastPivotLowBar) / 2, lastPivotLow, "BOS", style=label.style_none, textcolor=bearishBosColor))
+            else if structureDirection != 1
+                // Was bullish/neutral → CHoCH (reversal)
+                choch_bearish := true
+                structureDirection := 1
+                lastBreakBar := bar_index
+                // Visual elements (optional)
+                if showCHoCH
+                    array.push(structureLines, line.new(lastPivotLowBar, lastPivotLow, pivotBar, lastPivotLow, color=bearishChochColor, style=line.style_solid, width=2))
+                    array.push(structureLabels, label.new((pivotBar + lastPivotLowBar) / 2, lastPivotLow, "CHoCH", style=label.style_none, textcolor=bearishChochColor))
+
+    // Update last pivot low
+    lastPivotLow := pivotPrice
+    lastPivotLowBar := pivotBar
+
+// ============================================================================
+// STRATEGY LOGIC
+// ============================================================================
+
+var bool waiting_long_confirmation = false
+var bool waiting_short_confirmation = false
+
+if choch_bullish
+    waiting_long_confirmation := true
+    waiting_short_confirmation := false
+    hma_touched_long := false  // Reset HMA touch flag
+
+if choch_bearish
+    waiting_short_confirmation := true
+    waiting_long_confirmation := false
+    hma_touched_short := false  // Reset HMA touch flag
+
+// ============================================================================
+// HMA FILTER - Detect if price touches HMA while waiting for confirmation
+// ============================================================================
+
+// Detect HMA touch for LONG: price pulls back to HMA while in uptrend
+if waiting_long_confirmation and use_hma_filter_long
+    // Check if candle touched HMA (low reached it) while close is above (bullish)
+    if low <= hma and close > hma
+        hma_touched_long := true
+
+// Detect HMA touch for SHORT: price retraces to HMA while in downtrend
+if waiting_short_confirmation and use_hma_filter_short
+    // Check if candle touched HMA (high reached it) while close is below (bearish)
+    if high >= hma and close < hma
+        hma_touched_short := true
+
+var bool long_entry = false
+var bool short_entry = false
+
+long_entry := false
+short_entry := false
+
+// LONG entry: CHoCH + BOS + HMA filter (if enabled)
+if waiting_long_confirmation and bos_bullish
+    // Check HMA filter condition
+    bool hma_condition_met = true
+    if use_hma_filter_long
+        hma_condition_met := hma_touched_long
+
+    if hma_condition_met
+        long_entry := true
+        waiting_long_confirmation := false
+        hma_touched_long := false
+
+// SHORT entry: CHoCH + BOS + HMA filter (if enabled)
+if waiting_short_confirmation and bos_bearish
+    // Check HMA filter condition
+    bool hma_condition_met = true
+    if use_hma_filter_short
+        hma_condition_met := hma_touched_short
+
+    if hma_condition_met
+        short_entry := true
+        waiting_short_confirmation := false
+        hma_touched_short := false
+
+// Invalidate long setup if opposite CHoCH appears
+if waiting_long_confirmation and choch_bearish
+    waiting_long_confirmation := false
+    hma_touched_long := false
+
+// Invalidate short setup if opposite CHoCH appears
+if waiting_short_confirmation and choch_bullish
+    waiting_short_confirmation := false
+    hma_touched_short := false
+
+var bool long_exit = false
+var bool short_exit = false
+var string long_exit_reason = ""
+var string short_exit_reason = ""
+
+long_exit := false
+short_exit := false
+long_exit_reason := ""
+short_exit_reason := ""
+
+// === EXIT LOGIC ===
+if strategy.position_size > 0
+    // LONG position exit logic
+    if exit_on_bos_opposite
+        // Mode: CHoCH → Wait BOS confirmation
+        if choch_bearish
+            waiting_exit_long_confirmation := true
+
+        if choch_bullish
+            // Opposite CHoCH: cancel exit signal
+            waiting_exit_long_confirmation := false
+
+        if waiting_exit_long_confirmation and bos_bearish
+            // Exit confirmed by BOS
+            long_exit := true
+            long_exit_reason := "CHoCH+BOS Bearish"
+            waiting_exit_long_confirmation := false
+    else
+        // Mode: Exit immediately on CHoCH
+        if choch_bearish
+            long_exit := true
+            long_exit_reason := "CHoCH Bearish"
+
+if strategy.position_size < 0
+    // SHORT position exit logic
+    if exit_on_bos_opposite
+        // Mode: CHoCH → Wait BOS confirmation
+        if choch_bullish
+            waiting_exit_short_confirmation := true
+
+        if choch_bearish
+            // Opposite CHoCH: cancel exit signal
+            waiting_exit_short_confirmation := false
+
+        if waiting_exit_short_confirmation and bos_bullish
+            // Exit confirmed by BOS
+            short_exit := true
+            short_exit_reason := "CHoCH+BOS Bullish"
+            waiting_exit_short_confirmation := false
+    else
+        // Mode: Exit immediately on CHoCH
+        if choch_bullish
+            short_exit := true
+            short_exit_reason := "CHoCH Bullish"
+
+// Execute trades (with enable filters)
+if long_entry and enable_longs
+    strategy.entry("Long", strategy.long)
+    max_profit_long := 0.0  // Reset max profit tracker
+
+if short_entry and enable_shorts
+    strategy.entry("Short", strategy.short)
+    max_profit_short := 0.0  // Reset max profit tracker
+
+if long_exit
+    strategy.close("Long", comment=long_exit_reason)
+
+if short_exit
+    strategy.close("Short", comment=short_exit_reason)
+
+// Risk Management: Stop Loss + Trailing Stop
+// Calculate stops for active positions
+if strategy.position_size > 0
+    // LONG position
+    float entry_price = strategy.position_avg_price
+    float current_profit_pct = ((close - entry_price) / entry_price) * 100
+
+    // Track maximum profit reached
+    if current_profit_pct > max_profit_long
+        max_profit_long := current_profit_pct
+
+    // Calculate stop price
+    float stop_price = na
+    if use_trailing and max_profit_long >= trailing_offset
+        // Trailing stop: keep stop at (max_profit - trailing_distance)%
+        float trailing_stop_pct = max_profit_long - trailing_distance
+        stop_price := entry_price * (1 + trailing_stop_pct / 100)
+    else
+        // Fixed stop loss
+        stop_price := entry_price * (1 + stoploss_pct / 100)
+
+    // Apply stop loss order
+    strategy.exit("SL/Trail Long", "Long", stop=stop_price)
+
+else if strategy.position_size < 0
+    // SHORT position
+    float entry_price = strategy.position_avg_price
+    float current_profit_pct = ((entry_price - close) / entry_price) * 100
+
+    // Track maximum profit reached
+    if current_profit_pct > max_profit_short
+        max_profit_short := current_profit_pct
+
+    // Calculate stop price
+    float stop_price = na
+    if use_trailing and max_profit_short >= trailing_offset
+        // Trailing stop: keep stop at (max_profit - trailing_distance)%
+        float trailing_stop_pct = max_profit_short - trailing_distance
+        stop_price := entry_price * (1 - trailing_stop_pct / 100)
+    else
+        // Fixed stop loss
+        stop_price := entry_price * (1 - stoploss_pct / 100)
+
+    // Apply stop loss order
+    strategy.exit("SL/Trail Short", "Short", stop=stop_price)
+
+// ============================================================================
+// DETECT EXIT TYPE (for markers)
+// ============================================================================
+
+// Detect if a LONG position just closed
+if prev_position_size > 0 and strategy.position_size == 0
+    // Position closed - was it by CHoCH exit or SL/trailing?
+    if not long_exit
+        // Closed by SL or trailing (not by CHoCH)
+        if use_trailing and max_profit_long >= trailing_offset
+            // Was using trailing stop
+            exit_by_trailing_long := true
+        else
+            // Was using fixed SL
+            exit_by_stoploss_long := true
+
+// Detect if a SHORT position just closed
+if prev_position_size < 0 and strategy.position_size == 0
+    // Position closed - was it by CHoCH exit or SL/trailing?
+    if not short_exit
+        // Closed by SL or trailing (not by CHoCH)
+        if use_trailing and max_profit_short >= trailing_offset
+            // Was using trailing stop
+            exit_by_trailing_short := true
+        else
+            // Was using fixed SL
+            exit_by_stoploss_short := true
+
+// Update position tracking
+prev_position_size := strategy.position_size
+
+// ============================================================================
+// VISUAL ELEMENTS
+// ============================================================================
+
+// Entry waiting states
+bgcolor(showBackgroundStates and waiting_long_confirmation ? color.new(color.lime, 95) : na)
+bgcolor(showBackgroundStates and waiting_short_confirmation ? color.new(color.orange, 95) : na)
+
+// Exit waiting states (orange/red tint)
+bgcolor(showBackgroundStates and waiting_exit_long_confirmation ? color.new(color.red, 92) : na)
+bgcolor(showBackgroundStates and waiting_exit_short_confirmation ? color.new(color.orange, 92) : na)
+
+// Entry signals
+plotshape(showEntrySignals and long_entry, "Long Entry", shape.labelup, location.belowbar, color.new(color.lime, 0), size=size.small, text="LONG", textcolor=color.white)
+plotshape(showEntrySignals and short_entry, "Short Entry", shape.labeldown, location.abovebar, color.new(color.red, 0), size=size.small, text="SHORT", textcolor=color.white)
+
+// Exit signals - CHoCH/BOS exits
+plotshape(showExitSignals and long_exit, "Long Exit CHoCH", shape.xcross, location.abovebar, color.new(color.yellow, 0), size=size.small, text="TP")
+plotshape(showExitSignals and short_exit, "Short Exit CHoCH", shape.xcross, location.belowbar, color.new(color.yellow, 0), size=size.small, text="TP")
+
+// Exit signals - Stop Loss
+plotshape(showExitSignals and exit_by_stoploss_long, "Long SL", shape.circle, location.abovebar, color.new(color.red, 0), size=size.tiny, text="SL")
+plotshape(showExitSignals and exit_by_stoploss_short, "Short SL", shape.circle, location.belowbar, color.new(color.red, 0), size=size.tiny, text="SL")
+
+// Exit signals - Trailing Stop
+plotshape(showExitSignals and exit_by_trailing_long, "Long Trail", shape.triangledown, location.abovebar, color.new(color.orange, 0), size=size.tiny, text="TRAIL")
+plotshape(showExitSignals and exit_by_trailing_short, "Short Trail", shape.triangleup, location.belowbar, color.new(color.orange, 0), size=size.tiny, text="TRAIL")
+
+// Information table
+var table info_table = table.new(position.top_right, 2, 9, border_width=1, border_color=color.gray, frame_width=1, frame_color=color.gray)
+
+if barstate.islast
+    table.cell(info_table, 0, 0, "Status", text_color=color.white, bgcolor=color.gray)
+    string status_text = "NEUTRAL"
+    color status_color = color.gray
+
+    if strategy.position_size > 0
+        if waiting_exit_long_confirmation
+            status_text := "IN LONG (EXIT?)"
+            status_color := color.orange
+        else
+            status_text := "IN LONG"
+            status_color := color.green
+    else if strategy.position_size < 0
+        if waiting_exit_short_confirmation
+            status_text := "IN SHORT (EXIT?)"
+            status_color := color.orange
+        else
+            status_text := "IN SHORT"
+            status_color := color.red
+    else if waiting_long_confirmation
+        status_text := "WAIT LONG BOS"
+        status_color := color.lime
+    else if waiting_short_confirmation
+        status_text := "WAIT SHORT BOS"
+        status_color := color.orange
+
+    table.cell(info_table, 1, 0, status_text, text_color=color.white, bgcolor=status_color)
+
+    table.cell(info_table, 0, 1, "Direction", text_color=color.white, bgcolor=color.gray)
+    string dir_text = structureDirection == 2 ? "BULLISH" : structureDirection == 1 ? "BEARISH" : "NEUTRAL"
+    color dir_color = structureDirection == 2 ? color.green : structureDirection == 1 ? color.red : color.gray
+    table.cell(info_table, 1, 1, dir_text, text_color=color.white, bgcolor=dir_color)
+
+    // Profit and Trailing info
+    table.cell(info_table, 0, 2, "Current Profit", text_color=color.white, bgcolor=color.gray)
+    string profit_text = "N/A"
+    color profit_color = color.gray
+    if strategy.position_size != 0
+        float entry = strategy.position_avg_price
+        float current_pnl_pct = strategy.position_size > 0 ? ((close - entry) / entry) * 100 : ((entry - close) / entry) * 100
+        profit_text := str.tostring(current_pnl_pct, "#.##") + "%"
+        profit_color := current_pnl_pct > 0 ? color.green : color.red
+    table.cell(info_table, 1, 2, profit_text, text_color=color.white, bgcolor=profit_color)
+
+    table.cell(info_table, 0, 3, "Trailing Stop", text_color=color.white, bgcolor=color.gray)
+    string trailing_text = "INACTIVE"
+    color trailing_color = color.gray
+    if use_trailing
+        if strategy.position_size > 0 and max_profit_long >= trailing_offset
+            trailing_text := "ACTIVE (" + str.tostring(max_profit_long, "#.##") + "%)"
+            trailing_color := color.orange
+        else if strategy.position_size < 0 and max_profit_short >= trailing_offset
+            trailing_text := "ACTIVE (" + str.tostring(max_profit_short, "#.##") + "%)"
+            trailing_color := color.orange
+        else if strategy.position_size != 0
+            trailing_text := "WAITING"
+            trailing_color := color.blue
+    else
+        trailing_text := "DISABLED"
+    table.cell(info_table, 1, 3, trailing_text, text_color=color.white, bgcolor=trailing_color)
+
+    table.cell(info_table, 0, 4, "Last Pivot High", text_color=color.white, bgcolor=color.gray)
+    string highText = not na(lastPivotHigh) ? str.tostring(lastPivotHigh, "#.####") : "N/A"
+    table.cell(info_table, 1, 4, highText, text_color=color.red, bgcolor=color.new(color.gray, 70))
+
+    table.cell(info_table, 0, 5, "Last Pivot Low", text_color=color.white, bgcolor=color.gray)
+    string lowText = not na(lastPivotLow) ? str.tostring(lastPivotLow, "#.####") : "N/A"
+    table.cell(info_table, 1, 5, lowText, text_color=color.green, bgcolor=color.new(color.gray, 70))
+
+    table.cell(info_table, 0, 6, "ZigZag Period", text_color=color.white, bgcolor=color.gray)
+    table.cell(info_table, 1, 6, str.tostring(prd) + " bars", text_color=color.white, bgcolor=color.new(color.gray, 70))
+
+    table.cell(info_table, 0, 7, "Min Bars Break", text_color=color.white, bgcolor=color.gray)
+    table.cell(info_table, 1, 7, str.tostring(minBarsBetweenBreaks), text_color=color.white, bgcolor=color.new(color.gray, 70))
+
+    // HMA Filter Status
+    table.cell(info_table, 0, 8, "HMA Filter", text_color=color.white, bgcolor=color.gray)
+    string hma_text = "OFF"
+    color hma_color = color.gray
+
+    if use_hma_filter_long or use_hma_filter_short
+        if waiting_long_confirmation and use_hma_filter_long
+            hma_text := hma_touched_long ? "LONG OK ✓" : "WAIT TOUCH"
+            hma_color := hma_touched_long ? color.green : color.orange
+        else if waiting_short_confirmation and use_hma_filter_short
+            hma_text := hma_touched_short ? "SHORT OK ✓" : "WAIT TOUCH"
+            hma_color := hma_touched_short ? color.green : color.orange
+        else
+            hma_text := "ON"
+            hma_color := color.blue
+
+    table.cell(info_table, 1, 8, hma_text, text_color=color.white, bgcolor=hma_color)
+
+// Alerts
+alertcondition(choch_bullish, "CHoCH Bullish", "CHoCH Bullish - prepare for long")
+alertcondition(choch_bearish, "CHoCH Bearish", "CHoCH Bearish - prepare for short")
+alertcondition(bos_bullish, "BOS Bullish", "BOS Bullish - trend continuation")
+alertcondition(bos_bearish, "BOS Bearish", "BOS Bearish - trend continuation")
+alertcondition(long_entry, "Long Entry", "ENTRY LONG: CHoCH + BOS confirmed")
+alertcondition(short_entry, "Short Entry", "ENTRY SHORT: CHoCH + BOS confirmed")
+alertcondition(long_exit, "Long Exit", "EXIT LONG: CHoCH Bearish")
+alertcondition(short_exit, "Short Exit", "EXIT SHORT: CHoCH Bullish")
