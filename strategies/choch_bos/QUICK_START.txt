@@ -1,0 +1,74 @@
+╔══════════════════════════════════════════════════════════════╗
+║          CHoCH/BOS Strategy - Quick Start Guide             ║
+╚══════════════════════════════════════════════════════════════╝
+
+📁 ESTRUCTURA DE CARPETAS
+─────────────────────────
+strategies/choch_bos/
+  ├── README.md                 # Documentación principal
+  ├── configs/                  # Configuraciones
+  │   ├── config_choch_bos_live.json  # Config principal
+  │   ├── config.exchange.*.json      # Overrides por exchange
+  │   └── backtest/             # Configs de backtest
+  ├── docs/                     # Guías detalladas
+  ├── scripts/                  # Scripts utilitarios
+  └── CHoCHBOSStrategy.py/json  # Estrategia (copia)
+
+🚀 INICIO RÁPIDO (Desde raíz del proyecto)
+─────────────────────────────────────────
+1. Desde la raíz:
+   ./run_choch_bos.sh
+
+2. Desde la carpeta de estrategia:
+   cd strategies/choch_bos/scripts
+   ./start_trading.sh
+
+3. Comando directo:
+   freqtrade.exe trade \
+     --strategy CHoCHBOSStrategy \
+     --config strategies/choch_bos/configs/config_choch_bos_live.json \
+     --timeframe 15m
+
+⚙️ CONFIGURACIÓN
+────────────────
+1. Edita: strategies/choch_bos/configs/config_choch_bos_live.json
+2. Cambia API keys en sección "exchange"
+3. Para cambiar exchange, edita "name" y "pair_whitelist"
+   - Binance Futures: ya configurado (pares con :USDT)
+   - Binance Spot: cambiar a pares sin :USDT
+   - Hyperliquid: cambiar name a "hyperliquid", usar :USDC
+
+📊 PARÁMETROS OPTIMIZADOS (15m)
+───────────────────────────────
+- Timeframe: 15m (recomendado)
+- Win Rate: 70-72%
+- Profit: +20.54% (Altcoins, 4 meses)
+- Mejores pares: SOL, ADA, LINK, AAVE
+- Evitar: BTC
+
+📚 DOCUMENTACIÓN COMPLETA
+─────────────────────────
+- README: strategies/choch_bos/README.md
+- Guía Rápida: strategies/choch_bos/docs/START_TRADING_QUICK_GUIDE.md
+- Guía Completa: strategies/choch_bos/docs/LIVE_TRADING_GUIDE.md
+- Análisis: strategies/choch_bos/docs/CHOCH_BOS_STRATEGY_ANALYSIS.md
+
+⚠️ ANTES DE TRADING REAL
+─────────────────────────
+☐ Probado en dry-run por 1+ semana
+☐ API keys configurados correctamente
+☐ "dry_run": false en config
+☐ Pares correctos seleccionados
+☐ Telegram configurado (opcional)
+☐ Contraseña FreqUI cambiada
+
+🌐 MONITOREO
+────────────
+FreqUI: http://127.0.0.1:8080
+User: freqtrader
+Pass: CHANGE_THIS_PASSWORD (cambiar en config!)
+
+Logs: tail -f user_data/logs/freqtrade.log
+Status: freqtrade status --config [config]
+
+═══════════════════════════════════════════════════════════════

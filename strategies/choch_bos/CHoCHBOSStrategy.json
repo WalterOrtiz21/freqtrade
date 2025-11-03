@@ -1,0 +1,36 @@
+{
+  "strategy_name": "CHoCHBOSStrategy",
+  "params": {
+    "roi": {
+      "0": 0.1,
+      "60": 0.05,
+      "120": 0.03,
+      "240": 0.01
+    },
+    "stoploss": {
+      "stoploss": -0.03
+    },
+    "trailing": {
+      "trailing_stop": true,
+      "trailing_stop_positive": 0.01,
+      "trailing_stop_positive_offset": 0.02,
+      "trailing_only_offset_is_reached": true
+    },
+    "max_open_trades": {
+      "max_open_trades": 3
+    },
+    "buy": {
+      "zigzag_depth": 35,
+      "zigzag_deviation": 10
+    },
+    "sell": {
+      "move_to_be_after_tp1": false,
+      "tp1_percentage": 0.3,
+      "tp2_percentage": 0.5,
+      "use_bos_tps": false
+    },
+    "protection": {}
+  },
+  "ft_stratparam_v": 1,
+  "export_time": "2025-10-30 23:04:08.169229+00:00"
+}

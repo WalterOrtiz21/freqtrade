@@ -1,0 +1,55 @@
+// OmegaTools
+
+//@version=5
+indicator("Smooth Trail V2", overlay=true, timeframe="", timeframe_gaps=true)
+
+inp1 = input.float(3.00, "Multiplier", group = "Settings")
+inp2 = input.int(34, "Lenght", group = "Settings")
+inp3 = input.float(1.00, "Zone width", group = "Other")
+
+alert = input.string("Zone Touch", "Alert", ["Zone Touch", "Trend Change"], group = "Other")
+target = input.bool(false, "Show Opposite Area", group = "Other")
+lin = input.bool(false, "Show Crossing Lines", group = "Other")
+
+atrs = ta.atr(100)
+[supertrend, direction] = ta.supertrend(math.round(math.avg(7, inp1)), inp2*2)
+hullup = ta.hma(high, math.round(math.avg(21, inp2))) + atrs*math.round(inp1/2.5)
+hulldown = ta.hma(low, math.round(math.avg(21, inp2))) - atrs*math.round(inp1/2.5)
+hline = ta.highest(close, inp2) + atrs
+lline = ta.lowest(close, inp2) + atrs
+supert = 0.00
+supert := if close > supertrend
+    math.avg(supertrend, supertrend, supertrend, hulldown, lline)
+else if close < supertrend
+    math.avg(supertrend, supertrend, supertrend, hullup, hline)
+supert2 = 0.00
+supert2 := if close > supert
+    supert + atrs*inp3
+else if close < supert
+    supert - atrs*inp3
+
+tool = direction > 0 or direction < 0
+toolx = lin ? true : (direction < 0 and direction[1] < 0) or (direction > 0 and direction[1] > 0)
+tool12 = plot(toolx ? supert : na, "Extreme line", color = close > supert ? #2962ff : #e91e63, style = plot.style_linebr)
+tool2 = plot(toolx ? supert2 : na, "Zone line", color = color.new(color.gray, 100), display = display.none, editable = false, style = plot.style_linebr)
+fill(tool12, tool2, color = close > supert ? color.new(#2962ff, 80) : color.new(#e91e63, 80), fillgaps=false)
+
+mid = ta.ema(close, 21)
+dist = (supert - mid) * inp3
+tpl = ta.sma(mid - dist, 2)
+
+plot(toolx and target == true ? tpl : na, "Target", close > supert ? #2962ff : #e91e63, style = plot.style_linebr)
+
+// Alerts
+alertb = close < supert2 and close > supert
+alerts = close > supert2 and close < supert
+tchup = direction < 0 and direction[3] > 0
+tchdown = direction > 0 and direction[3] < 0
+
+chosen = switch alert
+    "Zone Touch" => alertb or alerts
+    "Trend Change" => tchup or tchdown
+
+alertcondition(chosen, "Smooth Trail Alert", "The price of {{ticker}} is in the area of SuperTrend")
+
+// End of Script - Eros
