@@ -1,0 +1,25 @@
+{
+  "strategy_name": "SMCSimpleFVGTrailing",
+  "params": {
+    "roi": {
+      "0": 1.0
+    },
+    "stoploss": {
+      "stoploss": -0.2
+    },
+    "max_open_trades": {
+      "max_open_trades": 1
+    },
+    "buy": {},
+    "sell": {},
+    "protection": {},
+    "trailing": {
+      "trailing_stop": true,
+      "trailing_stop_positive": 0.343,
+      "trailing_stop_positive_offset": 0.418,
+      "trailing_only_offset_is_reached": false
+    }
+  },
+  "ft_stratparam_v": 1,
+  "export_time": "2025-11-12 13:26:59.674230+00:00"
+}

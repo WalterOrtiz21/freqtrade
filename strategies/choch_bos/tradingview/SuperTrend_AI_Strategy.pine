@@ -1,0 +1,376 @@
+// This work is licensed under a Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0) https://creativecommons.org/licenses/by-nc-sa/4.0/
+// © LuxAlgo (Modified for Strategy by Claude)
+
+//@version=5
+strategy("SuperTrend AI Strategy [LuxAlgo]", "LuxAlgo - SuperTrend AI Strategy",
+         overlay = true,
+         max_labels_count = 500,
+         default_qty_type = strategy.percent_of_equity,
+         default_qty_value = 10,
+         commission_type = strategy.commission.percent,
+         commission_value = 0.1,
+         initial_capital = 10000,
+         currency = currency.USD)
+
+//------------------------------------------------------------------------------
+//Settings
+//-----------------------------------------------------------------------------{
+length = input(10, 'ATR Length')
+
+minMult = input.int(1, 'Factor Range', minval = 0, inline = 'factor')
+maxMult = input.int(5, '', minval = 0, inline = 'factor')
+step    = input.float(.5, 'Step', minval = 0, step = 0.1)
+
+//Trigger error
+if minMult > maxMult
+    runtime.error('Minimum factor is greater than maximum factor in the range')
+
+perfAlpha = input.float(10, 'Performance Memory', minval = 2)
+fromCluster = input.string('Best', 'From Cluster', options = ['Best', 'Average', 'Worst'])
+
+//Optimization
+maxIter = input.int(1000, 'Maximum Iteration Steps', minval = 0, group = 'Optimization')
+maxData = input.int(10000, 'Historical Bars Calculation', minval = 0, group = 'Optimization')
+
+//Strategy Settings
+useTrailingStop = input.bool(true, "Use Trailing Stop", group = "Strategy")
+trailingPercent = input.float(2.0, "Trailing Stop %", minval = 0.1, maxval = 10.0, step = 0.1, group = "Strategy")
+
+// Risk Management Options
+useStopLoss = input.bool(true, "Use Stop Loss", group = "Risk Management")
+stopLossPercent = input.float(3.0, "Stop Loss %", minval = 0.5, maxval = 10.0, step = 0.1, group = "Risk Management")
+
+useTakeProfit = input.bool(true, "Use Take Profit", group = "Risk Management")
+takeProfitPercent = input.float(5.0, "Take Profit %", minval = 0.5, maxval = 20.0, step = 0.1, group = "Risk Management")
+
+// Exit Options
+exitOnTrendChange = input.bool(true, "Exit on Trend Change", group = "Risk Management")
+
+//Entry Options
+entryOnCross = input.bool(true, "Entry on Trend Change", group = "Entry Options")
+entryOnAMA = input.bool(false, "Entry on AMA Cross", group = "Entry Options")
+requireConfirmation = input.bool(false, "Require Confirmation Bar", group = "Entry Options")
+
+//Style
+bearCss = input(color.red, 'Trailing Stop', inline = 'ts', group = 'Style')
+bullCss = input(color.teal, '', inline = 'ts', group = 'Style')
+
+amaBearCss = input(color.new(color.red, 50), 'AMA', inline = 'ama', group = 'Style')
+amaBullCss = input(color.new(color.teal, 50), '', inline = 'ama', group = 'Style')
+
+showGradient = input(true, 'Candle Coloring', group = 'Style')
+showSignals = input(true, 'Show Signals', group = 'Style')
+
+//Dashboard
+showDash  = input(true, 'Show Dashboard', group = 'Dashboard')
+dashLoc  = input.string('Top Right', 'Location', options = ['Top Right', 'Bottom Right', 'Bottom Left'], group = 'Dashboard')
+textSize = input.string('Small', 'Size'        , options = ['Tiny', 'Small', 'Normal'], group = 'Dashboard')
+
+//-----------------------------------------------------------------------------}
+//UDT's
+//-----------------------------------------------------------------------------{
+type supertrend
+    float upper = hl2
+    float lower = hl2
+    float output
+    float perf = 0
+    float factor
+    int trend = 0
+
+type vector
+    array<float> out
+
+//-----------------------------------------------------------------------------}
+//Supertrend
+//-----------------------------------------------------------------------------{
+var holder = array.new<supertrend>(0)
+var factors = array.new<float>(0)
+
+//Populate supertrend type array
+if barstate.isfirst
+    for i = 0 to int((maxMult - minMult) / step)
+        factors.push(minMult + i * step)
+        holder.push(supertrend.new())
+
+atr = ta.atr(length)
+
+//Compute Supertrend for multiple factors
+k = 0
+for factor in factors
+    get_spt = holder.get(k)
+
+    up = hl2 + atr * factor
+    dn = hl2 - atr * factor
+
+    get_spt.trend := close > get_spt.upper ? 1 : close < get_spt.lower ? 0 : get_spt.trend
+    get_spt.upper := close[1] < get_spt.upper ? math.min(up, get_spt.upper) : up
+    get_spt.lower := close[1] > get_spt.lower ? math.max(dn, get_spt.lower) : dn
+
+    diff = nz(math.sign(close[1] - get_spt.output))
+    get_spt.perf += 2/(perfAlpha+1) * (nz(close - close[1]) * diff - get_spt.perf)
+    get_spt.output := get_spt.trend == 1 ? get_spt.lower : get_spt.upper
+    get_spt.factor := factor
+    k += 1
+
+//-----------------------------------------------------------------------------}
+//K-means clustering
+//-----------------------------------------------------------------------------{
+factor_array = array.new<float>(0)
+data = array.new<float>(0)
+
+//Populate data arrays
+if last_bar_index - bar_index <= maxData
+    for element in holder
+        data.push(element.perf)
+        factor_array.push(element.factor)
+
+//Intitalize centroids using quartiles
+centroids = array.new<float>(0)
+centroids.push(data.percentile_linear_interpolation(25))
+centroids.push(data.percentile_linear_interpolation(50))
+centroids.push(data.percentile_linear_interpolation(75))
+
+//Intialize clusters
+var array<vector> factors_clusters = na
+var array<vector> perfclusters = na
+
+if last_bar_index - bar_index <= maxData
+    for _ = 0 to maxIter
+        factors_clusters := array.from(vector.new(array.new<float>(0)), vector.new(array.new<float>(0)), vector.new(array.new<float>(0)))
+        perfclusters := array.from(vector.new(array.new<float>(0)), vector.new(array.new<float>(0)), vector.new(array.new<float>(0)))
+
+        //Assign value to cluster
+        i = 0
+        for value in data
+            dist = array.new<float>(0)
+            for centroid in centroids
+                dist.push(math.abs(value - centroid))
+
+            idx = dist.indexof(dist.min())
+            perfclusters.get(idx).out.push(value)
+            factors_clusters.get(idx).out.push(factor_array.get(i))
+            i += 1
+
+        //Update centroids
+        new_centroids = array.new<float>(0)
+        for cluster_ in perfclusters
+            new_centroids.push(cluster_.out.avg())
+
+        //Test if centroid changed
+        if new_centroids.get(0) == centroids.get(0) and new_centroids.get(1) == centroids.get(1) and new_centroids.get(2) == centroids.get(2)
+            break
+
+        centroids := new_centroids
+
+//-----------------------------------------------------------------------------}
+//Signals and trailing stop
+//-----------------------------------------------------------------------------{
+//Get associated supertrend
+var float target_factor = na
+var float perf_idx = na
+var float perf_ama = na
+
+var from = switch fromCluster
+    'Best' => 2
+    'Average' => 1
+    'Worst' => 0
+
+//Performance index denominator
+den = ta.ema(math.abs(close - close[1]), int(perfAlpha))
+
+if not na(perfclusters)
+    //Get average factors within target cluster
+    target_factor := nz(factors_clusters.get(from).out.avg(), target_factor)
+
+    //Get performance index of target cluster
+    perf_idx := math.max(nz(perfclusters.get(from).out.avg()), 0) / den
+
+//Get new supertrend
+var upper = hl2
+var lower = hl2
+var os = 0
+
+up = hl2 + atr * target_factor
+dn = hl2 - atr * target_factor
+upper := close[1] < upper ? math.min(up, upper) : up
+lower := close[1] > lower ? math.max(dn, lower) : dn
+os := close > upper ? 1 : close < lower ? 0 : os
+ts = os ? lower : upper
+
+//Get trailing stop adaptive MA
+if na(ts[1]) and not na(ts)
+    perf_ama := ts
+else
+    perf_ama += perf_idx * (ts - perf_ama)
+
+//-----------------------------------------------------------------------------}
+//STRATEGY LOGIC
+//-----------------------------------------------------------------------------{
+// Track trend changes
+trendChanged = ta.change(os)
+longCondition = os == 1 and (entryOnCross ? os[1] == 0 : false)
+shortCondition = os == 0 and (entryOnCross ? os[1] == 1 : false)
+
+// AMA cross signals
+amaLongCross = ta.crossover(close, perf_ama)
+amaShortCross = ta.crossunder(close, perf_ama)
+
+if entryOnAMA
+    longCondition := longCondition or amaLongCross
+    shortCondition := shortCondition or amaShortCross
+
+// Confirmation bar logic
+if requireConfirmation
+    longCondition := longCondition and close > close[1]
+    shortCondition := shortCondition and close < close[1]
+
+// Strategy execution with risk management
+var float entryPrice = na
+var float stopLoss = na
+var float takeProfit = na
+
+// Long entry
+if longCondition and strategy.position_size == 0
+    entryPrice := close
+
+    // Calculate exit levels only if enabled
+    if useStopLoss
+        stopLoss := entryPrice * (1 - stopLossPercent / 100)
+    if useTakeProfit
+        takeProfit := entryPrice * (1 + takeProfitPercent / 100)
+
+    strategy.entry("Long", strategy.long, comment="AI Long")
+
+    // Dynamic exit based on enabled options
+    if useStopLoss and useTakeProfit
+        strategy.exit("Exit Long", "Long", stop=useStopLoss ? stopLoss : na, limit=useTakeProfit ? takeProfit : na)
+    else if useStopLoss
+        strategy.exit("SL Long", "Long", stop=stopLoss)
+    else if useTakeProfit
+        strategy.exit("TP Long", "Long", limit=takeProfit)
+
+    if useTrailingStop
+        strategy.exit("Trail Long", "Long", trail_price=entryPrice, trail_offset=entryPrice * trailingPercent / 100)
+
+// Short entry
+if shortCondition and strategy.position_size == 0
+    entryPrice := close
+
+    // Calculate exit levels only if enabled
+    if useStopLoss
+        stopLoss := entryPrice * (1 + stopLossPercent / 100)
+    if useTakeProfit
+        takeProfit := entryPrice * (1 - takeProfitPercent / 100)
+
+    strategy.entry("Short", strategy.short, comment="AI Short")
+
+    // Dynamic exit based on enabled options
+    if useStopLoss and useTakeProfit
+        strategy.exit("Exit Short", "Short", stop=useStopLoss ? stopLoss : na, limit=useTakeProfit ? takeProfit : na)
+    else if useStopLoss
+        strategy.exit("SL Short", "Short", stop=stopLoss)
+    else if useTakeProfit
+        strategy.exit("TP Short", "Short", limit=takeProfit)
+
+    if useTrailingStop
+        strategy.exit("Trail Short", "Short", trail_price=entryPrice, trail_offset=entryPrice * trailingPercent / 100)
+
+// Exit on trend change (opposite signal) - if enabled
+if exitOnTrendChange
+    if strategy.position_size > 0 and os == 0 and os[1] == 1
+        strategy.close("Long", comment="Trend Change")
+
+    if strategy.position_size < 0 and os == 1 and os[1] == 0
+        strategy.close("Short", comment="Trend Change")
+
+//-----------------------------------------------------------------------------}
+//Dashboard
+//-----------------------------------------------------------------------------{
+var table_position = dashLoc == 'Bottom Left' ? position.bottom_left
+  : dashLoc == 'Top Right' ? position.top_right
+  : position.bottom_right
+
+var table_size = textSize == 'Tiny' ? size.tiny
+  : textSize == 'Small' ? size.small
+  : size.normal
+
+var tb = table.new(table_position, 5, 5
+  , bgcolor = #1e222d
+  , border_color = #373a46
+  , border_width = 1
+  , frame_color = #373a46
+  , frame_width = 1)
+
+if showDash
+    if barstate.isfirst
+        tb.cell(0, 0, 'Cluster', text_color = color.white, text_size = table_size)
+        tb.cell(0, 1, 'Best', text_color = color.white, text_size = table_size)
+        tb.cell(0, 2, 'Average', text_color = color.white, text_size = table_size)
+        tb.cell(0, 3, 'Worst', text_color = color.white, text_size = table_size)
+        tb.cell(0, 4, 'Current', text_color = color.white, text_size = table_size)
+
+        tb.cell(1, 0, 'Size', text_color = color.white, text_size = table_size)
+        tb.cell(2, 0, 'Centroid', text_color = color.white, text_size = table_size)
+        tb.cell(3, 0, 'Factors', text_color = color.white, text_size = table_size)
+        tb.cell(4, 0, 'Perf Idx', text_color = color.white, text_size = table_size)
+
+    if barstate.islast
+        topN = perfclusters.get(2).out.size()
+        midN = perfclusters.get(1).out.size()
+        btmN = perfclusters.get(0).out.size()
+
+        //Size
+        tb.cell(1, 1, str.tostring(topN), text_color = color.white, text_size = table_size)
+        tb.cell(1, 2, str.tostring(midN), text_color = color.white, text_size = table_size)
+        tb.cell(1, 3, str.tostring(btmN), text_color = color.white, text_size = table_size)
+        tb.cell(1, 4, '-', text_color = color.white, text_size = table_size)
+
+        //Centroids
+        tb.cell(2, 1, str.tostring(centroids.get(2), '#.##'), text_color = color.white, text_size = table_size)
+        tb.cell(2, 2, str.tostring(centroids.get(1), '#.##'), text_color = color.white, text_size = table_size)
+        tb.cell(2, 3, str.tostring(centroids.get(0), '#.##'), text_color = color.white, text_size = table_size)
+        tb.cell(2, 4, str.tostring(target_factor, '#.##'), text_color = color.yellow, text_size = table_size)
+
+        //Factors
+        tb.cell(3, 1, str.tostring(factors_clusters.get(2).out), text_color = color.white, text_size = table_size, text_halign = text.align_left)
+        tb.cell(3, 2, str.tostring(factors_clusters.get(1).out), text_color = color.white, text_size = table_size, text_halign = text.align_left)
+        tb.cell(3, 3, str.tostring(factors_clusters.get(0).out), text_color = color.white, text_size = table_size, text_halign = text.align_left)
+        tb.cell(3, 4, str.tostring(target_factor, '#.##'), text_color = color.yellow, text_size = table_size, text_halign = text.align_left)
+
+        //Performance Index
+        tb.cell(4, 1, str.tostring(perf_idx, '#.###'), text_color = color.white, text_size = table_size)
+        tb.cell(4, 2, '-', text_color = color.white, text_size = table_size)
+        tb.cell(4, 3, '-', text_color = color.white, text_size = table_size)
+        tb.cell(4, 4, str.tostring(perf_idx, '#.###'), text_color = color.yellow, text_size = table_size)
+
+//-----------------------------------------------------------------------------}
+//Plots
+//-----------------------------------------------------------------------------{
+css = os ? bullCss : bearCss
+
+plot(ts, 'SuperTrend AI', os != os[1] ? na : css, linewidth=2)
+
+plot(perf_ama, 'Adaptive MA',
+  ta.cross(close, perf_ama) ? na
+  : close > perf_ama ? amaBullCss : amaBearCss, linewidth=1)
+
+//Plot entry/exit levels only if enabled
+plot(useStopLoss and strategy.position_size != 0 ? stopLoss : na, "Stop Loss", color.red, style=plot.style_linebr, linewidth=1)
+plot(useTakeProfit and strategy.position_size != 0 ? takeProfit : na, "Take Profit", color.green, style=plot.style_linebr, linewidth=1)
+
+//Candle coloring
+barcolor(showGradient ? color.from_gradient(perf_idx, 0, 1, color.new(css, 80), css) : na)
+
+//Strategy signals on chart
+if showSignals
+    if longCondition and strategy.position_size == 0
+        label.new(bar_index, low, "BUY\n" + str.tostring(perf_idx, '#.##'),
+                  color=color.green, style=label.style_label_up,
+                  textcolor=color.white, size=size.small)
+
+    if shortCondition and strategy.position_size == 0
+        label.new(bar_index, high, "SELL\n" + str.tostring(perf_idx, '#.##'),
+                  color=color.red, style=label.style_label_down,
+                  textcolor=color.white, size=size.small)
+
+//-----------------------------------------------------------------------------}

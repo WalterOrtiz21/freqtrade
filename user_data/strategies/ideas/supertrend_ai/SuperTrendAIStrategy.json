@@ -1,0 +1,45 @@
+{
+  "strategy_name": "SuperTrendAIStrategy",
+  "params": {
+    "max_open_trades": {
+      "max_open_trades": 1
+    },
+    "buy": {
+      "atr_length": 10,
+      "max_factor": 5.0,
+      "min_factor": 1.0,
+      "perf_alpha": 20,
+      "use_adx_filter": false,
+      "adx_threshold": 30,
+      "_cluster_selection": "['best', 'average', 'worst']",
+      "cluster_selection": "best"
+    },
+    "sell": {
+      "_exit_mode": "'ama', 'standard', 'none'",
+      "exit_mode": "none"
+    },
+    "protection": {
+      "use_break_even": true,
+      "be_trigger": 0.015,
+      "be_offset": 0.002,
+      "tp1_sell_pct": 0.75
+    },
+    "_roi": {
+      "0": 0.08,
+      "86": 0.04,
+      "211": 0.02,
+      "372": 0.01
+    },
+    "stoploss": {
+      "stoploss": -0.025
+    },
+    "trailing": {
+      "trailing_stop": false,
+      "trailing_stop_positive": 0.015,
+      "trailing_stop_positive_offset": 0.025,
+      "trailing_only_offset_is_reached": true
+    }
+  },
+  "ft_stratparam_v": 1,
+  "export_time": "2025-11-24 00:45:10.358105+00:00"
+}

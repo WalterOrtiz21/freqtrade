@@ -1,0 +1,62 @@
+{
+  "strategy_name": "LorentzianClassificationStrategy",
+  "params": {
+    "_roi": {
+      "0": 0.10,
+      "120": 0.05,
+      "360": 0.01
+    },
+    "stoploss": {
+      "stoploss": -0.99
+    },
+    "trailing": {
+      "trailing_stop": false,
+      "trailing_stop_positive": 0.005,
+      "trailing_stop_positive_offset": 0.015,
+      "trailing_only_offset_is_reached": true
+    },
+    "max_open_trades": {
+      "max_open_trades": 1
+    },
+    "buy": {
+      "buy_min_score": 0,
+      "neighbors_count": 8,
+      "max_bars_back": 2000,
+      "use_volatility_filter": true,
+      "use_regime_filter": true,
+      "regime_threshold": -0.1,
+      "use_kernel_filter": true,
+      "_kernel_types": "'rational_quadratic', 'locally_periodic', 'periodic'",
+      "kernel_type": "rational_quadratic",
+      "kernel_lookback": 8,
+      "kernel_weighting": 8.0,
+      "kernel_regression_level": 25,
+      "use_adx_filter": false,
+      "use_ema_filter": true,
+      "use_sma_filter": true,
+      "use_dual_pole_filter": false,
+      "dual_pole_smoothing_frequency": 20,
+      "use_kernel_pullback_filter": true,
+      "kernel_pullback_tolerance": 0.008,
+      "_kernel_pullback_touch_type": "['wick', 'body', 'either']",
+      "kernel_pullback_touch_type": "either",
+      "use_kernel_smoothing": false,
+      "startup_candle_count": 7000,
+      "rsi_period_1": 14,
+      "rsi_period_2": 9,
+      "wt_channel_length": 10,
+      "wt_average_length": 11,
+      "cci_period": 20,
+      "adx_period": 20
+    },
+    "sell": {
+      "_exit_mode": "'fixed_bars', 'signal', 'dynamic'",
+      "exit_mode": "dynamic",
+      "fixed_exit_bars": 4,
+      "use_break_even": false,
+      "break_even_profit_threshold": 0.01,
+      "break_even_offset": 0.005
+    },
+    "protection": {}
+  }
+}

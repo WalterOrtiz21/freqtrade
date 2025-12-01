@@ -1,0 +1,133 @@
+{
+  "strategy_name": "LorentzianSuperTrend",
+  "params": {
+    "max_open_trades": {
+      "max_open_trades": 1
+    },
+    "buy": {
+      "__comment_ml": "=== ML CORE SETTINGS ===",
+      "neighbors_count": 14,
+      "max_bars_back": 2000,
+      "__comment_features": "=== FEATURE SETTINGS (Hardcoded en Strategy) ===",
+      "f1_period": 14,
+      "f1_smoothing": 1,
+      "f2_ch_len": 10,
+      "f2_avg_len": 11,
+      "f3_period": 20,
+      "f3_smoothing": 1,
+      "f4_period": 20,
+      "f4_smoothing": 2,
+      "f5_period": 9,
+      "f5_smoothing": 1,
+      "__comment_kernel": "=== KERNEL REGRESSION SETTINGS ===",
+      "use_kernel_filter": true,
+      "use_kernel_smoothing": false,
+      "kernel_h": 8,
+      "kernel_r": 8.0,
+      "kernel_x": 25,
+      "kernel_lag": 2,
+      "__comment_filters_global": "=== GLOBAL FILTERS (Sistema de Filtros para Predicción ML) ===",
+      "use_volatility_filter": true,
+      "use_regime_filter": true,
+      "regime_threshold": -0.1,
+      "use_adx_filter": false,
+      "adx_threshold": 20,
+      "__comment_filters_system1": "=== SISTEMA 1: ML SIGNAL FILTERS (Pine: useEmaFilter, useSmaFilter) ===",
+      "__note_system1": "Se aplican a las señales ML (isNewBuySignal). Default: FALSE en Pine",
+      "use_ml_ema_filter": true,
+      "use_ml_sma_filter": false,
+      "ml_ema_period": 200,
+      "ml_sma_period": 200,
+      "__comment_filters_system2": "=== SISTEMA 2: POSITION FILTERS (Pine: ema_filter_long/short, bullish/bearish) ===",
+      "__note_system2": "Se aplican en strategy.entry() para filtrar posiciones. Default: TRUE en Pine",
+      "use_ema_filter_long": true,
+      "use_ema_filter_short": true,
+      "position_ema_period": 200,
+      "__comment_supertrend": "=== SUPERTREND SETTINGS ===",
+      "st_atr_period": 9,
+      "st_factor": 2.5
+    },
+    "sell": {
+      "__comment_exits": "=== EXIT SETTINGS ===",
+      "use_dynamic_exits": true,
+      "close_with_supertrend": true,
+      "close_only_tp": false,
+      "__note_exits": "close_only_tp=true desactiva salidas por señal opuesta/SuperTrend (solo TP/SL)"
+    },
+    "protection": {
+      "__comment_stoploss": "=== STOP LOSS SOURCE ===",
+      "stoploss_type": "atr",
+      "__comment_atr_sl": "=== ATR Stop Settings ===",
+      "atr_stop_len": 14,
+      "atr_stop_mult": 1.5,
+      "__comment_swing_sl": "=== Swing High/Low Settings ===",
+      "swing_bars": 10,
+      "__comment_risk_management": "=== RISK MANAGEMENT (R:R Ratios) ===",
+      "__note_breakeven": "Mueve SL a breakeven cuando alcanza be_rr * sl_distance",
+      "use_breakeven": true,
+      "be_rr_long": 1.0,
+      "be_rr_short": 1.0,
+      "__note_takeprofit": "Take profit parcial (tp_percent%) a tp_rr * sl_distance",
+      "use_takeprofit": true,
+      "tp_rr_long": 3.0,
+      "tp_rr_short": 3.0,
+      "tp_percent": 50
+    },
+    "roi": {
+      "0": 100
+    },
+    "stoploss": {
+      "stoploss": -0.99
+    }
+  },
+  "ft_stratparam_v": 1,
+  "_readme": {
+    "description": "LorentzianSuperTrend - 100% Matching con Pine Strategy",
+    "version": "2.0 - Full Implementation",
+    "sistema_filtros": {
+      "sistema_1_ml_filters": {
+        "descripcion": "Filtros aplicados a señales ML antes de isNewBuySignal",
+        "parametros": [
+          "use_ml_ema_filter",
+          "use_ml_sma_filter"
+        ],
+        "defaults": "FALSE (como Pine)",
+        "efecto": "Cuando desactivados, siempre retornan True (no filtran)"
+      },
+      "sistema_2_position_filters": {
+        "descripcion": "Filtros aplicados al abrir posiciones (bullish/bearish)",
+        "parametros": [
+          "use_ema_filter_long",
+          "use_ema_filter_short"
+        ],
+        "defaults": "TRUE (como Pine)",
+        "efecto": "Solo permite long si close > ema200, short si close < ema200"
+      }
+    },
+    "correcciones_aplicadas": [
+      "ML Sampling: j % 4 == 0 (matching Pine)",
+      "Kernel Lookback: x + 2 = 27 iteraciones (matching Pine)",
+      "Kernel Target: i - j sin offset duplicado (matching Pine)",
+      "Training Labels: shift(-4) futuro (matching Pine)",
+      "SuperTrend Exit: Price crossover/crossunder (matching Pine)",
+      "Exit Profit Check: exit_profit_only = True (matching Pine)",
+      "Dual EMA System: Sistema 1 (ML) + Sistema 2 (Positions) (matching Pine)"
+    ],
+    "defaults_pine_strategy": {
+      "use_ml_ema_filter": false,
+      "use_ml_sma_filter": false,
+      "use_ema_filter_long": true,
+      "use_ema_filter_short": true,
+      "use_kernel_filter": true,
+      "use_kernel_smoothing": false,
+      "close_with_supertrend": true,
+      "close_only_tp": false,
+      "use_breakeven": true,
+      "use_takeprofit": true,
+      "atr_stop_mult": 1.5,
+      "be_rr_long": 1.0,
+      "tp_rr_long": 3.0,
+      "tp_percent": 50
+    }
+  }
+}
