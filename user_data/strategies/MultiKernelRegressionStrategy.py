@@ -1,7 +1,7 @@
-# Freqtrade: Multi Kernel Regression Strategy (Fixed & Optimized)
+# Freqtrade: Multi Kernel Regression Strategy (Base Clean)
 # Portado desde Pine Script: "Multi Kernel Regression Strategy [ChartPrime]"
 # Autor del Port: Assistant (AlgoTrader)
-# Versión: 2.0 (Fix Math Logic for High Leverage)
+# Versión: 5.0 (Base Clean - Leverage Ready)
 
 import numpy as np
 import pandas as pd
@@ -18,12 +18,17 @@ logger = logging.getLogger(__name__)
 
 class MultiKernelRegressionStrategy(IStrategy):
     """
-    Multi Kernel Regression Strategy
+    Multi Kernel Regression Strategy (Base Clean v5.0)
+
     Estrategia de seguimiento de tendencia basada en regresión de kernel no repintada (NRP).
-    
-    MEJORAS V2.0:
-    - Corrección de matemáticas en custom_stoploss para evitar salidas prematuras en apalancamiento.
-    - Ajuste de parámetros de ROI/TP a escala porcentual (0-100) para facilitar lectura.
+
+    CARACTERÍSTICAS:
+    - Leverage-agnostic: ROI y stoploss se ajustan automáticamente por leverage
+    - Sin TPs parciales ni breakeven: Salida solo por señal opuesta
+    - Versión base limpia para futuras optimizaciones
+
+    IMPORTANTE:
+    - Los valores ROI/Stoploss se ajustan automáticamente por leverage en bot_start()
     """
 
     INTERFACE_VERSION = 3
@@ -51,46 +56,54 @@ class MultiKernelRegressionStrategy(IStrategy):
     use_rsi = BooleanParameter(default=True, space='buy', optimize=True)
     rsi_buy_min = IntParameter(30, 70, default=50, space='buy', optimize=True)
     rsi_sell_max = IntParameter(30, 70, default=50, space='sell', optimize=True)
-    
+
     use_adx = BooleanParameter(default=True, space='buy', optimize=True)
     adx_min = IntParameter(10, 50, default=25, space='buy', optimize=True)
-
-    # --- PARTIAL TP / BE (Escala 1.0 = 1%) ---
-    # ROI para tomar ganancias (ej: 1.0 = 1% de movimiento del precio)
-    tp1_roi = DecimalParameter(0.5, 5.0, default=1.0, space='sell', optimize=True)
-    tp2_roi = DecimalParameter(1.5, 10.0, default=2.0, space='sell', optimize=True)
-    
-    # Cantidad a vender (ej: 50.0 = 50% de la posición)
-    tp1_amount = DecimalParameter(10.0, 90.0, default=50.0, space='sell', optimize=True)
-    tp2_amount = DecimalParameter(10.0, 90.0, default=30.0, space='sell', optimize=True)
 
     # ==========================================
     # ─── CONFIGURACIÓN DE ESTRATEGIA ───
     # ==========================================
-    
-    # Habilitar gestión de posición para TPs parciales
-    position_adjustment_enable = True
-    
+
     # ROI mínimo alto para dejar que la estrategia gestione las salidas
     minimal_roi = {
-        "0": 0.99 
+        0: 0.99
     }
 
-    # Stop Loss base (Hard Stop)
-    stoploss = -0.05  # -5% como red de seguridad amplia
-    
-    timeframe = '1h'
+    # Stop Loss base (Hard Stop) - Se ajustará por leverage en bot_start()
+    stoploss = -0.05
 
-    # Solo operar en cierre de vela para evitar repintado
+    timeframe = '1h'
     process_only_new_candles = True
     use_exit_signal = True
     exit_profit_only = False
     ignore_roi_if_entry_signal = False
-
     can_short = True
-    
-    # Startup candles: Necesario para que el Kernel se calcule correctamente al inicio
     startup_candle_count: int = 100
+
+    # ==========================================
+    # ─── INICIALIZACIÓN DINÁMICA ───
+    # ==========================================
+
+    def bot_start(self, **kwargs) -> None:
+        """
+        Ajusta ROI y Stoploss por leverage al iniciar el bot.
+        """
+        config_leverage = self.config.get('leverage', 1.0)
+
+        logger.info(f" >>> ESTRATEGIA INICIADA CON LEVERAGE: {config_leverage}x <<<")
+
+        # Ajustar Stop Loss por leverage
+        self.stoploss = -0.05 * config_leverage
+
+        # Ajustar ROI por leverage
+        self.minimal_roi = {
+            0: 0.99 * config_leverage
+        }
+
+    def leverage(self, pair: str, current_time: datetime, current_rate: float,
+                 proposed_leverage: float, max_leverage: float, entry_tag: str | None, side: str,
+                 **kwargs) -> float:
+        return self.config.get('leverage', 1.0)
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
@@ -175,90 +188,6 @@ class MultiKernelRegressionStrategy(IStrategy):
 
         return dataframe
 
-    # ==========================================
-    # ─── GESTIÓN DE RIESGO Y SALIDAS (FIXED) ───
-    # ==========================================
-
-    def adjust_trade_position(self, trade: Trade, current_time: datetime,
-                              current_rate: float, current_profit: float,
-                              min_stake: float | None, max_stake: float,
-                              current_entry_rate: float, current_exit_rate: float,
-                              current_entry_profit: float, current_exit_profit: float,
-                              **kwargs) -> float | None | tuple[float | None, str | None]:
-        """
-        Gestiona Take Profits parciales.
-        """
-        # Convertimos los parámetros de 0-100 a 0.0-1.0
-        tp1_target = self.tp1_roi.value / 100.0
-        tp2_target = self.tp2_roi.value / 100.0
-        
-        # Si el profit actual supera el objetivo TP1
-        if current_profit > tp1_target:
-            
-            # Verificar órdenes de venta ya ejecutadas
-            filled_sells = [o for o in trade.orders if o.side == 'sell' and o.status == 'closed']
-            count_sells = len(filled_sells)
-
-            # --- TP 1 ---
-            if count_sells == 0:
-                # Calcular cantidad a vender (ej. 50%)
-                sell_pct = self.tp1_amount.value / 100.0
-                amount_to_sell = trade.amount * sell_pct
-                
-                # Retornar valor negativo (stake a reducir)
-                return -(amount_to_sell * current_rate) 
-                
-            # --- TP 2 ---
-            # Solo si ya hicimos TP1 y ahora superamos TP2
-            if count_sells == 1 and current_profit > tp2_target:
-                # Calcular cuanto vender del remanente.
-                # Si vendimos 50% inicial, queremos vender el 30% del TOTAL original.
-                # Matemática: (Target % Total) / (% Restante Actual)
-                
-                remaining_pct_total = 1.0 - (self.tp1_amount.value / 100.0)
-                target_pct_total = self.tp2_amount.value / 100.0
-                
-                if remaining_pct_total > 0:
-                    # Ajuste para vender la proporción correcta de lo que queda
-                    sell_pct_of_remaining = target_pct_total / remaining_pct_total
-                    # Capar al 100% por seguridad
-                    sell_pct_of_remaining = min(sell_pct_of_remaining, 1.0)
-                    
-                    amount_to_sell = trade.amount * sell_pct_of_remaining
-                    return -(amount_to_sell * current_rate)
-
-        return None
-
-    def custom_stoploss(self, pair: str, trade: Trade, current_time: datetime,
-                        current_rate: float, current_profit: float, **kwargs) -> float:
-        """
-        Mueve Stop Loss a Break Even SOLO si estamos en ganancias seguras.
-        """
-        # Verificar si TP1 ya ocurrió
-        filled_sells = [o for o in trade.orders if o.side == 'sell' and o.status == 'closed']
-        
-        if len(filled_sells) > 0:
-            # TP1 ejecutado. Intentar mover a Break Even.
-            
-            # Cálculo de distancia al precio de entrada
-            # Freqtrade requiere distancia relativa desde precio ACTUAL
-            stoploss_pct = (trade.open_rate - current_rate) / current_rate
-            
-            # --- LOGIC FIX (KILL SWITCH) ---
-            # Si stoploss_pct es > 0, significa que el precio actual está POR DEBAJO de la entrada (en Long).
-            # Si devolvemos un valor positivo, Freqtrade ejecuta Market Sell inmediato.
-            # Para evitar que nos saque por ruido/volatilidad justo en el punto de entrada:
-            
-            if stoploss_pct > 0:
-                # Estamos perdiendo ligeramente (bajo el Break Even).
-                # No forzamos salida inmediata. Mantenemos un stop "flotante" pequeño o el original.
-                return -0.01 # Dejar 1% de respiro si vuelve a caer
-            
-            # Si estamos ganando (stoploss_pct es negativo), fijamos el SL en Entry.
-            return stoploss_pct
-
-        # Si no hay TP, usar Stop Loss original
-        return self.stoploss
 
     # ==========================================
     # ─── LÓGICA MATEMÁTICA DEL KERNEL ───
@@ -324,10 +253,5 @@ class MultiKernelRegressionStrategy(IStrategy):
         elif style == "Power": return (1 - (abs_x ** 3)) ** 3 if abs_x <= 1 else 0.0
         elif style == "Log Logistic": return 1 / ((1 + abs_x) ** 2)
         elif style == "Morters": return ((1 + math.cos(x)) / (2 * math.pi * bandwidth)) if abs_x <= math.pi else 0.0
-            
+
         return 0.0
-    
-    def leverage(self, pair: str, current_time: datetime, current_rate: float,
-                 proposed_leverage: float, max_leverage: float, entry_tag: str | None, side: str,
-                 **kwargs) -> float:
-        return self.config.get('leverage', 1.0)

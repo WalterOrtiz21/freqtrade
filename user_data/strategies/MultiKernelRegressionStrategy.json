@@ -5,24 +5,16 @@
             "use_rsi": false,
             "use_adx": false,
             "bandwidth": 14,
-            "kernel_type": "Quartic",
-            "tp1_roi": 1.0,
-            "tp2_roi": 2.0,
-            "tp1_amount": 50.0,
-            "tp2_amount": 30.0
+            "kernel_type": "Quartic"
         },
-        "sell": {},
+        "sell": {
+            "rsi_sell_max": 50
+        },
         "roi": {
             "0": 99
         },
         "stoploss": {
             "stoploss": -0.02
-        },
-        "trailing": {
-            "trailing_stop": false,
-            "trailing_stop_positive": 0.01,
-            "trailing_stop_positive_offset": 0.03,
-            "trailing_only_offset_is_reached": true
         }
     }
 }
