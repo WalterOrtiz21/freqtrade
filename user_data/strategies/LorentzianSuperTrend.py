@@ -51,7 +51,7 @@ trade_logger.propagate = False  # No propagar a root logger
 # =============================================================================
 
 @njit(parallel=True, fastmath=True)
-def numba_lorentzian_distance_prediction(features_norm, labels, max_bars_back, neighbors_count):
+def numba_lorentzian_distance_prediction(features_norm, labels, max_bars_back, neighbors_count, prediction_horizon=4):
     """
     Replica EXACTA de la lógica de Pine Script:
     - Ventana fija (desde el inicio hasta i)
@@ -76,7 +76,17 @@ def numba_lorentzian_distance_prediction(features_norm, labels, max_bars_back, n
         
         start_index = i - max_bars_back
         if start_index < 0: start_index = 0
-        end_index = i 
+        
+        # FIX LOOKAHEAD BIAS:
+        # Labels are defined as shift(-4) (future).
+        # So label[k] contains information about price at k+4.
+        # If we are at index i, we cannot know label[i-1] because that requires price at i+3 (future).
+        # We must stop searching for neighbors at i - prediction_horizon.
+        end_index = i - prediction_horizon
+        
+        if end_index < start_index:
+             predictions[i] = 0.0
+             continue 
         
         for j in range(start_index, end_index):
             # Pine Logic: if i % 4 (meaning i % 4 != 0)
@@ -280,8 +290,22 @@ class LorentzianSuperTrend(IStrategy):
     # ================= PARÁMETROS (Coinciden con JSON) =================
     
     # ML Settings
+    source_type = CategoricalParameter(['close', 'hlc3', 'ohlc4', 'hl2', 'open', 'high', 'low', 'macd_kst'], default='close', space='buy', optimize=False)
     neighbors_count = IntParameter(2, 20, default=8, space='buy', optimize=False)
     max_bars_back = IntParameter(500, 3000, default=2000, space='buy', optimize=False)
+
+    # MACD (KST Based) Settings
+    kst_roclen1 = IntParameter(10, 10, default=10, space='buy', optimize=False)
+    kst_roclen2 = IntParameter(15, 15, default=15, space='buy', optimize=False)
+    kst_roclen3 = IntParameter(20, 20, default=20, space='buy', optimize=False)
+    kst_roclen4 = IntParameter(30, 30, default=30, space='buy', optimize=False)
+    kst_smalen1 = IntParameter(10, 10, default=10, space='buy', optimize=False)
+    kst_smalen2 = IntParameter(10, 10, default=10, space='buy', optimize=False)
+    kst_smalen3 = IntParameter(10, 10, default=10, space='buy', optimize=False)
+    kst_smalen4 = IntParameter(15, 15, default=15, space='buy', optimize=False)
+    kst_fast_length = IntParameter(7, 7, default=7, space='buy', optimize=False)
+    kst_slow_length = IntParameter(14, 14, default=14, space='buy', optimize=False)
+    kst_signal_length = IntParameter(14, 14, default=14, space='buy', optimize=False)
     
     # Features (Ajustado a Pine)
     f1_period = IntParameter(14, 14, default=14, space='buy', optimize=False)
@@ -300,54 +324,54 @@ class LorentzianSuperTrend(IStrategy):
     f5_smoothing = IntParameter(1, 1, default=1, space='buy', optimize=False) 
 
     # Kernel
-    use_kernel_filter = BooleanParameter(default=True, space='buy', optimize=False)
-    use_kernel_smoothing = BooleanParameter(default=False, space='buy', optimize=False)
-    kernel_h = IntParameter(8, 8, default=8, space='buy', optimize=False)
-    kernel_r = DecimalParameter(8.0, 8.0, default=8.0, decimals=1, space='buy', optimize=False)
-    kernel_x = IntParameter(25, 25, default=25, space='buy', optimize=False)
-    kernel_lag = IntParameter(2, 2, default=2, space='buy', optimize=False)
+    use_kernel_filter = BooleanParameter(default=True, space='buy', optimize=True)
+    use_kernel_smoothing = BooleanParameter(default=False, space='buy', optimize=True)
+    kernel_h = IntParameter(4, 20, default=8, space='buy', optimize=True)
+    kernel_r = DecimalParameter(4.0, 12.0, default=8.0, decimals=1, space='buy', optimize=True)
+    kernel_x = IntParameter(10, 50, default=25, space='buy', optimize=True)
+    kernel_lag = IntParameter(0, 5, default=2, space='buy', optimize=True)
 
     # Filters (Sistema 1: ML Signal Filters - aplicados a isNewBuySignal/isNewSellSignal)
-    use_volatility_filter = BooleanParameter(default=True, space='buy', optimize=False)
-    use_regime_filter = BooleanParameter(default=True, space='buy', optimize=False)
-    use_adx_filter = BooleanParameter(default=False, space='buy', optimize=False)
-    regime_threshold = DecimalParameter(-0.1, -0.1, default=-0.1, decimals=2, space='buy', optimize=False)
-    adx_threshold = IntParameter(20, 20, default=20, space='buy', optimize=False)
+    use_volatility_filter = BooleanParameter(default=True, space='buy', optimize=True)
+    use_regime_filter = BooleanParameter(default=True, space='buy', optimize=True)
+    use_adx_filter = BooleanParameter(default=False, space='buy', optimize=True)
+    regime_threshold = DecimalParameter(-0.3, 0.3, default=-0.1, decimals=2, space='buy', optimize=True)
+    adx_threshold = IntParameter(10, 40, default=20, space='buy', optimize=True)
 
     # Sistema 1: EMA/SMA Filters para señales ML (Pine: useEmaFilter, useSmaFilter)
-    use_ml_ema_filter = BooleanParameter(default=False, space='buy', optimize=False)  # Pine default: false
-    use_ml_sma_filter = BooleanParameter(default=False, space='buy', optimize=False)  # Pine default: false
-    ml_ema_period = IntParameter(200, 200, default=200, space='buy', optimize=False)
-    ml_sma_period = IntParameter(200, 200, default=200, space='buy', optimize=False)
+    use_ml_ema_filter = BooleanParameter(default=False, space='buy', optimize=True)  # Pine default: false
+    use_ml_sma_filter = BooleanParameter(default=False, space='buy', optimize=True)  # Pine default: false
+    ml_ema_period = IntParameter(20, 400, default=200, space='buy', optimize=True)
+    ml_sma_period = IntParameter(20, 400, default=200, space='buy', optimize=True)
 
     # Sistema 2: EMA Filter para posiciones (Pine: ema_filter_long, ema_filter_short, bullish/bearish)
-    use_ema_filter_long = BooleanParameter(default=True, space='buy', optimize=False)   # Pine default: true
-    use_ema_filter_short = BooleanParameter(default=True, space='buy', optimize=False)  # Pine default: true
-    position_ema_period = IntParameter(200, 200, default=200, space='buy', optimize=False)
+    use_ema_filter_long = BooleanParameter(default=True, space='buy', optimize=True)   # Pine default: true
+    use_ema_filter_short = BooleanParameter(default=True, space='buy', optimize=True)  # Pine default: true
+    position_ema_period = IntParameter(20, 400, default=200, space='buy', optimize=True)
 
     # Exits
-    use_dynamic_exits = BooleanParameter(default=False, space='sell', optimize=False)
-    close_with_supertrend = BooleanParameter(default=True, space='sell', optimize=False)
-    close_only_tp = BooleanParameter(default=False, space='sell', optimize=False)  # Pine: close_only_tp
+    use_dynamic_exits = BooleanParameter(default=False, space='sell', optimize=True)
+    close_with_supertrend = BooleanParameter(default=True, space='sell', optimize=True)
+    close_only_tp = BooleanParameter(default=False, space='sell', optimize=True)  # Pine: close_only_tp
 
     # Protection & Risk
-    stoploss_type = CategoricalParameter(['atr', 'swing'], default='atr', space='protection', optimize=False)
-    atr_stop_len = IntParameter(14, 14, default=14, space='protection', optimize=False)
-    atr_stop_mult = DecimalParameter(1.5, 1.5, default=1.5, decimals=1, space='protection', optimize=False)
-    swing_bars = IntParameter(10, 10, default=10, space='protection', optimize=False)
+    stoploss_type = CategoricalParameter(['atr', 'swing'], default='atr', space='protection', optimize=True)
+    atr_stop_len = IntParameter(10, 30, default=14, space='protection', optimize=True)
+    atr_stop_mult = DecimalParameter(1.0, 5.0, default=1.5, decimals=1, space='protection', optimize=True)
+    swing_bars = IntParameter(5, 20, default=10, space='protection', optimize=True)
     
-    use_breakeven = BooleanParameter(default=True, space='protection', optimize=False)
-    be_rr_long = DecimalParameter(1.0, 1.0, default=1.0, decimals=1, space='protection', optimize=False)
-    be_rr_short = DecimalParameter(1.0, 1.0, default=1.0, decimals=1, space='protection', optimize=False)
+    use_breakeven = BooleanParameter(default=True, space='protection', optimize=True)
+    be_rr_long = DecimalParameter(0.5, 3.0, default=1.0, decimals=1, space='protection', optimize=True)
+    be_rr_short = DecimalParameter(0.5, 3.0, default=1.0, decimals=1, space='protection', optimize=True)
     
-    use_takeprofit = BooleanParameter(default=True, space='protection', optimize=False)
-    tp_rr_long = DecimalParameter(3.0, 3.0, default=3.0, decimals=1, space='protection', optimize=False)
-    tp_rr_short = DecimalParameter(3.0, 3.0, default=3.0, decimals=1, space='protection', optimize=False)
-    tp_percent = DecimalParameter(50, 50, default=50, decimals=0, space='protection', optimize=False)
-    close_only_tp = BooleanParameter(default=False, space='protection', optimize=False)
+    use_takeprofit = BooleanParameter(default=True, space='protection', optimize=True)
+    tp_rr_long = DecimalParameter(1.0, 5.0, default=3.0, decimals=1, space='protection', optimize=True)
+    tp_rr_short = DecimalParameter(1.0, 5.0, default=3.0, decimals=1, space='protection', optimize=True)
+    tp_percent = DecimalParameter(10, 100, default=50, decimals=0, space='protection', optimize=True)
+    close_only_tp = BooleanParameter(default=False, space='protection', optimize=True)
 
-    st_atr_period = IntParameter(9, 9, default=9, space='buy', optimize=False)
-    st_factor = DecimalParameter(2.5, 2.5, default=2.5, decimals=1, space='buy', optimize=False)
+    st_atr_period = IntParameter(5, 20, default=9, space='buy', optimize=True)
+    st_factor = DecimalParameter(1.0, 5.0, default=2.5, decimals=1, space='buy', optimize=True)
 
     # Configuración Freqtrade
     timeframe = '4h'
@@ -392,6 +416,57 @@ class LorentzianSuperTrend(IStrategy):
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         
+        # --- SELECCIÓN DE SOURCE ---
+        st = self.source_type.value
+        
+        # Helper para KST ROC
+        def roc(series, length):
+            return 100 * (series - series.shift(length)) / series.shift(length)
+            
+        if st == 'macd_kst':
+            # Implementación MACD (KST Based)
+            # Usamos 'close' como base para el KST (Pine default: source=close)
+            base_src = dataframe['close']
+            
+            roc1 = roc(base_src, self.kst_roclen1.value)
+            roc2 = roc(base_src, self.kst_roclen2.value)
+            roc3 = roc(base_src, self.kst_roclen3.value)
+            roc4 = roc(base_src, self.kst_roclen4.value)
+            
+            # Pine: mas(source, length, type) => type=="SMA"? ta.sma : ta.ema
+            # Pine default typeMA = "EMA"
+            rcma1 = ta.EMA(roc1, timeperiod=self.kst_smalen1.value)
+            rcma2 = ta.EMA(roc2, timeperiod=self.kst_smalen2.value)
+            rcma3 = ta.EMA(roc3, timeperiod=self.kst_smalen3.value)
+            rcma4 = ta.EMA(roc4, timeperiod=self.kst_smalen4.value)
+            
+            kst = rcma1 + 2 * rcma2 + 3 * rcma3 + 4 * rcma4
+            
+            # MACD of KST
+            # Pine: fast_ma = ta.ema(kst, fast_length) (assuming EMA default)
+            fast_ma = ta.EMA(kst, timeperiod=self.kst_fast_length.value)
+            slow_ma = ta.EMA(kst, timeperiod=self.kst_slow_length.value)
+            macd_kst = fast_ma - slow_ma
+            
+            dataframe['source'] = macd_kst
+            
+        elif st == 'close':
+            dataframe['source'] = dataframe['close']
+        elif st == 'hlc3':
+            dataframe['source'] = (dataframe['high'] + dataframe['low'] + dataframe['close']) / 3
+        elif st == 'ohlc4':
+            dataframe['source'] = (dataframe['open'] + dataframe['high'] + dataframe['low'] + dataframe['close']) / 4
+        elif st == 'hl2':
+            dataframe['source'] = (dataframe['high'] + dataframe['low']) / 2
+        elif st == 'open':
+            dataframe['source'] = dataframe['open']
+        elif st == 'high':
+            dataframe['source'] = dataframe['high']
+        elif st == 'low':
+            dataframe['source'] = dataframe['low']
+        else:
+            dataframe['source'] = dataframe['close']
+
         # --- FEATURE 1: RSI ---
         rsi_raw = ta.RSI(dataframe, timeperiod=self.f1_period.value)
         rsi_smooth = ta.EMA(rsi_raw, timeperiod=self.f1_smoothing.value) if self.f1_smoothing.value > 1 else rsi_raw
@@ -481,16 +556,17 @@ class LorentzianSuperTrend(IStrategy):
         )
 
         # --- KERNEL (NADARAYA-WATSON) ---
-        src_close = dataframe['close'].values.astype(np.float64)
+        # Usamos 'source' seleccionado por el usuario
+        src_kernel = dataframe['source'].values.astype(np.float64)
         dataframe['yhat1'] = numba_rational_quadratic_kernel(
-            src_close, 
+            src_kernel, 
             self.kernel_h.value, 
             float(self.kernel_r.value), 
             self.kernel_x.value
         )
         # kernel Gaussian para yhat2 con lag
         h_lag = max(1, self.kernel_h.value - self.kernel_lag.value)
-        dataframe['yhat2'] = numba_gaussian_kernel(src_close, h_lag, self.kernel_x.value)
+        dataframe['yhat2'] = numba_gaussian_kernel(src_kernel, h_lag, self.kernel_x.value)
         
         is_bullish_smooth = dataframe['yhat2'] >= dataframe['yhat1']
         is_bearish_smooth = dataframe['yhat2'] <= dataframe['yhat1']
@@ -540,9 +616,13 @@ class LorentzianSuperTrend(IStrategy):
         # So:
         # - future < current → price will drop → label = -1 (short/bearish)
         # - future > current → price will rise → label = 1 (long/bullish)
-        future_close = dataframe['close'].shift(-4)  # 4 bars in the FUTURE
-        labels = np.where(future_close < dataframe['close'], -1.0,   # futuro < actual → bajará → short = -1
-                  np.where(future_close > dataframe['close'], 1.0,   # futuro > actual → subirá → long = 1
+        # - future < current → price will drop → label = -1 (short/bearish)
+        # - future > current → price will rise → label = 1 (long/bullish)
+        
+        # Usamos 'source' seleccionado por el usuario en lugar de hardcoded 'close'
+        future_source = dataframe['source'].shift(-4)  # 4 bars in the FUTURE
+        labels = np.where(future_source < dataframe['source'], -1.0,   # futuro < actual → bajará → short = -1
+                  np.where(future_source > dataframe['source'], 1.0,   # futuro > actual → subirá → long = 1
                            0.0))
         labels = np.nan_to_num(labels, nan=0.0)
         
@@ -554,7 +634,8 @@ class LorentzianSuperTrend(IStrategy):
             features_data,
             labels.astype(np.float64),
             int(self.max_bars_back.value),
-            int(self.neighbors_count.value)
+            int(self.neighbors_count.value),
+            4 # prediction_horizon (matches shift(-4))
         )
         dataframe['prediction'] = predictions
 

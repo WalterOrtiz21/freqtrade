@@ -5,6 +5,8 @@
       "max_open_trades": 1
     },
     "buy": {
+      "_source_type": "['close', 'hlc3', 'ohlc4', 'hl2', 'open', 'high', 'low', 'macd_kst']",
+      "source_type": "close",
       "__comment_ml": "=== ML CORE SETTINGS ===",
       "neighbors_count": 14,
       "max_bars_back": 2000,
