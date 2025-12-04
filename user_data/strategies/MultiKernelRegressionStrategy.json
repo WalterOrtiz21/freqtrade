@@ -2,12 +2,19 @@
     "strategy_name": "MultiKernelRegressionStrategy",
     "params": {
         "buy": {
-            "use_rsi": false,
-            "use_adx": false,
+            "use_rsi": true,
+            "use_adx": true,
             "bandwidth": 14,
             "kernel_type": "Quartic"
         },
         "sell": {
+            "enable_partial_exits": true,
+            "enable_breakeven": true,
+            "breakeven_roi": 2.0,
+            "tp1_roi": 1.0,
+            "tp2_roi": 2.0,
+            "tp1_amount": 50.0,
+            "tp2_amount": 30.0,
             "rsi_sell_max": 50
         },
         "roi": {
