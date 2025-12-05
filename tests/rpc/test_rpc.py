@@ -99,6 +99,7 @@ def test_rpc_trade_status(default_conf, ticker, fee, mocker) -> None:
         "contract_size": 1,
         "has_open_orders": False,
         "nr_of_successful_entries": ANY,
+        "nr_of_successful_exits": ANY,
         "orders": [
             {
                 "amount": 91.07468123,
@@ -309,7 +310,7 @@ def test_rpc_status_table(default_conf, ticker, fee, mocker, time_machine) -> No
     )
     assert "now" == result[0][2]
     assert "ETH/BTC" in result[0][1]
-    assert "nan%" == result[0][3]
+    assert "N/A" == result[0][3]
     assert isnan(fiat_profit_sum)
 
 
@@ -848,11 +849,11 @@ def test_rpc_force_exit(default_conf, ticker, fee, mocker) -> None:
 
     freqtradebot.state = State.STOPPED
     with pytest.raises(RPCException, match=r".*trader is not running*"):
-        rpc._rpc_force_exit(None)
+        rpc._rpc_force_exit("22222")
 
     freqtradebot.state = State.RUNNING
     with pytest.raises(RPCException, match=r".*invalid argument*"):
-        rpc._rpc_force_exit(None)
+        rpc._rpc_force_exit("22222")
 
     msg = rpc._rpc_force_exit("all")
     assert msg == {"result": "Created exit orders for all open trades."}
@@ -867,7 +868,7 @@ def test_rpc_force_exit(default_conf, ticker, fee, mocker) -> None:
 
     freqtradebot.state = State.STOPPED
     with pytest.raises(RPCException, match=r".*trader is not running*"):
-        rpc._rpc_force_exit(None)
+        rpc._rpc_force_exit("22222")
 
     with pytest.raises(RPCException, match=r".*trader is not running*"):
         rpc._rpc_force_exit("all")

@@ -16,7 +16,6 @@ from typing import Any, Literal, TypeGuard, TypeVar
 
 import ccxt
 import ccxt.pro as ccxt_pro
-from cachetools import TTLCache
 from ccxt import TICK_SIZE
 from dateutil import parser
 from pandas import DataFrame, concat
@@ -107,9 +106,8 @@ from freqtrade.misc import (
     file_load_json,
     safe_value_fallback2,
 )
-from freqtrade.util import dt_from_ts, dt_now
+from freqtrade.util import FtTTLCache, PeriodicCache, dt_from_ts, dt_now
 from freqtrade.util.datetime_helpers import dt_humanize_delta, dt_ts, format_ms_time
-from freqtrade.util.periodic_cache import PeriodicCache
 
 
 logger = logging.getLogger(__name__)
@@ -230,13 +228,13 @@ class Exchange:
 
         self._cache_lock = Lock()
         # Cache for 10 minutes ...
-        self._fetch_tickers_cache: TTLCache = TTLCache(maxsize=4, ttl=60 * 10)
+        self._fetch_tickers_cache: FtTTLCache = FtTTLCache(maxsize=4, ttl=60 * 10)
         # Cache values for 300 to avoid frequent polling of the exchange for prices
         # Caching only applies to RPC methods, so prices for open trades are still
         # refreshed once every iteration.
         # Shouldn't be too high either, as it'll freeze UI updates in case of open orders.
-        self._exit_rate_cache: TTLCache = TTLCache(maxsize=100, ttl=300)
-        self._entry_rate_cache: TTLCache = TTLCache(maxsize=100, ttl=300)
+        self._exit_rate_cache: FtTTLCache = FtTTLCache(maxsize=100, ttl=300)
+        self._entry_rate_cache: FtTTLCache = FtTTLCache(maxsize=100, ttl=300)
 
         # Holds candles
         self._klines: dict[PairWithTimeframe, DataFrame] = {}
@@ -300,7 +298,7 @@ class Exchange:
 
         if self.trading_mode != TradingMode.SPOT and load_leverage_tiers:
             self.fill_leverage_tiers()
-        self.additional_exchange_init()
+        self.ft_additional_exchange_init()
 
     def __del__(self):
         """
@@ -430,7 +428,15 @@ class Exchange:
 
     @property
     def timeframes(self) -> list[str]:
-        return list((self._api.timeframes or {}).keys())
+        market_type = (
+            "spot"
+            if self.trading_mode != TradingMode.FUTURES
+            else self._ft_has["ccxt_futures_name"]
+        )
+        timeframes = self._api.options.get("timeframes", {}).get(market_type)
+        if timeframes is None:
+            timeframes = self._api.timeframes
+        return list((timeframes or {}).keys())
 
     @property
     def markets(self) -> dict[str, Any]:
@@ -454,6 +460,12 @@ class Exchange:
         Might need to be updated if https://github.com/ccxt/ccxt/issues/20408 is fixed.
         """
         return self._api.precisionMode
+
+    def ft_additional_exchange_init(self) -> None:
+        """
+        Wrapper around additional_exchange_init to simplify testing
+        """
+        self.additional_exchange_init()
 
     def additional_exchange_init(self) -> None:
         """
@@ -832,9 +844,15 @@ class Exchange:
 
     def validate_freqai(self, config: Config) -> None:
         freqai_enabled = config.get("freqai", {}).get("enabled", False)
-        if freqai_enabled and not self._ft_has["ohlcv_has_history"]:
+        override = config.get("freqai", {}).get("override_exchange_checks", False)
+        if not override and freqai_enabled and not self._ft_has["ohlcv_has_history"]:
             raise ConfigurationError(
                 f"Historic OHLCV data not available for {self.name}. Can't use freqAI."
+            )
+        elif override and freqai_enabled and not self._ft_has["ohlcv_has_history"]:
+            logger.warning(
+                "Overriding exchange checks for freqAI. Make sure that your exchange supports "
+                "fetching historic OHLCV data, otherwise freqAI will not work."
             )
 
     def validate_required_startup_candles(self, startup_candles: int, timeframe: str) -> int:
@@ -879,6 +897,7 @@ class Exchange:
         self,
         trading_mode: TradingMode,
         margin_mode: MarginMode | None,  # Only None when trading_mode = TradingMode.SPOT
+        allow_none_margin_mode: bool = False,
     ):
         """
         Checks if freqtrade can perform trades using the configured
@@ -886,7 +905,18 @@ class Exchange:
         Throws OperationalException:
             If the trading_mode/margin_mode type are not supported by freqtrade on this exchange
         """
-        if trading_mode != TradingMode.SPOT and (
+        if trading_mode == TradingMode.SPOT:
+            return
+        if allow_none_margin_mode and margin_mode is None:
+            # Verify trading mode independent of margin mode
+            if not any(
+                trading_mode == pair[0] for pair in self._supported_trading_mode_margin_pairs
+            ):
+                raise ConfigurationError(
+                    f"Freqtrade does not support '{trading_mode}' on {self.name}."
+                )
+
+        if not allow_none_margin_mode and (
             (trading_mode, margin_mode) not in self._supported_trading_mode_margin_pairs
         ):
             mm_value = margin_mode and margin_mode.value
@@ -1271,7 +1301,7 @@ class Exchange:
 
         return order
 
-    def fetch_dry_run_order(self, order_id) -> CcxtOrder:
+    def fetch_dry_run_order(self, order_id: str) -> CcxtOrder:
         """
         Return dry-run order
         Only call if running in dry-run mode.
@@ -1283,11 +1313,12 @@ class Exchange:
         except KeyError as e:
             from freqtrade.persistence import Order
 
-            order = Order.order_by_id(order_id)
-            if order:
-                ccxt_order = order.to_ccxt_object(self._ft_has["stop_price_prop"])
-                self._dry_run_open_orders[order_id] = ccxt_order
-                return ccxt_order
+            order_obj = Order.order_by_id(order_id)
+            if order_obj:
+                order = order_obj.to_ccxt_object(self._ft_has["stop_price_prop"])
+                order = self.check_dry_limit_order_filled(order)
+                self._dry_run_open_orders[order_id] = order
+                return order
             # Gracefully handle errors with dry-run orders.
             raise InvalidOrderException(
                 f"Tried to get an invalid dry-run-order (id: {order_id}). Message: {e}"
@@ -1738,7 +1769,7 @@ class Exchange:
             balances.pop("total", None)
             balances.pop("used", None)
 
-            self._log_exchange_response("fetch_balances", balances)
+            self._log_exchange_response("fetch_balance", balances)
             return balances
         except ccxt.DDoSProtection as e:
             raise DDosProtection(e) from e
@@ -2131,7 +2162,9 @@ class Exchange:
         name = side.capitalize()
         strat_name = "entry_pricing" if side == "entry" else "exit_pricing"
 
-        cache_rate: TTLCache = self._entry_rate_cache if side == "entry" else self._exit_rate_cache
+        cache_rate: FtTTLCache = (
+            self._entry_rate_cache if side == "entry" else self._exit_rate_cache
+        )
         if not refresh:
             with self._cache_lock:
                 rate = cache_rate.get(pair)
@@ -3873,7 +3906,10 @@ class Exchange:
         """
 
         market = self.markets[pair]
-        taker_fee_rate = market["taker"]
+        # default to some default fee if not available from exchange
+        taker_fee_rate = market["taker"] or self._api.describe().get("fees", {}).get(
+            "trading", {}
+        ).get("taker", 0.001)
         mm_ratio, _ = self.get_maintenance_ratio_and_amt(pair, stake_amount)
 
         if self.trading_mode == TradingMode.FUTURES and self.margin_mode == MarginMode.ISOLATED:

@@ -2267,6 +2267,18 @@ def test_manage_open_orders_exit_usercustom(
     freqtrade.manage_open_orders()
     assert log_has_re("Emergency exiting trade.*", caplog)
     assert et_mock.call_count == 1
+    # Full exit
+    assert et_mock.call_args_list[0][1]["sub_trade_amt"] == 30
+
+    et_mock.reset_mock()
+
+    # Full partially filled order
+    # Only places the order for the remaining amount
+    limit_sell_order_old["remaining"] = open_trade_usdt.amount - 10
+    freqtrade.manage_open_orders()
+    assert log_has_re("Emergency exiting trade.*", caplog)
+    assert et_mock.call_count == 1
+    assert et_mock.call_args_list[0][1]["sub_trade_amt"] == 20.0
 
 
 @pytest.mark.parametrize("is_short", [False, True])
@@ -4513,6 +4525,7 @@ def test_check_for_open_trades(mocker, default_conf_usdt, fee, is_short):
 def test_startup_update_open_orders(mocker, default_conf_usdt, fee, caplog, is_short):
     freqtrade = get_patched_freqtradebot(mocker, default_conf_usdt)
     create_mock_trades(fee, is_short=is_short)
+    mocker.patch(f"{EXMS}._dry_is_price_crossed", return_value=False)
 
     freqtrade.startup_update_open_orders()
     assert not log_has_re(r"Error updating Order .*", caplog)

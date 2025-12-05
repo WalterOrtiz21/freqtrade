@@ -64,7 +64,6 @@ ARGS_BACKTEST = [
 
 ARGS_HYPEROPT = [
     *ARGS_COMMON_OPTIMIZE,
-    "hyperopt",
     "hyperopt_path",
     "position_stacking",
     "enable_protections",
@@ -105,7 +104,7 @@ ARGS_BACKTEST_SHOW = [
 
 ARGS_LIST_EXCHANGES = ["print_one_column", "list_exchanges_all", "trading_mode", "dex_exchanges"]
 
-ARGS_LIST_TIMEFRAMES = ["exchange", "print_one_column"]
+ARGS_LIST_TIMEFRAMES = ["exchange", "print_one_column", "trading_mode"]
 
 ARGS_LIST_PAIRS = [
     "exchange",

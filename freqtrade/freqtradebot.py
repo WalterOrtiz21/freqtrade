@@ -1,5 +1,5 @@
 """
-Freqtrade is the main module of this bot. It contains the class Freqtrade()
+Freqtrade is the main module of this bot. It contains the FreqtradeBot class.
 """
 
 import logging
@@ -63,7 +63,7 @@ from freqtrade.rpc.rpc_types import (
 from freqtrade.strategy.interface import IStrategy
 from freqtrade.strategy.strategy_wrapper import strategy_safe_wrapper
 from freqtrade.util import FtPrecise, MeasureTime, PeriodicCache, dt_from_ts, dt_now
-from freqtrade.util.migrations.binance_mig import migrate_binance_futures_names
+from freqtrade.util.migrations import migrate_live_content
 from freqtrade.wallets import Wallets
 
 
@@ -229,7 +229,7 @@ class FreqtradeBot(LoggingMixin):
         Called on startup and after reloading the bot - triggers notifications and
         performs startup tasks
         """
-        migrate_binance_futures_names(self.config)
+        migrate_live_content(self.config, self.exchange)
         set_startup_time()
 
         self.rpc.startup_messages(self.config, self.pairlists, self.protections)
@@ -1617,7 +1617,9 @@ class FreqtradeBot(LoggingMixin):
                         f"Emergency exiting trade {trade}, as the exit order "
                         f"timed out {max_timeouts} times. force selling {order['amount']}."
                     )
-                    self.emergency_exit(trade, order["price"], order["amount"])
+                    # Trade.session.refresh(order_obj)
+
+                    self.emergency_exit(trade, order["price"], order_obj.safe_remaining)
             return canceled
 
     def emergency_exit(

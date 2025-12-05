@@ -19,6 +19,10 @@ logger = logging.getLogger(__name__)
 
 
 class Kraken(Exchange):
+    """Kraken exchange class.
+    Contains adjustments needed for Freqtrade to work with this exchange.
+    """
+
     _params: dict = {"trading_agreement": "agree"}
     _ft_has: FtHas = {
         "stoploss_on_exchange": True,
@@ -78,7 +82,7 @@ class Kraken(Exchange):
             balances.pop("free", None)
             balances.pop("total", None)
             balances.pop("used", None)
-            self._log_exchange_response("fetch_balances", balances)
+            self._log_exchange_response("fetch_balance", balances)
 
             # Consolidate balances
             balances = self.consolidate_balances(balances)
@@ -100,7 +104,7 @@ class Kraken(Exchange):
                 balances[bal]["used"] = sum(order[1] for order in order_list if order[0] == bal)
                 balances[bal]["free"] = balances[bal]["total"] - balances[bal]["used"]
 
-            self._log_exchange_response("fetch_balances2", balances)
+            self._log_exchange_response("fetch_balance2", balances)
             return balances
         except ccxt.DDoSProtection as e:
             raise DDosProtection(e) from e
