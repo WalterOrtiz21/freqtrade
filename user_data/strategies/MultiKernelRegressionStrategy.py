@@ -26,6 +26,7 @@ class MultiKernelRegressionStrategy(IStrategy):
     - Leverage-agnostic: ROI y stoploss se ajustan automáticamente por leverage
     - TPs parciales opcionales (TP1/TP2) - Configurable con enable_partial_exits
     - Breakeven opcional e independiente - Configurable con enable_breakeven y breakeven_roi
+    - Volatility Filter: Evita mercados "dormidos" sin movimiento (ATR)
     - Salida por señal opuesta del kernel
 
     PARÁMETROS:
@@ -36,12 +37,13 @@ class MultiKernelRegressionStrategy(IStrategy):
     - tp2_amount: Cantidad a vender en TP2 (default: 30%)
     - enable_breakeven: Habilitar/Deshabilitar movimiento a breakeven (default: False)
     - breakeven_roi: Profit requerido para activar breakeven (default: 0.5%)
+    - use_volatility_filter: Filtrar mercados con baja volatilidad (default: False)
 
     IMPORTANTE:
     - Los valores ROI/Stoploss se ajustan automáticamente por leverage en bot_start()
     - Los TPs y breakeven se calculan sobre movimiento de precio, no ROE
     - El breakeven es INDEPENDIENTE de los TPs - se activa según breakeven_roi
-    - Puedes usar breakeven sin TPs, o TPs sin breakeven, o ambos
+    - Volatility Filter: ATR(1) > ATR(10) detecta mercados activos
     """
 
     INTERFACE_VERSION = 3
@@ -65,13 +67,16 @@ class MultiKernelRegressionStrategy(IStrategy):
         optimize=True
     )
 
-    # --- FILTROS (RSI / ADX) ---
+    # --- FILTROS (RSI / ADX / VOLATILITY) ---
     use_rsi = BooleanParameter(default=True, space='buy', optimize=True)
     rsi_buy_min = IntParameter(30, 70, default=50, space='buy', optimize=True)
     rsi_sell_max = IntParameter(30, 70, default=50, space='sell', optimize=True)
 
     use_adx = BooleanParameter(default=True, space='buy', optimize=True)
     adx_min = IntParameter(10, 50, default=25, space='buy', optimize=True)
+
+    # Volatility Filter: Evita mercados "dormidos" sin movimiento
+    use_volatility_filter = BooleanParameter(default=False, space='buy', optimize=True)
 
     # ==========================================
     # ─── GESTIÓN DE RIESGO (TPs) ───
@@ -164,6 +169,15 @@ class MultiKernelRegressionStrategy(IStrategy):
         dataframe['rsi'] = ta.RSI(dataframe)
         dataframe['adx'] = ta.ADX(dataframe)
 
+        # 4. Volatility Filter: ATR(1) > ATR(10)
+        # Detecta si la volatilidad está aumentando (mercado activo vs "dormido")
+        if self.use_volatility_filter.value:
+            atr1 = ta.ATR(dataframe, timeperiod=1)
+            atr10 = ta.ATR(dataframe, timeperiod=10)
+            dataframe['volatility_ok'] = atr1 > atr10
+        else:
+            dataframe['volatility_ok'] = True
+
         return dataframe
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
@@ -180,6 +194,9 @@ class MultiKernelRegressionStrategy(IStrategy):
         # Filtros ADX (si están activados)
         adx_cond = (dataframe['adx'] > self.adx_min.value) if self.use_adx.value else (dataframe['volume'] > 0)
 
+        # Filtro de Volatilidad
+        volatility_cond = dataframe['volatility_ok']
+
         # LONG: Cambio de tendencia 0 -> 1
         dataframe.loc[
             (
@@ -187,7 +204,8 @@ class MultiKernelRegressionStrategy(IStrategy):
                 (dataframe['trend_up'].shift(1) == 0) &
                 volume_check &
                 rsi_buy_cond &
-                adx_cond
+                adx_cond &
+                volatility_cond
             ),
             'enter_long'] = 1
 
@@ -198,7 +216,8 @@ class MultiKernelRegressionStrategy(IStrategy):
                 (dataframe['trend_up'].shift(1) == 1) &
                 volume_check &
                 rsi_sell_cond &
-                adx_cond
+                adx_cond &
+                volatility_cond
             ),
             'enter_short'] = 1
 
