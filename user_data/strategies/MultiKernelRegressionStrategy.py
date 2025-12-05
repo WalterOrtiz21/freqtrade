@@ -14,6 +14,14 @@ from freqtrade.persistence import Trade
 import talib.abstract as ta
 from datetime import datetime
 
+# Optuna para auto-calibración (opcional)
+try:
+    import optuna
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    HAS_OPTUNA = True
+except ImportError:
+    HAS_OPTUNA = False
+
 logger = logging.getLogger(__name__)
 
 class MultiKernelRegressionStrategy(IStrategy):
@@ -27,6 +35,7 @@ class MultiKernelRegressionStrategy(IStrategy):
     - TPs parciales opcionales (TP1/TP2) - Configurable con enable_partial_exits
     - Breakeven opcional e independiente - Configurable con enable_breakeven y breakeven_roi
     - Volatility Filter: Evita mercados "dormidos" sin movimiento (ATR)
+    - Auto-calibración con Optuna: Optimización bayesiana de kernel_type y bandwidth por par
     - Salida por señal opuesta del kernel
 
     PARÁMETROS:
@@ -38,15 +47,33 @@ class MultiKernelRegressionStrategy(IStrategy):
     - enable_breakeven: Habilitar/Deshabilitar movimiento a breakeven (default: False)
     - breakeven_roi: Profit requerido para activar breakeven (default: 0.5%)
     - use_volatility_filter: Filtrar mercados con baja volatilidad (default: False)
+    - use_auto_calibration: Activar optimización bayesiana de parámetros (default: False, requiere Optuna)
+    - calibration_trials: Número de iteraciones de optimización (default: 50, rango: 20-100)
+    - calibration_metric: Métrica de optimización 'sharpe' o 'winrate' (default: 'sharpe')
 
     IMPORTANTE:
     - Los valores ROI/Stoploss se ajustan automáticamente por leverage en bot_start()
     - Los TPs y breakeven se calculan sobre movimiento de precio, no ROE
     - El breakeven es INDEPENDIENTE de los TPs - se activa según breakeven_roi
     - Volatility Filter: ATR(1) > ATR(10) detecta mercados activos
+    - Auto-calibración: Requiere 'pip install optuna'
+    - En BACKTESTING: Calibra UNA VEZ con datos de startup_candle_count (evita lookahead bias)
+    - En DRY/LIVE: Calibra al inicio + re-calibra automáticamente cada SÁBADO
+    - Re-calibración solo compara vs baseline - solo cambia parámetros si mejoran
+    - Con auto-calibración activa, los parámetros optimizados sobrescriben bandwidth/kernel_type por par
     """
 
     INTERFACE_VERSION = 3
+
+    # Caché para parámetros óptimos por par (auto-calibración)
+    _optimal_params = {}
+    _calibration_done = False
+    _last_calibration_date = None  # Fecha de la última calibración
+    _recalibration_day = 5  # 0=Lunes, 5=Sábado, 6=Domingo
+
+    # Walk-forward: Parámetros históricos por fecha (para backtest)
+    # Formato: {pair: [(timestamp, params), ...]}
+    _params_history = {}
 
     # ==========================================
     # ─── PARÁMETROS OPTIMIZABLES ───
@@ -77,6 +104,17 @@ class MultiKernelRegressionStrategy(IStrategy):
 
     # Volatility Filter: Evita mercados "dormidos" sin movimiento
     use_volatility_filter = BooleanParameter(default=False, space='buy', optimize=True)
+
+    # ==========================================
+    # ─── AUTO-CALIBRACIÓN (OPTUNA) ───
+    # ==========================================
+
+    # Auto-calibración: Encuentra automáticamente los mejores parámetros por símbolo
+    # - En BACKTESTING: Calibra UNA VEZ al inicio con datos de startup_candle_count
+    # - En DRY/LIVE: Calibra al inicio + re-calibra cada SÁBADO
+    use_auto_calibration = BooleanParameter(default=False, space='buy', optimize=False)
+    calibration_trials = IntParameter(20, 500, default=50, space='buy', optimize=False)
+    calibration_metric = CategoricalParameter(['sharpe', 'winrate'], default='sharpe', space='buy', optimize=False)
 
     # ==========================================
     # ─── GESTIÓN DE RIESGO (TPs) ───
@@ -117,7 +155,7 @@ class MultiKernelRegressionStrategy(IStrategy):
     exit_profit_only = False
     ignore_roi_if_entry_signal = False
     can_short = True
-    startup_candle_count: int = 100
+    startup_candle_count: int = 1500
 
     # Habilitar ajuste de posición para TPs parciales
     position_adjustment_enable = True
@@ -132,6 +170,7 @@ class MultiKernelRegressionStrategy(IStrategy):
     def bot_start(self, **kwargs) -> None:
         """
         Ajusta ROI y Stoploss por leverage al iniciar el bot.
+        Ejecuta auto-calibración si está habilitada.
         """
         config_leverage = self.config.get('leverage', 1.0)
 
@@ -145,18 +184,296 @@ class MultiKernelRegressionStrategy(IStrategy):
             0: 0.99 * config_leverage
         }
 
+        # Force reset calibration status
+        self._calibration_done = False
+        with open("debug_trace.txt", "a") as f:
+            f.write(f"DEBUG: bot_start called. Resetting calibration_done to False. Instance: {id(self)}\n")
+
+        # La auto-calibración se ejecuta en populate_indicators() la primera vez
+        # (bot_start se ejecuta antes de cargar los parámetros del JSON)
+
     def leverage(self, pair: str, current_time: datetime, current_rate: float,
                  proposed_leverage: float, max_leverage: float, entry_tag: str | None, side: str,
                  **kwargs) -> float:
         return self.config.get('leverage', 1.0)
 
+    # ==========================================
+    # ─── AUTO-CALIBRACIÓN (OPTUNA) ───
+    # ==========================================
+
+    def calibrate_parameters(self):
+        """
+        Auto-calibra kernel_type y bandwidth para cada par usando Optuna.
+        Usa optimización Bayesiana para encontrar los mejores parámetros.
+        """
+        with open("debug_trace.txt", "a") as f:
+            f.write(f"DEBUG: calibrate_parameters called. Instance: {id(self)}\n")
+
+        pairs = self.dp.current_whitelist() if hasattr(self, 'dp') else []
+
+        if not pairs:
+            logger.warning("⚠️  No hay pares en whitelist. Auto-calibración omitida.")
+            with open("debug_trace.txt", "a") as f: f.write("DEBUG: No pairs in whitelist\n")
+            return
+
+        for pair in pairs:
+            try:
+                # Obtener datos históricos
+                df = self.dp.get_pair_dataframe(pair, self.timeframe)
+
+                if len(df) < 500:
+                    logger.warning(f"⚠️  {pair}: Datos insuficientes ({len(df)} velas). Omitido.")
+                    continue
+
+                # Durante backtesting: usar SOLO startup_candle_count para evitar lookahead bias
+                # Durante dry run/live: usar todos los datos disponibles
+                is_backtesting = self.dp.runmode.value in ['backtest', 'hyperopt']
+
+                if is_backtesting and len(df) > self.startup_candle_count:
+                    # Usar últimas startup_candle_count velas ANTES del inicio del timerange
+                    # Esto simula trading real: "Hoy voy a tradear, calibro con los últimos N días disponibles"
+                    # El dataframe tiene: [startup_data] + [timerange_data]
+                    # Las primeras startup_candle_count velas son los datos MÁS RECIENTES antes del timerange
+                    df_calibration = df.iloc[:self.startup_candle_count].copy()
+
+                    # Info de fechas para transparencia
+                    if 'date' in df_calibration.columns:
+                        start_date = df_calibration['date'].iloc[0]
+                        end_date = df_calibration['date'].iloc[-1]
+                        timerange_start = df['date'].iloc[self.startup_candle_count] if len(df) > self.startup_candle_count else None
+                    else:
+                        start_date = df_calibration.index[0]
+                        end_date = df_calibration.index[-1]
+                        timerange_start = df.index[self.startup_candle_count] if len(df) > self.startup_candle_count else None
+
+                    logger.info(
+                        f"🔬 {pair}: Modo BACKTEST - Calibrando con {len(df_calibration)} velas recientes"
+                    )
+                    logger.info(
+                        f"   📅 Ventana calibración: {start_date} → {end_date}"
+                    )
+                    logger.info(
+                        f"   📅 Timerange comienza: {timerange_start}"
+                    )
+                else:
+                    # Dry run o live: usar todos los datos disponibles
+                    df_calibration = df.copy()
+                    logger.info(f"🔬 {pair}: Modo LIVE/DRY - Calibrando con {len(df_calibration)} velas históricas")
+
+                # 1. Evaluar parámetros por defecto (baseline)
+                default_bw = self.bandwidth.value
+                default_kernel = self.kernel_type.value
+
+                logger.info(f"📊 {pair}: Evaluando baseline (Kernel={default_kernel}, BW={default_bw})...")
+                baseline_score = self._evaluate_params(df_calibration, default_kernel, default_bw)
+                logger.info(f"📊 {pair}: Baseline Score={baseline_score:.4f}")
+
+                # 2. Optimizar con Optuna
+                logger.info(f"🔍 {pair}: Buscando mejores parámetros ({self.calibration_trials.value} trials)...")
+
+                study = optuna.create_study(
+                    direction='maximize',
+                    sampler=optuna.samplers.TPESampler(seed=42)
+                )
+
+                study.optimize(
+                    lambda trial: self._objective(trial, df_calibration),
+                    n_trials=self.calibration_trials.value,
+                    show_progress_bar=False
+                )
+
+                # 3. Comparar y decidir
+                if study.best_value > baseline_score:
+                    # Mejora encontrada - usar nuevos parámetros
+                    improvement = ((study.best_value - baseline_score) / abs(baseline_score)) * 100
+                    self._optimal_params[pair] = study.best_params
+
+                    logger.info(
+                        f"✅ {pair}: MEJORA encontrada (+{improvement:.2f}%) → "
+                        f"Kernel={study.best_params['kernel_type']}, "
+                        f"BW={study.best_params['bandwidth']}, "
+                        f"Score={study.best_value:.4f}"
+                    )
+                else:
+                    # No hay mejora - mantener parámetros por defecto
+                    diff = baseline_score - study.best_value
+                    logger.info(
+                        f"ℹ️  {pair}: Baseline es mejor (Δ={diff:.4f}) → "
+                        f"Manteniendo Kernel={default_kernel}, BW={default_bw}"
+                    )
+
+            except Exception as e:
+                logger.error(f"❌ {pair}: Error en calibración: {e}")
+                continue
+
+        logger.info(f"✅ Auto-calibración completada para {len(self._optimal_params)} pares")
+
+    def _evaluate_params(self, df, kernel_type, bandwidth):
+        """
+        Evalúa un conjunto específico de parámetros y retorna el score.
+        Usado para evaluar el baseline antes de la optimización.
+        """
+        try:
+            # Calcular kernel con parámetros dados
+            kernel_line = self.calculate_kernel_nrp(df['close'], bandwidth, kernel_type)
+        except Exception as e:
+            logger.debug(f"Error calculando kernel: {e}")
+            return -999.0
+
+        # Simular trades
+        trades = self._simulate_trades(df, kernel_line)
+
+        if len(trades) < 5:
+            return -999.0
+
+        # Calcular métrica seleccionada
+        if self.calibration_metric.value == 'sharpe':
+            return self._calculate_sharpe(trades)
+        else:
+            return self._calculate_winrate(trades)
+
+    def _objective(self, trial, df):
+        """
+        Función objetivo para Optuna.
+        Retorna la métrica a maximizar (Sharpe Ratio o Win Rate).
+        """
+        # Sugerir parámetros
+        kernel_type = trial.suggest_categorical('kernel_type', [
+            "Gaussian", "Quartic", "Epanechnikov", "Triangular",
+            "Logistic", "Cosine", "Laplace", "Parabolic"
+        ])
+        bandwidth = trial.suggest_int('bandwidth', 5, 50)
+
+        # Evaluar estos parámetros
+        return self._evaluate_params(df, kernel_type, bandwidth)
+
+    def _simulate_trades(self, df, kernel_line):
+        """
+        Simula trades usando la lógica de la estrategia.
+        Retorna lista de profits/losses.
+        """
+        trades = []
+        in_position = False
+        entry_price = 0
+        entry_type = None  # 'long' o 'short'
+
+        # Detectar cambios de tendencia
+        trend_up = (kernel_line > pd.Series(kernel_line).shift(1)).astype(int)
+
+        for i in range(1, len(df)):
+            if pd.isna(kernel_line[i]) or pd.isna(trend_up[i]):
+                continue
+
+            # Entrada LONG: Cambio 0 -> 1
+            if not in_position and trend_up[i] == 1 and trend_up[i-1] == 0:
+                entry_price = df['close'].iloc[i]
+                entry_type = 'long'
+                in_position = True
+
+            # Entrada SHORT: Cambio 1 -> 0
+            elif not in_position and trend_up[i] == 0 and trend_up[i-1] == 1:
+                entry_price = df['close'].iloc[i]
+                entry_type = 'short'
+                in_position = True
+
+            # Salida LONG: Cambio 1 -> 0
+            elif in_position and entry_type == 'long' and trend_up[i] == 0 and trend_up[i-1] == 1:
+                exit_price = df['close'].iloc[i]
+                profit = (exit_price - entry_price) / entry_price
+                trades.append(profit)
+                in_position = False
+
+            # Salida SHORT: Cambio 0 -> 1
+            elif in_position and entry_type == 'short' and trend_up[i] == 1 and trend_up[i-1] == 0:
+                exit_price = df['close'].iloc[i]
+                profit = (entry_price - exit_price) / entry_price
+                trades.append(profit)
+                in_position = False
+
+        return trades
+
+    def _calculate_sharpe(self, trades):
+        """Calcula Sharpe Ratio de los trades."""
+        if len(trades) == 0:
+            return -999.0
+
+        returns = np.array(trades)
+        mean_return = np.mean(returns)
+        std_return = np.std(returns)
+
+        if std_return == 0:
+            return -999.0
+
+        sharpe = mean_return / std_return * np.sqrt(252)  # Anualizado
+        return sharpe
+
+    def _calculate_winrate(self, trades):
+        """Calcula Win Rate de los trades."""
+        if len(trades) == 0:
+            return 0.0
+
+        winners = sum(1 for t in trades if t > 0)
+        winrate = winners / len(trades)
+        return winrate
+
+    # ==========================================
+    # ─── INDICADORES Y SEÑALES ───
+    # ==========================================
+
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
         Calcula indicadores.
+        Usa parámetros calibrados si están disponibles (auto-calibración).
+        Re-calibra automáticamente cada sábado en dry run/live trading.
         """
-        # Obtenemos los valores de los parámetros actuales
-        bw = self.bandwidth.value
-        k_type = self.kernel_type.value
+        # Verificar si es necesario (re)calibrar
+        should_calibrate = False
+        current_date = datetime.now().date()
+        is_backtesting = hasattr(self, 'dp') and self.dp.runmode.value in ['backtest', 'hyperopt']
+
+        with open("debug_trace.txt", "a") as f:
+            f.write(f"DEBUG: populate_indicators called for {metadata.get('pair')}. Instance: {id(self)}\n")
+            f.write(f"DEBUG: Class attr _calibration_done: {MultiKernelRegressionStrategy._calibration_done}\n")
+            f.write(f"DEBUG: use_auto_calibration={self.use_auto_calibration.value}, HAS_OPTUNA={HAS_OPTUNA}\n")
+            f.write(f"DEBUG: is_backtesting={is_backtesting}, calibration_done={self._calibration_done}\n")
+
+        if self.use_auto_calibration.value and HAS_OPTUNA:
+            if not self._calibration_done:
+                # Primera calibración
+                should_calibrate = True
+                logger.info("🔍 Iniciando auto-calibración inicial con Optuna...")
+                with open("debug_trace.txt", "a") as f: f.write("DEBUG: Starting initial calibration\n")
+            elif not is_backtesting:
+                # Re-calibración periódica (SOLO en dry/live, NO en backtest)
+                days_since_last = (current_date - self._last_calibration_date).days if self._last_calibration_date else 999
+                is_recalibration_day = current_date.weekday() == self._recalibration_day
+
+                if is_recalibration_day and days_since_last >= 7:
+                    should_calibrate = True
+                    logger.info(f"📅 Re-calibración semanal (Sábado) - Última calibración: {self._last_calibration_date}")
+        elif self.use_auto_calibration.value and not HAS_OPTUNA and not self._calibration_done:
+            logger.warning("⚠️  Optuna no está instalado. Instalar con: pip install optuna")
+            logger.warning("⚠️  Auto-calibración deshabilitada. Usando parámetros por defecto.")
+            with open("debug_trace.txt", "a") as f: f.write("DEBUG: Optuna not installed\n")
+
+        # Ejecutar calibración si es necesario
+        if should_calibrate:
+            with open("debug_trace.txt", "a") as f: f.write("DEBUG: Calling calibrate_parameters()\n")
+            self.calibrate_parameters()
+            self._calibration_done = True
+            self._last_calibration_date = current_date
+
+        pair = metadata.get('pair', '')
+
+        # Usar parámetros calibrados si están disponibles
+        if pair in self._optimal_params:
+            bw = self._optimal_params[pair]['bandwidth']
+            k_type = self._optimal_params[pair]['kernel_type']
+            logger.info(f"📊 {pair}: Usando parámetros calibrados (Kernel={k_type}, BW={bw})")
+        else:
+            # Usar parámetros por defecto
+            bw = self.bandwidth.value
+            k_type = self.kernel_type.value
 
         # 1. Calcular Kernel Regression
         dataframe['kernel_line'] = self.calculate_kernel_nrp(dataframe['close'], bw, k_type)

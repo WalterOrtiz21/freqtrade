@@ -2,15 +2,19 @@
     "strategy_name": "MultiKernelRegressionStrategy",
     "params": {
         "buy": {
+            "startup_candle_count": 1500,
             "use_rsi": false,
             "use_adx": false,
-            "use_volatility_filter": true,
+            "use_volatility_filter": false,
             "bandwidth": 14,
-            "kernel_type": "Quartic"
+            "kernel_type": "Quartic",
+            "use_auto_calibration": false,
+            "calibration_trials": 100,
+            "calibration_metric": "sharpe"
         },
         "sell": {
-            "enable_partial_exits": true,
-            "enable_breakeven": true,
+            "enable_partial_exits": false,
+            "enable_breakeven": false,
             "breakeven_roi": 2.0,
             "tp1_roi": 1.0,
             "tp2_roi": 2.0,
@@ -22,7 +26,7 @@
             "0": 99
         },
         "stoploss": {
-            "stoploss": -0.02
+            "stoploss": -0.03
         }
     }
 }
