@@ -3,14 +3,13 @@
     "params": {
         "buy": {
             "startup_candle_count": 1500,
+            "use_chop ": true,
             "use_rsi": false,
             "use_adx": false,
+            "use_ewo": true,
             "use_volatility_filter": false,
             "bandwidth": 14,
-            "kernel_type": "Quartic",
-            "use_auto_calibration": false,
-            "calibration_trials": 100,
-            "calibration_metric": "sharpe"
+            "kernel_type": "Quartic"
         },
         "sell": {
             "enable_partial_exits": false,
@@ -22,11 +21,23 @@
             "tp2_amount": 30.0,
             "rsi_sell_max": 50
         },
+        "_roi": {
+            "0": 0.20,
+            "30": 0.05,
+            "60": 0.03,
+            "120": 0.03
+        },
         "roi": {
             "0": 99
         },
         "stoploss": {
             "stoploss": -0.03
+        },
+        "trailing": {
+            "trailing_stop": false,
+            "trailing_stop_positive": 0.01,
+            "trailing_stop_positive_offset": 0.03,
+            "trailing_only_offset_is_reached": true
         }
     }
 }
