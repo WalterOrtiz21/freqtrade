@@ -8,7 +8,7 @@ from pandas import DataFrame
 from datetime import datetime, timedelta
 from typing import Optional, Union
 
-from freqtrade.strategy import (IStrategy, IntParameter, DecimalParameter, BooleanParameter, CategoricalParameter)
+from freqtrade.strategy import (IStrategy, IntParameter, DecimalParameter, BooleanParameter, CategoricalParameter, stoploss_from_absolute)
 from freqtrade.persistence import Trade
 import talib.abstract as ta
 import logging
@@ -378,8 +378,9 @@ class LorentzianSuperTrend(IStrategy):
     minimal_roi = { "0": 100 } # Desactivamos ROI estandard, usamos Custom
     stoploss = -0.99           # Desactivamos SL fijo estandard, usamos Custom ATR
     
-    # IMPORTANTE: Subir esto para tener min/max estables en los indicadores "expanding"
-    startup_candle_count = 7000 
+    # Con normalización fija (constantes históricas), solo necesitamos velas
+    # para los indicadores técnicos (EMA200, ATR, etc.)
+    startup_candle_count = 2200 
     
     # REGLA PINE SCRIPT CRUCIAL:
     # El script original dice: if strategy.openprofit > 0 -> close.
@@ -392,7 +393,90 @@ class LorentzianSuperTrend(IStrategy):
     position_adjustment_enable = True 
     process_only_new_candles = True # Similar a process_orders_on_close de Pine
 
+    process_only_new_candles = True # Similar a process_orders_on_close de Pine
+
+    # Fecha desde la cual calcular min/max históricos para normalización
+    # Esto replica el comportamiento de Pine Script que usa todo el historial del chart
+    HISTORIC_START_DATE = "2020-01-01"
+    
+    # Cache para min/max calculados (se calculan una sola vez)
+    _historic_calculated = False
+    _historic_wt_min = -53.0   # Valores por defecto
+    _historic_wt_max = 47.0
+    _historic_cci_min = -550.0
+    _historic_cci_max = 550.0
+
+    # Logging Control
+    analysis_logging = BooleanParameter(default=False, space='protection', optimize=False)
+
     # ---------------- FUNCIONES DE NORMALIZACION -----------------
+    
+    def _calculate_historic_minmax(self, pair: str):
+        """
+        Calcula min/max históricos desde HISTORIC_START_DATE.
+        Carga datos directamente del archivo feather.
+        Se ejecuta una sola vez al inicio.
+        """
+        if self._historic_calculated:
+            return
+            
+        try:
+            from pathlib import Path
+            
+            # Construir ruta al archivo de datos
+            # Formato: user_data/data/{exchange}/futures/{PAIR}-{timeframe}-futures.feather
+            pair_filename = pair.replace("/", "_").replace(":", "_")
+            data_path = Path("user_data/data/binance/futures") / f"{pair_filename}-{self.timeframe}-futures.feather"
+            
+            if not data_path.exists():
+                logger.warning(f"Archivo de datos no encontrado: {data_path}")
+                logger.info(f"   Usando valores por defecto para min/max")
+                self._historic_calculated = True
+                return
+            
+            # Cargar datos desde archivo
+            df = pd.read_feather(data_path)
+            
+            # Filtrar desde la fecha de inicio
+            df = df[df['date'] >= self.HISTORIC_START_DATE].copy()
+            
+            if len(df) < 100:
+                logger.warning(f"Pocos datos históricos desde {self.HISTORIC_START_DATE}: {len(df)} filas")
+                self._historic_calculated = True
+                return
+            
+            # Calcular WaveTrend
+            ap = (df['high'] + df['low'] + df['close']) / 3
+            esa = ta.EMA(ap, timeperiod=self.f2_ch_len.value)
+            d = ta.EMA(np.abs(ap - esa), timeperiod=self.f2_ch_len.value)
+            d = np.where(d == 0, 0.0001, d)
+            ci = (ap - esa) / (0.015 * d)
+            tci = ta.EMA(ci, timeperiod=self.f2_avg_len.value)
+            wt1 = tci
+            wt2 = ta.SMA(wt1, timeperiod=4)
+            wt_diff = wt1 - wt2
+            
+            self._historic_wt_min = float(np.nanmin(wt_diff))
+            self._historic_wt_max = float(np.nanmax(wt_diff))
+            
+            # Calcular CCI
+            cci_raw = ta.CCI(df, timeperiod=self.f3_period.value)
+            if self.f3_smoothing.value > 1:
+                cci_smooth = ta.EMA(cci_raw, timeperiod=self.f3_smoothing.value)
+            else:
+                cci_smooth = cci_raw
+            
+            self._historic_cci_min = float(np.nanmin(cci_smooth))
+            self._historic_cci_max = float(np.nanmax(cci_smooth))
+            
+            logger.info(f"📊 Min/Max históricos calculados desde {self.HISTORIC_START_DATE} ({len(df)} filas):")
+            logger.info(f"   WaveTrend: [{self._historic_wt_min:.2f}, {self._historic_wt_max:.2f}]")
+            logger.info(f"   CCI: [{self._historic_cci_min:.2f}, {self._historic_cci_max:.2f}]")
+            
+        except Exception as e:
+            logger.error(f"Error calculando min/max históricos: {e}")
+        
+        self._historic_calculated = True
     
     def _normalize_expanding(self, series: Union[pd.Series, np.ndarray]) -> pd.Series:
         """Replica normalize() de Pine para valores sin limites definidos."""
@@ -415,6 +499,9 @@ class LorentzianSuperTrend(IStrategy):
         return (clamped - min_val) / (max_val - min_val)
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        
+        # Calcular min/max históricos (solo la primera vez)
+        self._calculate_historic_minmax(metadata['pair'])
         
         # --- SELECCIÓN DE SOURCE ---
         st = self.source_type.value
@@ -482,12 +569,14 @@ class LorentzianSuperTrend(IStrategy):
         wt1 = tci
         wt2 = ta.SMA(wt1, timeperiod=4)
         wt_diff = wt1 - wt2
-        dataframe['f2_norm'] = self._normalize_expanding(wt_diff) 
+        # Usamos min/max históricos calculados dinámicamente
+        dataframe['f2_norm'] = self._normalize_fixed(wt_diff, self._historic_wt_min, self._historic_wt_max) 
         
         # --- FEATURE 3: CCI ---
         cci_raw = ta.CCI(dataframe, timeperiod=self.f3_period.value)
         cci_smooth = ta.EMA(cci_raw, timeperiod=self.f3_smoothing.value) if self.f3_smoothing.value > 1 else cci_raw
-        dataframe['f3_norm'] = self._normalize_expanding(cci_smooth)
+        # Usamos min/max históricos calculados dinámicamente
+        dataframe['f3_norm'] = self._normalize_fixed(cci_smooth, self._historic_cci_min, self._historic_cci_max)
 
         # --- FEATURE 4: ADX ---
         adx_raw = ta.ADX(dataframe, timeperiod=self.f4_period.value)
@@ -573,12 +662,17 @@ class LorentzianSuperTrend(IStrategy):
         is_bullish_rate = dataframe['yhat1'] > dataframe['yhat1'].shift(1)
         is_bearish_rate = dataframe['yhat1'] < dataframe['yhat1'].shift(1)
 
-        if self.use_kernel_smoothing.value:
-            dataframe['is_bullish_kernel'] = is_bullish_smooth
-            dataframe['is_bearish_kernel'] = is_bearish_smooth
+        if self.use_kernel_filter.value:
+            if self.use_kernel_smoothing.value:
+                dataframe['is_bullish_kernel'] = is_bullish_smooth
+                dataframe['is_bearish_kernel'] = is_bearish_smooth
+            else:
+                dataframe['is_bullish_kernel'] = is_bullish_rate
+                dataframe['is_bearish_kernel'] = is_bearish_rate
         else:
-            dataframe['is_bullish_kernel'] = is_bullish_rate
-            dataframe['is_bearish_kernel'] = is_bearish_rate
+            # Pine: isBullish = useKernelFilter ? ... : true
+            dataframe['is_bullish_kernel'] = np.ones(len(dataframe), dtype=bool)
+            dataframe['is_bearish_kernel'] = np.ones(len(dataframe), dtype=bool)
 
         # Detectar cambios de color del kernel
         dataframe['is_bearish_change'] = is_bearish_rate & (dataframe['yhat1'].shift(1) < dataframe['yhat1'].shift(2))
@@ -592,16 +686,18 @@ class LorentzianSuperTrend(IStrategy):
             dataframe['is_ml_ema_uptrend'] = dataframe['close'] > ml_ema
             dataframe['is_ml_ema_downtrend'] = dataframe['close'] < ml_ema
         else:
-            dataframe['is_ml_ema_uptrend'] = True  # Siempre pasa si desactivado
-            dataframe['is_ml_ema_downtrend'] = True
+            # CRITICAL: Usar numpy array explícito, no escalar True
+            # El escalar True puede causar problemas con operaciones & en pandas
+            dataframe['is_ml_ema_uptrend'] = np.ones(len(dataframe), dtype=bool)
+            dataframe['is_ml_ema_downtrend'] = np.ones(len(dataframe), dtype=bool)
 
         if self.use_ml_sma_filter.value:
             ml_sma = ta.SMA(dataframe, timeperiod=self.ml_sma_period.value)
             dataframe['is_ml_sma_uptrend'] = dataframe['close'] > ml_sma
             dataframe['is_ml_sma_downtrend'] = dataframe['close'] < ml_sma
         else:
-            dataframe['is_ml_sma_uptrend'] = True  # Siempre pasa si desactivado
-            dataframe['is_ml_sma_downtrend'] = True
+            dataframe['is_ml_sma_uptrend'] = np.ones(len(dataframe), dtype=bool)
+            dataframe['is_ml_sma_downtrend'] = np.ones(len(dataframe), dtype=bool)
 
         # Sistema 2: EMA para posiciones (Pine: bullish/bearish, ema200)
         # Pine: bullish = close > ema200 (SIEMPRE calculado)
@@ -610,19 +706,16 @@ class LorentzianSuperTrend(IStrategy):
         dataframe['bearish'] = dataframe['close'] < position_ema
 
         # --- ML LORENTZIAN PREDICTION ---
-        # CRITICAL CORRECTION: Pine uses src[4] which is 4 bars in the FUTURE
+        # CRITICAL CORRECTION: Pine uses src[4] which is 4 bars in the PAST (history referencing)
         # Pine Strategy (line 233): y_train_series = src[4] < src[0] ? direction_s.short : src[4] > src[0] ? direction_s.long : direction_s.neutral
-        # Where direction_s.short = -1, direction_s.long = 1, direction_s.neutral = 0
-        # So:
-        # - future < current → price will drop → label = -1 (short/bearish)
-        # - future > current → price will rise → label = 1 (long/bullish)
-        # - future < current → price will drop → label = -1 (short/bearish)
-        # - future > current → price will rise → label = 1 (long/bullish)
+        # This compares Price 4 bars ago vs Current Price.
+        # If Price(t-4) < Price(t): Price ROSE. Label = Short (-1). (Contrarian/Mean Reversion)
+        # If Price(t-4) > Price(t): Price FELL. Label = Long (1).
         
-        # Usamos 'source' seleccionado por el usuario en lugar de hardcoded 'close'
-        future_source = dataframe['source'].shift(-4)  # 4 bars in the FUTURE
-        labels = np.where(future_source < dataframe['source'], -1.0,   # futuro < actual → bajará → short = -1
-                  np.where(future_source > dataframe['source'], 1.0,   # futuro > actual → subirá → long = 1
+        # Usamos 'source' seleccionado por el usuario
+        past_source = dataframe['source'].shift(4)  # 4 bars in the PAST
+        labels = np.where(past_source < dataframe['source'], -1.0,   # Pasado < Actual → Subió → Short = -1
+                  np.where(past_source > dataframe['source'], 1.0,   # Pasado > Actual → Bajó → Long = 1
                            0.0))
         labels = np.nan_to_num(labels, nan=0.0)
         
@@ -635,7 +728,7 @@ class LorentzianSuperTrend(IStrategy):
             labels.astype(np.float64),
             int(self.max_bars_back.value),
             int(self.neighbors_count.value),
-            4 # prediction_horizon (matches shift(-4))
+            -1 # prediction_horizon = -1 to include SELF (i) in neighbors, matching Pine behavior
         )
         dataframe['prediction'] = predictions
 
@@ -690,36 +783,44 @@ class LorentzianSuperTrend(IStrategy):
         ml_sell_signal = (dataframe['signal'] == -1)
 
         # Pine: isBuySignal = signal == direction_s.long and isEmaUptrend and isSmaUptrend
-        # Aplicar Sistema 1 (ML filters) a las señales
-        is_buy_signal = (
-            ml_buy_signal &
+        # Pine: isNewBuySignal = isBuySignal and isDifferentSignalType
+        # Pine: isDifferentSignalType = ta.change(signal)
+        
+        # CRITICAL FIX: Strictly match Pine Script logic.
+        # Previously, we were checking if the *filtered* signal changed, which meant that if the 
+        # EMA filter became valid later, it would trigger a trade (re-entry).
+        # Pine Script DOES NOT do this. It only trades if the signal changes AND the filter is valid AT THAT MOMENT.
+        
+        # 1. Detect signal changes (Pine: isDifferentSignalType)
+        dataframe['signal_changed'] = dataframe['signal'] != dataframe['signal'].shift(1)
+
+        # 2. Define New Buy/Sell Signals (Pine: isNewBuySignal)
+        # isNewBuySignal = (Signal is Buy) AND (Signal Changed) AND (Filters are Valid)
+        
+        dataframe['is_new_buy_signal'] = (
+            (dataframe['signal'] == 1) & 
+            dataframe['signal_changed'] &
             dataframe['is_ml_ema_uptrend'] &
             dataframe['is_ml_sma_uptrend']
         )
-        is_sell_signal = (
-            ml_sell_signal &
+        
+        dataframe['is_new_sell_signal'] = (
+            (dataframe['signal'] == -1) & 
+            dataframe['signal_changed'] &
             dataframe['is_ml_ema_downtrend'] &
             dataframe['is_ml_sma_downtrend']
         )
-
-        # Pine: isNewBuySignal = isBuySignal and isDifferentSignalType
-        dataframe['is_new_buy_signal'] = is_buy_signal & (is_buy_signal.shift(1) == False)
-        dataframe['is_new_sell_signal'] = is_sell_signal & (is_sell_signal.shift(1) == False)
 
         # Pine (línea 333): startLongTrade = isNewBuySignal and isBullish and isEmaUptrend and isSmaUptrend
         # isBullish = kernel filter, isEmaUptrend/isSmaUptrend ya incluidos en isNewBuySignal
         start_long_trade = (
             dataframe['is_new_buy_signal'] &
-            dataframe['is_bullish_kernel'] &  # Pine: isBullish
-            dataframe['is_ml_ema_uptrend'] &  # Pine: isEmaUptrend (redundante pero matching)
-            dataframe['is_ml_sma_uptrend']    # Pine: isSmaUptrend (redundante pero matching)
+            dataframe['is_bullish_kernel']    # Pine: isBullish
         )
 
         start_short_trade = (
             dataframe['is_new_sell_signal'] &
-            dataframe['is_bearish_kernel'] &  # Pine: isBearish
-            dataframe['is_ml_ema_downtrend'] & # Pine: isEmaDowntrend
-            dataframe['is_ml_sma_downtrend']   # Pine: isSmaDowntrend
+            dataframe['is_bearish_kernel']    # Pine: isBearish
         )
 
         # Pine (línea 726): if not bought and buy and ... and bullish and ema_filter_long
@@ -826,7 +927,8 @@ class LorentzianSuperTrend(IStrategy):
                         profit_pct = ((entry_price - current_rate) / entry_price) * 100
                         be_date = current_time.strftime('%Y-%m-%d %H:%M:%S')
                         entry_date = trade.open_date_utc.strftime('%Y-%m-%d %H:%M:%S')
-                        trade_logger.info(f"BE_ACTIVATED,SHORT,{pair},{current_rate:.8f},{profit_pct:.2f},R:R={self.be_rr_short.value},Date={be_date},EntryDate={entry_date}")
+                        if self.analysis_logging.value:
+                            trade_logger.info(f"BE_ACTIVATED,SHORT,{pair},{current_rate:.8f},{profit_pct:.2f},R:R={self.be_rr_short.value},Date={be_date},EntryDate={entry_date}")
                         logger.info(f"⚖️ Breakeven SHORT activated: {pair} @ {current_rate:.8f} | R:R={self.be_rr_short.value} | Date: {be_date}")
             else:
                 be_dist = sl_dist * float(self.be_rr_long.value)
@@ -840,16 +942,13 @@ class LorentzianSuperTrend(IStrategy):
                         profit_pct = ((current_rate - entry_price) / entry_price) * 100
                         be_date = current_time.strftime('%Y-%m-%d %H:%M:%S')
                         entry_date = trade.open_date_utc.strftime('%Y-%m-%d %H:%M:%S')
-                        trade_logger.info(f"BE_ACTIVATED,LONG,{pair},{current_rate:.8f},{profit_pct:.2f},R:R={self.be_rr_long.value},Date={be_date},EntryDate={entry_date}")
+                        if self.analysis_logging.value:
+                            trade_logger.info(f"BE_ACTIVATED,LONG,{pair},{current_rate:.8f},{profit_pct:.2f},R:R={self.be_rr_long.value},Date={be_date},EntryDate={entry_date}")
                         logger.info(f"⚖️ Breakeven LONG activated: {pair} @ {current_rate:.8f} | R:R={self.be_rr_long.value} | Date: {be_date}")
 
-        # Retornar SL como porcentaje relativo al precio actual
-        # Para LONG: SL abajo del current → negativo
-        # Para SHORT: SL arriba del current → positivo; SL abajo del current → negativo (debería cerrar)
-        if trade.is_short:
-             return (fixed_stop_price - current_rate) / current_rate
-        else:
-             return (fixed_stop_price - current_rate) / current_rate
+        # Usar stoploss_from_absolute para calcular correctamente el % relativo a current_rate
+        # Esta función maneja correctamente tanto longs como shorts
+        return stoploss_from_absolute(fixed_stop_price, current_rate, is_short=trade.is_short, leverage=trade.leverage)
 
     def leverage(self, pair: str, current_time: datetime, current_rate: float,
                  proposed_leverage: float, max_leverage: float, entry_tag: str | None, side: str,
@@ -903,7 +1002,8 @@ class LorentzianSuperTrend(IStrategy):
                         profit_abs = trade.calc_profit(current_rate) * (self.tp_percent.value / 100)
                         tp_date = current_time.strftime('%Y-%m-%d %H:%M:%S')
                         entry_date = trade.open_date_utc.strftime('%Y-%m-%d %H:%M:%S')
-                        trade_logger.info(f"TP_PARTIAL,LONG,{trade.pair},{current_rate:.8f},{profit_pct:.2f},{profit_abs:.8f},R:R={self.tp_rr_long.value},{self.tp_percent.value}%,Date={tp_date},EntryDate={entry_date}")
+                        if self.analysis_logging.value:
+                            trade_logger.info(f"TP_PARTIAL,LONG,{trade.pair},{current_rate:.8f},{profit_pct:.2f},{profit_abs:.8f},R:R={self.tp_rr_long.value},{self.tp_percent.value}%,Date={tp_date},EntryDate={entry_date}")
                         logger.info(f"💰 Take Profit LONG ({self.tp_percent.value}%): {trade.pair} @ {current_rate:.8f} | "
                                    f"Profit: {profit_pct:.2f}% | R:R={self.tp_rr_long.value} | Date: {tp_date}")
                     return -(trade.stake_amount * (self.tp_percent.value / 100))
@@ -979,11 +1079,13 @@ class LorentzianSuperTrend(IStrategy):
         sl_type_str = sl_type if sl_type else "N/A"
 
         # Log formato CSV: Type,Direction,Pair,EntryPrice,Amount,EntryDate,SL_Price,SL_Pct,BE_Price,TP_Price,Tag
-        trade_logger.info(f"ENTRY,{direction},{pair},{rate:.8f},{amount:.8f},{entry_date},"
-                         f"SL={sl_str}({sl_pct_str}% {sl_type_str}),"
-                         f"BE={be_str},"
-                         f"TP={tp_str},"
-                         f"{entry_tag or 'manual'}")
+        # Log formato CSV: Type,Direction,Pair,EntryPrice,Amount,EntryDate,SL_Price,SL_Pct,BE_Price,TP_Price,Tag
+        if self.analysis_logging.value:
+            trade_logger.info(f"ENTRY,{direction},{pair},{rate:.8f},{amount:.8f},{entry_date},"
+                             f"SL={sl_str}({sl_pct_str}% {sl_type_str}),"
+                             f"BE={be_str},"
+                             f"TP={tp_str},"
+                             f"{entry_tag or 'manual'}")
 
         logger.info(f"✅ {direction} Entry: {pair} @ {rate:.8f} | Amount: {amount:.8f} | Date: {entry_date}\n"
                    f"   💠 SL: {sl_str} ({sl_pct_str}% / {sl_type_str})\n"
@@ -1021,8 +1123,9 @@ class LorentzianSuperTrend(IStrategy):
             exit_type = "TP_PARTIAL"
 
         # Log formato CSV: Type,Direction,Reason,Pair,ExitPrice,ExitDate,Profit%,ProfitAbs,EntryDate,EntryPrice
-        trade_logger.info(f"{exit_type},{direction},{exit_reason},{pair},{rate:.8f},{exit_date},"
-                         f"{current_profit_pct:.2f},{current_profit_abs:.8f},{entry_date},{entry_price:.8f}")
+        if self.analysis_logging.value:
+            trade_logger.info(f"{exit_type},{direction},{exit_reason},{pair},{rate:.8f},{exit_date},"
+                             f"{current_profit_pct:.2f},{current_profit_abs:.8f},{entry_date},{entry_price:.8f}")
 
         profit_emoji = "🟢" if current_profit_abs > 0 else "🔴"
         logger.info(f"{profit_emoji} {direction} {exit_type} ({exit_reason}): {pair} @ {rate:.8f} | "
@@ -1044,41 +1147,9 @@ class LorentzianSuperTrend(IStrategy):
         entry_date = trade.open_date_utc.strftime('%Y-%m-%d %H:%M:%S')
         entry_price = trade.open_rate
 
-        # Detectar si estamos cerca del Stop Loss (pérdida >= 80% del SL)
-        # Esto loguea ANTES de que Freqtrade ejecute el SL automático
-        if current_profit < -0.01:  # En pérdida > 1%
-            # Calcular nivel de SL esperado
-            entry_data = self._get_entry_candle(pair, trade.open_date_utc)
-            if entry_data is not None:
-                sl_dist = 0.0
-                if self.stoploss_type.value == 'atr':
-                    sl_dist = entry_data['atr_sl'] * float(self.atr_stop_mult.value)
-                else:
-                    if trade.is_short:
-                        sl_dist = abs(entry_data['swing_high'] - entry_price)
-                    else:
-                        sl_dist = abs(entry_price - entry_data['swing_low'])
-
-                if sl_dist > 0:
-                    if trade.is_short:
-                        sl_level = (entry_price + sl_dist - current_rate) / current_rate
-                    else:
-                        sl_level = (entry_price - sl_dist - current_rate) / current_rate
-
-                    # Si estamos muy cerca del SL (80%+), loguear
-                    if abs(current_profit) >= abs(sl_level) * 0.8:
-                        if trade.id not in getattr(self, '_sl_logged', set()):
-                            if not hasattr(self, '_sl_logged'):
-                                self._sl_logged = set()
-                            self._sl_logged.add(trade.id)
-
-                            profit_pct = current_profit * 100
-                            profit_abs = trade.calc_profit(current_rate)
-                            sl_type = self.stoploss_type.value.upper()
-
-                            trade_logger.info(f"SL_HIT,{direction},{sl_type},{pair},{current_rate:.8f},{profit_pct:.2f},{profit_abs:.8f},EntryDate={entry_date},EntryPrice={entry_price:.8f}")
-                            logger.info(f"🛑 Stop Loss {direction} ({sl_type}): {pair} @ {current_rate:.8f} | "
-                                       f"Loss: {profit_pct:.2f}% ({profit_abs:.8f}) | Entry: {entry_date} @ {entry_price:.8f}")
+        # NOTA: El log de SL real se maneja en confirm_trade_exit cuando el trade
+        # realmente se cierra por trailing_stop_loss. No logueamos aquí para evitar
+        # mensajes confusos cuando el precio se acerca al SL pero luego se recupera.
 
         # Detectar razón de salida normal (señal/supertrend)
         if last_candle.get('is_new_sell_signal', False) and trade.is_short == False:
