@@ -290,23 +290,11 @@ class LorentzianSuperTrend(IStrategy):
     # ================= PARÁMETROS (Coinciden con JSON) =================
     
     # ML Settings
-    source_type = CategoricalParameter(['close', 'hlc3', 'ohlc4', 'hl2', 'open', 'high', 'low', 'macd_kst'], default='close', space='buy', optimize=False)
+    source_type = CategoricalParameter(['close', 'hlc3', 'ohlc4', 'hl2', 'open', 'high', 'low'], default='close', space='buy', optimize=False)
     neighbors_count = IntParameter(2, 20, default=8, space='buy', optimize=False)
     max_bars_back = IntParameter(500, 3000, default=2000, space='buy', optimize=False)
 
-    # MACD (KST Based) Settings
-    kst_roclen1 = IntParameter(10, 10, default=10, space='buy', optimize=False)
-    kst_roclen2 = IntParameter(15, 15, default=15, space='buy', optimize=False)
-    kst_roclen3 = IntParameter(20, 20, default=20, space='buy', optimize=False)
-    kst_roclen4 = IntParameter(30, 30, default=30, space='buy', optimize=False)
-    kst_smalen1 = IntParameter(10, 10, default=10, space='buy', optimize=False)
-    kst_smalen2 = IntParameter(10, 10, default=10, space='buy', optimize=False)
-    kst_smalen3 = IntParameter(10, 10, default=10, space='buy', optimize=False)
-    kst_smalen4 = IntParameter(15, 15, default=15, space='buy', optimize=False)
-    kst_fast_length = IntParameter(7, 7, default=7, space='buy', optimize=False)
-    kst_slow_length = IntParameter(14, 14, default=14, space='buy', optimize=False)
-    kst_signal_length = IntParameter(14, 14, default=14, space='buy', optimize=False)
-    
+
     # Features (Ajustado a Pine)
     f1_period = IntParameter(14, 14, default=14, space='buy', optimize=False)
     f1_smoothing = IntParameter(1, 1, default=1, space='buy', optimize=False) 
@@ -326,23 +314,23 @@ class LorentzianSuperTrend(IStrategy):
     # Kernel
     use_kernel_filter = BooleanParameter(default=True, space='buy', optimize=True)
     use_kernel_smoothing = BooleanParameter(default=False, space='buy', optimize=True)
-    kernel_h = IntParameter(4, 20, default=8, space='buy', optimize=True)
-    kernel_r = DecimalParameter(4.0, 12.0, default=8.0, decimals=1, space='buy', optimize=True)
-    kernel_x = IntParameter(10, 50, default=25, space='buy', optimize=True)
-    kernel_lag = IntParameter(0, 5, default=2, space='buy', optimize=True)
+    kernel_h = IntParameter(3, 20, default=8, space='buy', optimize=True)  # Doc: 3-50, using 3-20
+    kernel_r = DecimalParameter(2.0, 15.0, default=8.0, decimals=1, space='buy', optimize=True)  # Doc: 0.25-25
+    kernel_x = IntParameter(5, 30, default=25, space='buy', optimize=True)  # Doc: 2-25, using 5-30
+    kernel_lag = IntParameter(1, 3, default=2, space='buy', optimize=True)  # Doc: 1-2
 
     # Filters (Sistema 1: ML Signal Filters - aplicados a isNewBuySignal/isNewSellSignal)
     use_volatility_filter = BooleanParameter(default=True, space='buy', optimize=True)
     use_regime_filter = BooleanParameter(default=True, space='buy', optimize=True)
     use_adx_filter = BooleanParameter(default=False, space='buy', optimize=True)
     regime_threshold = DecimalParameter(-0.3, 0.3, default=-0.1, decimals=2, space='buy', optimize=True)
-    adx_threshold = IntParameter(10, 40, default=20, space='buy', optimize=True)
+    adx_threshold = IntParameter(15, 30, default=20, space='buy', optimize=True)  # Doc: 15-25
 
     # Sistema 1: EMA/SMA Filters para señales ML (Pine: useEmaFilter, useSmaFilter)
     use_ml_ema_filter = BooleanParameter(default=False, space='buy', optimize=True)  # Pine default: false
     use_ml_sma_filter = BooleanParameter(default=False, space='buy', optimize=True)  # Pine default: false
-    ml_ema_period = IntParameter(20, 400, default=200, space='buy', optimize=True)
-    ml_sma_period = IntParameter(20, 400, default=200, space='buy', optimize=True)
+    ml_ema_period = IntParameter(50, 200, default=200, space='buy', optimize=True)  # Doc: 20-100 for EMA
+    ml_sma_period = IntParameter(100, 300, default=200, space='buy', optimize=True)  # Doc: 50-200 for SMA
 
     # Sistema 2: EMA Filter para posiciones (Pine: ema_filter_long, ema_filter_short, bullish/bearish)
     use_ema_filter_long = BooleanParameter(default=True, space='buy', optimize=True)   # Pine default: true
@@ -469,9 +457,10 @@ class LorentzianSuperTrend(IStrategy):
             self._historic_cci_min = float(np.nanmin(cci_smooth))
             self._historic_cci_max = float(np.nanmax(cci_smooth))
             
-            logger.info(f"📊 Min/Max históricos calculados desde {self.HISTORIC_START_DATE} ({len(df)} filas):")
-            logger.info(f"   WaveTrend: [{self._historic_wt_min:.2f}, {self._historic_wt_max:.2f}]")
-            logger.info(f"   CCI: [{self._historic_cci_min:.2f}, {self._historic_cci_max:.2f}]")
+            if self.analysis_logging.value:
+                logger.info(f"📊 Min/Max históricos calculados desde {self.HISTORIC_START_DATE} ({len(df)} filas):")
+                logger.info(f"   WaveTrend: [{self._historic_wt_min:.2f}, {self._historic_wt_max:.2f}]")
+                logger.info(f"   CCI: [{self._historic_cci_min:.2f}, {self._historic_cci_max:.2f}]")
             
         except Exception as e:
             logger.error(f"Error calculando min/max históricos: {e}")
@@ -506,38 +495,7 @@ class LorentzianSuperTrend(IStrategy):
         # --- SELECCIÓN DE SOURCE ---
         st = self.source_type.value
         
-        # Helper para KST ROC
-        def roc(series, length):
-            return 100 * (series - series.shift(length)) / series.shift(length)
-            
-        if st == 'macd_kst':
-            # Implementación MACD (KST Based)
-            # Usamos 'close' como base para el KST (Pine default: source=close)
-            base_src = dataframe['close']
-            
-            roc1 = roc(base_src, self.kst_roclen1.value)
-            roc2 = roc(base_src, self.kst_roclen2.value)
-            roc3 = roc(base_src, self.kst_roclen3.value)
-            roc4 = roc(base_src, self.kst_roclen4.value)
-            
-            # Pine: mas(source, length, type) => type=="SMA"? ta.sma : ta.ema
-            # Pine default typeMA = "EMA"
-            rcma1 = ta.EMA(roc1, timeperiod=self.kst_smalen1.value)
-            rcma2 = ta.EMA(roc2, timeperiod=self.kst_smalen2.value)
-            rcma3 = ta.EMA(roc3, timeperiod=self.kst_smalen3.value)
-            rcma4 = ta.EMA(roc4, timeperiod=self.kst_smalen4.value)
-            
-            kst = rcma1 + 2 * rcma2 + 3 * rcma3 + 4 * rcma4
-            
-            # MACD of KST
-            # Pine: fast_ma = ta.ema(kst, fast_length) (assuming EMA default)
-            fast_ma = ta.EMA(kst, timeperiod=self.kst_fast_length.value)
-            slow_ma = ta.EMA(kst, timeperiod=self.kst_slow_length.value)
-            macd_kst = fast_ma - slow_ma
-            
-            dataframe['source'] = macd_kst
-            
-        elif st == 'close':
+        if st == 'close':
             dataframe['source'] = dataframe['close']
         elif st == 'hlc3':
             dataframe['source'] = (dataframe['high'] + dataframe['low'] + dataframe['close']) / 3
@@ -929,7 +887,7 @@ class LorentzianSuperTrend(IStrategy):
                         entry_date = trade.open_date_utc.strftime('%Y-%m-%d %H:%M:%S')
                         if self.analysis_logging.value:
                             trade_logger.info(f"BE_ACTIVATED,SHORT,{pair},{current_rate:.8f},{profit_pct:.2f},R:R={self.be_rr_short.value},Date={be_date},EntryDate={entry_date}")
-                        logger.info(f"⚖️ Breakeven SHORT activated: {pair} @ {current_rate:.8f} | R:R={self.be_rr_short.value} | Date: {be_date}")
+                            logger.info(f"⚖️ Breakeven SHORT activated: {pair} @ {current_rate:.8f} | R:R={self.be_rr_short.value} | Date: {be_date}")
             else:
                 be_dist = sl_dist * float(self.be_rr_long.value)
                 be_trigger = entry_price + be_dist
@@ -944,7 +902,7 @@ class LorentzianSuperTrend(IStrategy):
                         entry_date = trade.open_date_utc.strftime('%Y-%m-%d %H:%M:%S')
                         if self.analysis_logging.value:
                             trade_logger.info(f"BE_ACTIVATED,LONG,{pair},{current_rate:.8f},{profit_pct:.2f},R:R={self.be_rr_long.value},Date={be_date},EntryDate={entry_date}")
-                        logger.info(f"⚖️ Breakeven LONG activated: {pair} @ {current_rate:.8f} | R:R={self.be_rr_long.value} | Date: {be_date}")
+                            logger.info(f"⚖️ Breakeven LONG activated: {pair} @ {current_rate:.8f} | R:R={self.be_rr_long.value} | Date: {be_date}")
 
         # Usar stoploss_from_absolute para calcular correctamente el % relativo a current_rate
         # Esta función maneja correctamente tanto longs como shorts
@@ -1004,8 +962,8 @@ class LorentzianSuperTrend(IStrategy):
                         entry_date = trade.open_date_utc.strftime('%Y-%m-%d %H:%M:%S')
                         if self.analysis_logging.value:
                             trade_logger.info(f"TP_PARTIAL,LONG,{trade.pair},{current_rate:.8f},{profit_pct:.2f},{profit_abs:.8f},R:R={self.tp_rr_long.value},{self.tp_percent.value}%,Date={tp_date},EntryDate={entry_date}")
-                        logger.info(f"💰 Take Profit LONG ({self.tp_percent.value}%): {trade.pair} @ {current_rate:.8f} | "
-                                   f"Profit: {profit_pct:.2f}% | R:R={self.tp_rr_long.value} | Date: {tp_date}")
+                            logger.info(f"💰 Take Profit LONG ({self.tp_percent.value}%): {trade.pair} @ {current_rate:.8f} | "
+                                    f"Profit: {profit_pct:.2f}% | R:R={self.tp_rr_long.value} | Date: {tp_date}")
                     return -(trade.stake_amount * (self.tp_percent.value / 100))
 
         return None
@@ -1086,10 +1044,9 @@ class LorentzianSuperTrend(IStrategy):
                              f"BE={be_str},"
                              f"TP={tp_str},"
                              f"{entry_tag or 'manual'}")
-
-        logger.info(f"✅ {direction} Entry: {pair} @ {rate:.8f} | Amount: {amount:.8f} | Date: {entry_date}\n"
-                   f"   💠 SL: {sl_str} ({sl_pct_str}% / {sl_type_str})\n"
-                   f"   🎯 BE: {be_str} | TP: {tp_str} | Tag: {entry_tag}")
+            logger.info(f"✅ {direction} Entry: {pair} @ {rate:.8f} | Amount: {amount:.8f} | Date: {entry_date}\n"
+                       f"   💠 SL: {sl_str} ({sl_pct_str}% / {sl_type_str})\n"
+                       f"   🎯 BE: {be_str} | TP: {tp_str} | Tag: {entry_tag}")
 
         return True
 
@@ -1127,10 +1084,10 @@ class LorentzianSuperTrend(IStrategy):
             trade_logger.info(f"{exit_type},{direction},{exit_reason},{pair},{rate:.8f},{exit_date},"
                              f"{current_profit_pct:.2f},{current_profit_abs:.8f},{entry_date},{entry_price:.8f}")
 
-        profit_emoji = "🟢" if current_profit_abs > 0 else "🔴"
-        logger.info(f"{profit_emoji} {direction} {exit_type} ({exit_reason}): {pair} @ {rate:.8f} | "
-                   f"Profit: {current_profit_pct:.2f}% ({current_profit_abs:.8f}) | "
-                   f"Date: {exit_date} | EntryPrice: {entry_price:.8f}")
+            profit_emoji = "🟢" if current_profit_abs > 0 else "🔴"
+            logger.info(f"{profit_emoji} {direction} {exit_type} ({exit_reason}): {pair} @ {rate:.8f} | "
+                    f"Profit: {current_profit_pct:.2f}% ({current_profit_abs:.8f}) | "
+                    f"Date: {exit_date} | EntryPrice: {entry_price:.8f}")
 
         return True
 
@@ -1167,10 +1124,10 @@ class LorentzianSuperTrend(IStrategy):
             profit_abs = trade.calc_profit(current_rate)
 
             # Log formato CSV: Type,Direction,Reason,Pair,ExitPrice,Profit%,ProfitAbs,EntryDate,EntryPrice
-            trade_logger.info(f"EXIT,{direction},{exit_reason},{pair},{current_rate:.8f},{profit_pct:.2f},{profit_abs:.8f},EntryDate={entry_date},EntryPrice={entry_price:.8f}")
-
-            logger.info(f"🔴 {direction} Exit ({exit_reason}): {pair} @ {current_rate:.8f} | "
-                       f"Profit: {profit_pct:.2f}% ({profit_abs:.8f}) | Entry: {entry_date} @ {entry_price:.8f}")
+            if self.analysis_logging.value:
+                trade_logger.info(f"EXIT,{direction},{exit_reason},{pair},{current_rate:.8f},{profit_pct:.2f},{profit_abs:.8f},EntryDate={entry_date},EntryPrice={entry_price:.8f}")
+                logger.info(f"🔴 {direction} Exit ({exit_reason}): {pair} @ {current_rate:.8f} | "
+                           f"Profit: {profit_pct:.2f}% ({profit_abs:.8f}) | Entry: {entry_date} @ {entry_price:.8f}")
 
             return exit_reason
 

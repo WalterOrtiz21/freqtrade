@@ -2,15 +2,14 @@
   "strategy_name": "LorentzianSuperTrend",
   "params": {
     "max_open_trades": {
-      "max_open_trades": 1
+      "max_open_trades": 7
     },
     "buy": {
-      "_source_type": "['close', 'hlc3', 'ohlc4', 'hl2', 'open', 'high', 'low', 'macd_kst']",
+      "_source_type": "['close', 'hlc3', 'ohlc4', 'hl2', 'open', 'high', 'low']",
       "source_type": "close",
       "__comment_ml": "=== ML CORE SETTINGS ===",
       "neighbors_count": 8,
       "max_bars_back": 2000,
-      "__comment_features": "=== FEATURE SETTINGS (Hardcoded en Strategy) ===",
       "f1_period": 14,
       "f1_smoothing": 1,
       "f2_ch_len": 10,
@@ -53,7 +52,7 @@
       "__comment_exits": "=== EXIT SETTINGS ===",
       "use_dynamic_exits": true,
       "close_with_supertrend": true,
-      "close_only_tp": false,
+      "close_only_tp": true,
       "__note_exits": "close_only_tp=true desactiva salidas por señal opuesta/SuperTrend (solo TP/SL)"
     },
     "protection": {
@@ -61,20 +60,20 @@
       "__comment_stoploss": "=== STOP LOSS SOURCE ===",
       "stoploss_type": "atr",
       "__comment_atr_sl": "=== ATR Stop Settings ===",
-      "atr_stop_len": 14,
+      "atr_stop_len": 16,
       "atr_stop_mult": 1.5,
       "__comment_swing_sl": "=== Swing High/Low Settings ===",
-      "swing_bars": 10,
+      "swing_bars": 11,
       "__comment_risk_management": "=== RISK MANAGEMENT (R:R Ratios) ===",
       "__note_breakeven": "Mueve SL a breakeven cuando alcanza be_rr * sl_distance",
       "use_breakeven": true,
-      "be_rr_long": 1.0,
-      "be_rr_short": 1.0,
+      "be_rr_long": 2.5,
+      "be_rr_short": 2.4,
       "__note_takeprofit": "Take profit parcial (tp_percent%) a tp_rr * sl_distance",
-      "use_takeprofit": true,
-      "tp_rr_long": 3.0,
-      "tp_rr_short": 3.0,
-      "tp_percent": 50
+      "use_takeprofit": false,
+      "tp_rr_long": 4.1,
+      "tp_rr_short": 1.1,
+      "tp_percent": 82.0
     },
     "roi": {
       "0": 100
@@ -84,6 +83,7 @@
     }
   },
   "ft_stratparam_v": 1,
+  "export_time": "2025-12-10 22:44:58.851000+00:00",
   "_readme": {
     "description": "LorentzianSuperTrend - 100% Matching con Pine Strategy",
     "version": "2.0 - Full Implementation",
