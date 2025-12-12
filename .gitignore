@@ -117,3 +117,5 @@ target/
 !config_examples/config_freqai.example.json
 
 docker-compose-*.yml
+user_data/strategies/AI-Edge-Documentation.pdf
+user_data/strategies/AI-Edge-Documentation.txt

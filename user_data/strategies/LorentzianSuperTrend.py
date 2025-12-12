@@ -946,8 +946,9 @@ class LorentzianSuperTrend(IStrategy):
                         profit_abs = trade.calc_profit(current_rate) * (self.tp_percent.value / 100)
                         tp_date = current_time.strftime('%Y-%m-%d %H:%M:%S')
                         entry_date = trade.open_date_utc.strftime('%Y-%m-%d %H:%M:%S')
-                        trade_logger.info(f"TP_PARTIAL,SHORT,{trade.pair},{current_rate:.8f},{profit_pct:.2f},{profit_abs:.8f},R:R={self.tp_rr_short.value},{self.tp_percent.value}%,Date={tp_date},EntryDate={entry_date}")
-                        logger.info(f"💰 Take Profit SHORT ({self.tp_percent.value}%): {trade.pair} @ {current_rate:.8f} | "
+                        if self.analysis_logging.value:
+                            trade_logger.info(f"TP_PARTIAL,SHORT,{trade.pair},{current_rate:.8f},{profit_pct:.2f},{profit_abs:.8f},R:R={self.tp_rr_short.value},{self.tp_percent.value}%,Date={tp_date},EntryDate={entry_date}")
+                            logger.info(f"💰 Take Profit SHORT ({self.tp_percent.value}%): {trade.pair} @ {current_rate:.8f} | "
                                    f"Profit: {profit_pct:.2f}% | R:R={self.tp_rr_short.value} | Date: {tp_date}")
                     return -(trade.stake_amount * (self.tp_percent.value / 100))
             else:
