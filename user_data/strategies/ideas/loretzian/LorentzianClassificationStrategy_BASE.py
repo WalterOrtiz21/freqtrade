@@ -33,6 +33,14 @@ def numba_lorentzian_prediction(features_norm, labels, max_bars_back, neighbors_
     - Ventana fija (desde el inicio hasta i)
     - Selección heurística de vecinos (lastDistance)
     - Salto de 4 en 4 (Pine: i%4, que es true para 1, 2, 3, 5... y false para 0, 4...)
+    
+    [ANALYSIS NOTE]:
+    Pine Script Logic: Iterates 0 to maxBarsBack (Fixed Window from start of chart).
+    Python Logic: Iterates (i - maxBarsBack) to i (Sliding Window).
+    
+    Difference: Pine compares current bar to the *first* 2000 bars of history.
+                Python compares current bar to the *recent* 2000 bars.
+    Verdict: Python logic is preferred for live trading (adapts to recent conditions).
     """
     n_rows = len(features_norm)
     n_features = features_norm.shape[1]
@@ -52,7 +60,7 @@ def numba_lorentzian_prediction(features_norm, labels, max_bars_back, neighbors_
         
         start_index = i - max_bars_back
         if start_index < 0: start_index = 0
-        end_index = i 
+        end_index = i + 1  # CRITICAL FIX: Include current bar in neighbor search (Pine behavior)
         
         for j in range(start_index, end_index):
             # Pine Logic: if i % 4 (meaning i % 4 != 0)
@@ -94,11 +102,32 @@ def numba_lorentzian_prediction(features_norm, labels, max_bars_back, neighbors_
     return predictions
 
 @njit(fastmath=True)
+def numba_calculate_latched_signal(predictions, filter_all):
+    """Lógica de enclavamiento de señal (Pine: nz(signal[1]))"""
+    n = len(predictions)
+    signal = np.zeros(n, dtype=np.int32)
+    last_signal = 0 
+    for i in range(1, n):
+        pred = predictions[i]
+        is_filtered = filter_all[i]
+        if pred > 0 and is_filtered:
+            last_signal = 1
+        elif pred < 0 and is_filtered:
+            last_signal = -1
+        signal[i] = last_signal
+    return signal
+
+@njit(fastmath=True)
 def numba_rational_quadratic_kernel(src, h, r, x):
     """
     Kernel Racional Cuadrático - Versión corregida para matching.
     Pine: Loop i=0 to size. y = src[i]. w uses i.
     Python: i is current bar. j is lag. target = i - j.
+    
+    [ANALYSIS NOTE]:
+    Pine Loop: 0 to 26 (27 iterations) for default settings.
+    Python Loop: range(x + 2) = 0 to 26 (27 iterations).
+    Verdict: EXACT MATCH.
     """
     n = len(src)
     yhat = np.full(n, np.nan)
@@ -213,7 +242,7 @@ class LorentzianClassificationStrategy(IStrategy):
     minimal_roi = { "0": 100.0 } 
     stoploss = -0.99 
     
-    startup_candle_count: int = 5000 
+    startup_candle_count: int = 2200 
     
     can_short = True
     
@@ -224,10 +253,60 @@ class LorentzianClassificationStrategy(IStrategy):
         'stoploss_on_exchange': False,
     }
 
+    # Fecha desde la cual calcular min/max históricos para normalización
+    HISTORIC_START_DATE = "2020-01-01"
+    
+    # Cache para min/max calculados
+    _historic_calculated = False
+    _historic_wt_min = -53.0
+    _historic_wt_max = 47.0
+    _historic_cci_min = -550.0
+    _historic_cci_max = 550.0
+
+    def _calculate_historic_minmax(self, pair: str):
+        if self._historic_calculated:
+            return
+        try:
+            from pathlib import Path
+            pair_filename = pair.replace("/", "_").replace(":", "_")
+            data_path = Path("user_data/data/binance/futures") / f"{pair_filename}-{self.timeframe}-futures.feather"
+            if not data_path.exists():
+                logger.warning(f"Archivo de datos no encontrado: {data_path}")
+                self._historic_calculated = True
+                return
+            df = pd.read_feather(data_path)
+            df = df[df['date'] >= self.HISTORIC_START_DATE].copy()
+            if len(df) < 100:
+                self._historic_calculated = True
+                return
+            # WaveTrend
+            ap = (df['high'] + df['low'] + df['close']) / 3
+            esa = ta.EMA(ap, timeperiod=self.wt_channel_length.value)
+            d = ta.EMA(np.abs(ap - esa), timeperiod=self.wt_channel_length.value)
+            d = np.where(d == 0, 0.0001, d)
+            ci = (ap - esa) / (0.015 * d)
+            tci = ta.EMA(ci, timeperiod=self.wt_average_length.value)
+            wt_diff = tci - ta.SMA(tci, timeperiod=4)
+            self._historic_wt_min = float(np.nanmin(wt_diff))
+            self._historic_wt_max = float(np.nanmax(wt_diff))
+            # CCI
+            cci_raw = ta.CCI(df, timeperiod=self.cci_period.value)
+            cci_smooth = ta.EMA(cci_raw, timeperiod=self.cci_smoothing.value) if self.cci_smoothing.value > 1 else cci_raw
+            self._historic_cci_min = float(np.nanmin(cci_smooth))
+            self._historic_cci_max = float(np.nanmax(cci_smooth))
+            logger.info(f"📊 Min/Max históricos: WT[{self._historic_wt_min:.2f},{self._historic_wt_max:.2f}] CCI[{self._historic_cci_min:.2f},{self._historic_cci_max:.2f}]")
+        except Exception as e:
+            logger.error(f"Error calculando min/max históricos: {e}")
+        self._historic_calculated = True
+
     # ---------------- FUNCIONES DE NORMALIZACION -----------------
     
     def _normalize_expanding(self, series: Union[pd.Series, np.ndarray]) -> pd.Series:
-        """Replica normalize() de Pine para valores sin limites definidos."""
+        """
+        Replica normalize() de Pine para valores sin limites definidos.
+        [ANALYSIS NOTE]: Pine uses 'var' which persists from chart start. 
+        Python uses expanding() which starts from startup_candle_count.
+        """
         if isinstance(series, np.ndarray):
             series = pd.Series(series)
         hist_min = series.expanding().min()
@@ -243,6 +322,9 @@ class LorentzianClassificationStrategy(IStrategy):
         return (clamped - min_val) / (max_val - min_val)
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        # Calcular min/max históricos (solo se ejecuta una vez)
+        self._calculate_historic_minmax(metadata['pair'])
+        
         # === 1. Features Normalizados para ML (CORREGIDO) ===
         
         # RSI 1 (Fixed 0-100)
@@ -348,65 +430,35 @@ class LorentzianClassificationStrategy(IStrategy):
         if len(dataframe) < self.max_bars_back.value:
             return dataframe
 
-        f_vol = dataframe['volatility_ok'] if self.use_volatility_filter.value else True
-        f_reg = dataframe['regime_ok'] if self.use_regime_filter.value else True
-        f_adx = dataframe['adx_ok'] if self.use_adx_filter.value else True
+        # === PINE SCRIPT ALIGNED: Use latched signal ===
+        signal = dataframe['signal']
+        signal_changed = signal != signal.shift(1)
+        
         f_pull = dataframe['kernel_pullback_ok']
 
+        # Entry filters
         f_ema_long = dataframe['ema_uptrend'] if self.use_ema_filter.value else True
         f_sma_long = dataframe['sma_uptrend'] if self.use_sma_filter.value else True
         f_kernel_long = dataframe['kernel_bullish'] if self.use_kernel_filter.value else True
         
-        # === LOGICA MEJORADA DE ENTRADA ===
-        min_score = self.buy_min_score.value
-
-        # Debugging Counts
-        c_ml = (dataframe['ml_prediction'] > min_score)
-        c_vol = c_ml & f_vol
-        c_reg = c_vol & f_reg
-        c_adx = c_reg & f_adx
-        c_pull = c_adx & f_pull
-        c_ema = c_pull & f_ema_long & f_sma_long # Added SMA
-        c_kernel = c_ema & f_kernel_long
+        # Long Entry: Signal==1, Changed, Filters Pass
+        is_buy_signal = (signal == 1) & f_ema_long & f_sma_long & f_kernel_long & f_pull
+        is_new_buy_signal = is_buy_signal & signal_changed
         
-        logger.info(f"DEBUG: Total Bars: {len(dataframe)}")
-        logger.info(f"DEBUG: ML > {min_score}: {c_ml.sum()}")
-        logger.info(f"DEBUG: + Volatility: {c_vol.sum()}")
-        logger.info(f"DEBUG: + Regime: {c_reg.sum()}")
-        logger.info(f"DEBUG: + ADX: {c_adx.sum()}")
-        logger.info(f"DEBUG: + Pullback: {c_pull.sum()}")
-        logger.info(f"DEBUG: + EMA/SMA: {c_ema.sum()}")
-        logger.info(f"DEBUG: + Kernel: {c_kernel.sum()} (Final Long)")
-
-        long_cond = c_kernel
-        
+        # Short Entry
         f_ema_short = dataframe['ema_downtrend'] if self.use_ema_filter.value else True
         f_sma_short = dataframe['sma_downtrend'] if self.use_sma_filter.value else True
         f_kernel_short = dataframe['kernel_bearish'] if self.use_kernel_filter.value else True
         
-        # Debugging Counts Short
-        # Pine: prediction < 0 (any negative prediction)
-        c_ml_s = (dataframe['ml_prediction'] < 0)  # EXACT MATCHING (was: < -min_score)
-        c_vol_s = c_ml_s & f_vol
-        c_reg_s = c_vol_s & f_reg
-        c_adx_s = c_reg_s & f_adx
-        c_pull_s = c_adx_s & f_pull
-        c_ema_s = c_pull_s & f_ema_short & f_sma_short # Added SMA
-        c_kernel_s = c_ema_s & f_kernel_short
-
-        logger.info(f"DEBUG: ML < {-min_score}: {c_ml_s.sum()}")
-        logger.info(f"DEBUG: + Volatility: {c_vol_s.sum()}")
-        logger.info(f"DEBUG: + Regime: {c_reg_s.sum()}")
-        logger.info(f"DEBUG: + ADX: {c_adx_s.sum()}")
-        logger.info(f"DEBUG: + Pullback: {c_pull_s.sum()}")
-        logger.info(f"DEBUG: + EMA/SMA: {c_ema_s.sum()}")
-        logger.info(f"DEBUG: + Kernel: {c_kernel_s.sum()} (Final Short)")
-
-        short_cond = c_kernel_s
+        is_sell_signal = (signal == -1) & f_ema_short & f_sma_short & f_kernel_short & f_pull
+        is_new_sell_signal = is_sell_signal & signal_changed
         
-        dataframe.loc[long_cond, 'enter_long'] = 1
+        logger.info(f"DEBUG: Signal Long: {(signal == 1).sum()}, Signal Short: {(signal == -1).sum()}")
+        logger.info(f"DEBUG: New Buy: {is_new_buy_signal.sum()}, New Sell: {is_new_sell_signal.sum()}")
+        
+        dataframe.loc[is_new_buy_signal, 'enter_long'] = 1
         if self.can_short:
-            dataframe.loc[short_cond, 'enter_short'] = 1
+            dataframe.loc[is_new_sell_signal, 'enter_short'] = 1
 
         return dataframe
 
@@ -416,9 +468,10 @@ class LorentzianClassificationStrategy(IStrategy):
         
         mode = self.exit_mode.value
         
-        # --- 1. Signal Exit (ML Flip) ---
-        ml_flip_long = (dataframe['ml_prediction'] < 0) & (dataframe['ml_prediction'].shift(1) > 0)
-        ml_flip_short = (dataframe['ml_prediction'] > 0) & (dataframe['ml_prediction'].shift(1) < 0)
+        # --- 1. Signal Exit (Using Latched Signal Flip) ---
+        signal = dataframe['signal']
+        signal_flip_long = (signal == -1) & (signal.shift(1) == 1)   # Flipped to Short -> Exit Long
+        signal_flip_short = (signal == 1) & (signal.shift(1) == -1)  # Flipped to Long -> Exit Short
         
         # --- 2. Dynamic Exit (Kernel Color Change) ---
         kernel = dataframe['kernel_estimate']
@@ -438,8 +491,8 @@ class LorentzianClassificationStrategy(IStrategy):
         dyn_exit_short = is_bullish_change
         
         if mode in ['signal', 'all']:
-            dataframe.loc[ml_flip_long, 'exit_long'] = 1
-            dataframe.loc[ml_flip_short, 'exit_short'] = 1
+            dataframe.loc[signal_flip_long, 'exit_long'] = 1
+            dataframe.loc[signal_flip_short, 'exit_short'] = 1
             
         if mode in ['dynamic', 'all']:
             dataframe.loc[dyn_exit_long, 'exit_long'] = 1
@@ -467,13 +520,24 @@ class LorentzianClassificationStrategy(IStrategy):
                 return "fixed_bars_exit"
  
         if self.use_break_even.value:
-            max_profit = trade.calc_profit_ratio(trade.max_rate)
-            if max_profit >= self.break_even_profit_threshold.value:
-                if current_profit < self.break_even_offset.value:
-                    logger.info(f"{pair}: Break Even Exit triggered. Max profit: {max_profit:.2%}, Current: {current_profit:.2%}")
+            # CRITICAL FIX: Convert leveraged profit to REAL PRICE MOVEMENT
+            current_price_profit = current_profit / trade.leverage
+            max_price_profit = trade.calc_profit_ratio(trade.max_rate) / trade.leverage
+            
+            if max_price_profit >= self.break_even_profit_threshold.value:
+                if current_price_profit < self.break_even_offset.value:
+                    logger.info(f"{pair}: Break Even Exit triggered. Max price move: {max_price_profit:.2%}, Current: {current_price_profit:.2%}")
                     return "break_even_exit"
                     
         return None
+
+    def leverage(self, pair: str, current_time: datetime, current_rate: float,
+                 proposed_leverage: float, max_leverage: float, entry_tag: str | None, side: str,
+                 **kwargs) -> float:
+        """
+        Customize leverage for each new trade. This method is only called in futures mode.
+        """
+        return self.config.get('leverage', 1.0)    
 
     def confirm_trade_entry(self, pair: str, order_type: str, amount: float, rate: float,
                             time_in_force: str, current_time: datetime, entry_tag: Optional[str],
@@ -500,12 +564,22 @@ class LorentzianClassificationStrategy(IStrategy):
             int(self.neighbors_count.value)
         )
         dataframe['ml_prediction'] = preds
+        
+        # === LATCHED SIGNAL (Pine Script Fidelity) ===
+        filter_all = np.ones(len(dataframe), dtype=bool)
+        if self.use_volatility_filter.value:
+            filter_all &= dataframe['volatility_ok'].values
+        if self.use_regime_filter.value:
+            filter_all &= dataframe['regime_ok'].values
+        latched = numba_calculate_latched_signal(preds.astype(np.float64), filter_all)
+        dataframe['signal'] = latched
 
     def create_training_labels(self, df):
-        future = df['close'].shift(-4)
+        # CRITICAL FIX: Pine uses src[4] (PAST). Contrarian: If rose -> Short, if fell -> Long
+        past = df['close'].shift(4)  # 4 bars in the PAST
         conds = [
-            (future < df['close']), 
-            (future > df['close'])  
+            (past < df['close']),  # Subió -> Short = -1
+            (past > df['close'])   # Bajó -> Long = 1
         ]
         return np.select(conds, [-1.0, 1.0], default=0.0).astype(np.float64)
 
