@@ -1,0 +1,520 @@
+
+import numpy as np
+import pandas as pd
+from numba import jit, float64, int64, int8, boolean
+from typing import Tuple
+
+# =============================================================================
+# NUMBA KERNELS
+# =============================================================================
+
+@jit(nopython=True, cache=True)
+def _find_lowest_low(low: np.ndarray, start: int, end: int) -> int:
+    """Find index of lowest low in range [start, end)."""
+    min_val = 1e15 # Huge number
+    min_idx = -1
+    for i in range(start, end):
+        if low[i] < min_val:
+            min_val = low[i]
+            min_idx = i
+    return min_idx
+
+@jit(nopython=True, cache=True)
+def _find_highest_high(high: np.ndarray, start: int, end: int) -> int:
+    """Find index of highest high in range [start, end)."""
+    max_val = -1.0
+    max_idx = -1
+    for i in range(start, end):
+        if high[i] > max_val:
+            max_val = high[i]
+            max_idx = i
+    return max_idx
+
+@jit(nopython=True, cache=True)
+def _smc_signals_kernel(
+    high: np.ndarray,
+    low: np.ndarray,
+    close: np.ndarray,
+    n: int,
+    internal_length: int,
+    swing_length: int
+) -> Tuple[
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray, # Internal BOS/CHoCH Bull/Bear
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray, # Swing BOS/CHoCH Bull/Bear
+    np.ndarray, np.ndarray, # Internal/Swing Trend
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray, # OB Top/Bottom
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray, # FVG Top/Bottom
+    np.ndarray, np.ndarray # NEW: Swing High, Swing Low (Current Range)
+]:
+    # Output Arrays
+    int_bos_bull = np.zeros(n, dtype=int8)
+    int_bos_bear = np.zeros(n, dtype=int8)
+    int_choch_bull = np.zeros(n, dtype=int8)
+    int_choch_bear = np.zeros(n, dtype=int8)
+    
+    sw_bos_bull = np.zeros(n, dtype=int8)
+    sw_bos_bear = np.zeros(n, dtype=int8)
+    sw_choch_bull = np.zeros(n, dtype=int8)
+    sw_choch_bear = np.zeros(n, dtype=int8)
+    
+    int_trend = np.zeros(n, dtype=int8)
+    sw_trend = np.zeros(n, dtype=int8)
+
+    # OB Storage
+    ob_bull_top = np.full(n, np.nan)
+    ob_bull_btm = np.full(n, np.nan)
+    ob_bear_top = np.full(n, np.nan)
+    ob_bear_btm = np.full(n, np.nan)
+    
+    # FVG Storage
+    fvg_bull_top = np.full(n, np.nan)
+    fvg_bull_btm = np.full(n, np.nan)
+    fvg_bear_top = np.full(n, np.nan)
+    fvg_bear_btm = np.full(n, np.nan)
+
+    # NEW: Swing Levels Storage
+    out_sw_high = np.full(n, np.nan)
+    out_sw_low = np.full(n, np.nan)
+
+    # State Variables
+    # Internal Pivot
+    ip_high_level = np.nan
+    ip_high_idx = -1
+    ip_high_crossed = False
+    
+    ip_low_level = np.nan
+    ip_low_idx = -1
+    ip_low_crossed = False
+    
+    int_leg = 0
+    curr_int_trend = 0
+    
+    # Swing Pivot
+    sp_high_level = np.nan
+    sp_high_idx = -1
+    sp_high_crossed = False
+    
+    sp_low_level = np.nan
+    sp_low_idx = -1
+    sp_low_crossed = False
+    
+    sw_leg = 0
+    curr_sw_trend = 0
+
+    for i in range(2, n):
+        curr_high = high[i]
+        curr_low = low[i]
+        curr_close = close[i]
+        prev_close = close[i-1]
+        
+        # --- 1. LEG DETECTION & PIVOT UPDATES ---
+        
+        # Internal Leg
+        new_int_leg = 0
+        if i >= internal_length:
+            ref_l = low[i - internal_length]
+            win_l = 1e15
+            for k in range(i - internal_length + 1, i + 1):
+                if low[k] < win_l: win_l = low[k]
+            
+            if ref_l < win_l:
+                new_int_leg = 1
+            else:
+                ref_h = high[i - internal_length]
+                win_h = -1.0
+                for k in range(i - internal_length + 1, i + 1):
+                    if high[k] > win_h: win_h = high[k]
+                
+                if ref_h > win_h:
+                    new_int_leg = -1
+        
+        if new_int_leg != 0 and new_int_leg != int_leg:
+            int_leg = new_int_leg
+            pivot_idx = i - internal_length
+            if int_leg == 1:
+                ip_low_level = low[pivot_idx]
+                ip_low_idx = pivot_idx
+                ip_low_crossed = False
+            else:
+                ip_high_level = high[pivot_idx]
+                ip_high_idx = pivot_idx
+                ip_high_crossed = False
+
+        # Swing Leg
+        new_sw_leg = 0
+        if i >= swing_length:
+            ref_l = low[i - swing_length]
+            win_l = 1e15
+            for k in range(i - swing_length + 1, i + 1):
+                if low[k] < win_l: win_l = low[k]
+            
+            if ref_l < win_l:
+                new_sw_leg = 1
+            else:
+                ref_h = high[i - swing_length]
+                win_h = -1.0
+                for k in range(i - swing_length + 1, i + 1):
+                    if high[k] > win_h: win_h = high[k]
+                
+                if ref_h > win_h:
+                    new_sw_leg = -1
+        
+        if new_sw_leg != 0 and new_sw_leg != sw_leg:
+            sw_leg = new_sw_leg
+            pivot_idx = i - swing_length
+            if sw_leg == 1: # New Swing Low -> Previous Swing High is confirmed as Top of Range?
+                # Actually, in SMC, a Swing Low forms the bottom of the current range defined by the LAST Swing High.
+                sp_low_level = low[pivot_idx]
+                sp_low_idx = pivot_idx
+                sp_low_crossed = False
+            else: # New Swing High -> Top of Range
+                sp_high_level = high[pivot_idx]
+                sp_high_idx = pivot_idx
+                sp_high_crossed = False
+                
+        # Update Output Arrays for Swing Levels (Repeatedly write current known levels)
+        # This gives us the "Current Trading Range" at any point in time.
+        out_sw_high[i] = sp_high_level
+        out_sw_low[i] = sp_low_level
+
+        # --- 2. INTERNAL STRUCTURE ---
+        
+        # Bullish Break
+        if not ip_high_crossed and not np.isnan(ip_high_level):
+            if prev_close <= ip_high_level and curr_close > ip_high_level:
+                ip_high_crossed = True
+                if curr_int_trend == -1:
+                    int_choch_bull[i] = 1
+                    curr_int_trend = 1
+                else:
+                    int_bos_bull[i] = 1
+                    curr_int_trend = 1
+                
+                if ip_high_idx < i:
+                    ob_idx = _find_lowest_low(low, ip_high_idx, i)
+                    if ob_idx != -1:
+                        ob_bull_top[ob_idx] = high[ob_idx]
+                        ob_bull_btm[ob_idx] = low[ob_idx]
+
+        # Bearish Break
+        if not ip_low_crossed and not np.isnan(ip_low_level):
+            if prev_close >= ip_low_level and curr_close < ip_low_level:
+                ip_low_crossed = True
+                if curr_int_trend == 1:
+                    int_choch_bear[i] = 1
+                    curr_int_trend = -1
+                else:
+                    int_bos_bear[i] = 1
+                    curr_int_trend = -1
+                
+                if ip_low_idx < i:
+                    ob_idx = _find_highest_high(high, ip_low_idx, i)
+                    if ob_idx != -1:
+                        ob_bear_top[ob_idx] = high[ob_idx]
+                        ob_bear_btm[ob_idx] = low[ob_idx]
+        
+        int_trend[i] = curr_int_trend
+
+        # --- 3. SWING STRUCTURE ---
+        
+        if not sp_high_crossed and not np.isnan(sp_high_level):
+            if prev_close <= sp_high_level and curr_close > sp_high_level:
+                sp_high_crossed = True
+                if curr_sw_trend == -1:
+                    sw_choch_bull[i] = 1
+                    curr_sw_trend = 1
+                else:
+                    sw_bos_bull[i] = 1
+                    curr_sw_trend = 1
+                
+                if sp_high_idx < i:
+                    ob_idx = _find_lowest_low(low, sp_high_idx, i)
+                    if ob_idx != -1:
+                        ob_bull_top[ob_idx] = high[ob_idx]
+                        ob_bull_btm[ob_idx] = low[ob_idx]
+
+        if not sp_low_crossed and not np.isnan(sp_low_level):
+            if prev_close >= sp_low_level and curr_close < sp_low_level:
+                sp_low_crossed = True
+                if curr_sw_trend == 1:
+                    sw_choch_bear[i] = 1
+                    curr_sw_trend = -1
+                else:
+                    sw_bos_bear[i] = 1
+                    curr_sw_trend = -1
+                
+                if sp_low_idx < i:
+                    ob_idx = _find_highest_high(high, sp_low_idx, i)
+                    if ob_idx != -1:
+                        ob_bear_top[ob_idx] = high[ob_idx]
+                        ob_bear_btm[ob_idx] = low[ob_idx]
+        
+        sw_trend[i] = curr_sw_trend
+        
+        # --- 4. FVG DETECTION ---
+        if low[i] > high[i-2]:
+            fvg_bull_top[i] = low[i]
+            fvg_bull_btm[i] = high[i-2]
+        
+        if high[i] < low[i-2]:
+            fvg_bear_top[i] = low[i-2]
+            fvg_bear_btm[i] = high[i]
+
+    return (
+        int_bos_bull, int_bos_bear, int_choch_bull, int_choch_bear,
+        sw_bos_bull, sw_bos_bear, sw_choch_bull, sw_choch_bear,
+        int_trend, sw_trend,
+        ob_bull_top, ob_bull_btm, ob_bear_top, ob_bear_btm,
+        fvg_bull_top, fvg_bull_btm, fvg_bear_top, fvg_bear_btm,
+        out_sw_high, out_sw_low
+    )
+
+@jit(nopython=True, cache=True)
+def _smc_zones_kernel(
+    high: np.ndarray,
+    low: np.ndarray,
+    close: np.ndarray,
+    ob_bull_top: np.ndarray, ob_bull_btm: np.ndarray,
+    ob_bear_top: np.ndarray, ob_bear_btm: np.ndarray,
+    fvg_bull_top: np.ndarray, fvg_bull_btm: np.ndarray,
+    fvg_bear_top: np.ndarray, fvg_bear_btm: np.ndarray,
+    n: int
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    
+    # Active Zone Output (Most relevant one at each index)
+    # We reconstruct the "Zone Memory" feature here.
+    # Logic: At index i, what is the nearest unmitigated OB?
+    
+    act_bull_ob_top = np.zeros(n)
+    act_bull_ob_btm = np.zeros(n)
+    act_bear_ob_top = np.zeros(n)
+    act_bear_ob_btm = np.zeros(n)
+    
+    act_bull_fvg_top = np.zeros(n)
+    act_bull_fvg_btm = np.zeros(n)
+    act_bear_fvg_top = np.zeros(n)
+    act_bear_fvg_btm = np.zeros(n)
+    
+    # Lists to track active zones (Fixed size arrays or dynamic?)
+    # Numba lists are supported but can be slow if large.
+    # Since we need to iterate "active" ones, a simple list is easiest.
+    # We store index of creation.
+    
+    # Using arrays as stacks (max 100 active zones?) 
+    # Let's trust list performance for now or use boolean mask... 
+    # Actually, we can just iterate backwards? No, forward.
+    
+    # Stack structure: [index, top, bottom]
+    # We split into separate lists for types
+    
+    
+    # Lists of indices for ACTIVE zones
+    # Fix untyped list error: Initialize as typed lists
+    # We use a trick: [int64(x) for x in range(0)] creates an empty list but typed as int64
+    bull_ob_idxs = [np.int64(x) for x in range(0)]
+    bear_ob_idxs = [np.int64(x) for x in range(0)]
+    bull_fvg_idxs = [np.int64(x) for x in range(0)]
+    bear_fvg_idxs = [np.int64(x) for x in range(0)]
+    
+    for i in range(n):
+        c_high = high[i]
+        c_low = low[i]
+        
+        # 1. Check Mitigation (Remove from list if mitigated)
+        # We do this BEFORE adding new ones, so new ones don't self-mitigate immediately
+        
+        # Bullish OBs (Mitigated if Low < Bottom)
+        # Use a temp list for surviving zones
+        next_bull_obs = [np.int64(x) for x in range(0)]
+        best_bull_ob_idx = -1
+        
+        for idx in bull_ob_idxs:
+            top = ob_bull_top[idx]
+            btm = ob_bull_btm[idx]
+            
+            # Check mitigation (Standard: Price breaks below bottom)
+            # Or simpler: Wick checks?
+            if c_low < btm:
+                pass # Mitigated/Broken, drop it
+            else:
+                next_bull_obs.append(idx)
+                # Track "best" (nearest/most recent) for feature output
+                best_bull_ob_idx = idx
+        
+        bull_ob_idxs = next_bull_obs
+        
+        # Bearish OBs (Mitigated if High > Top)
+        next_bear_obs = [np.int64(x) for x in range(0)]
+        best_bear_ob_idx = -1
+        for idx in bear_ob_idxs:
+            top = ob_bear_top[idx]
+            btm = ob_bear_btm[idx]
+            if c_high > top:
+                pass 
+            else:
+                next_bear_obs.append(idx)
+                best_bear_ob_idx = idx
+        bear_ob_idxs = next_bear_obs
+        
+        # FVGs (Mitigated if price fills gap)
+        # Bullish Gap (Low > Top). Mitigated if Low <= Top.
+        # Wait, FVG definition: Top=Low[i], Bottom=High[i-2].
+        # Gap is between Bottom and Top. 
+        # Mitigated if Price dips INTO it? Or FILLS it? 
+        # LuxAlgo strategy "mitigates" when price touches.
+        # Bull FVG: Top is the upper boundary (created by current low). 
+        # Wait, standard FVG: The gap is between Candle 3 Low and Candle 1 High.
+        # My kernel saved: Top=Low[i], Btm=High[i-2].
+        # So "Top" is the higher price. "Btm" is lower.
+        # Mitigation: Price comes DOWN to touch Top.
+        
+        next_bull_fvgs = [np.int64(x) for x in range(0)]
+        best_bull_fvg_idx = -1
+        for idx in bull_fvg_idxs:
+            top = fvg_bull_top[idx]
+            btm = fvg_bull_btm[idx]
+            if c_low <= top:
+                # Touched/Filled. 
+                pass
+            else:
+                next_bull_fvgs.append(idx)
+                best_bull_fvg_idx = idx
+        bull_fvg_idxs = next_bull_fvgs
+        
+        # Bearish FVG: Top=Low[i-2], Btm=High[i].
+        # Top > Btm. Gap is between them.
+        # Mitigation: Price comes UP to touch Btm.
+        next_bear_fvgs = [np.int64(x) for x in range(0)]
+        best_bear_fvg_idx = -1
+        for idx in bear_fvg_idxs:
+            top = fvg_bear_top[idx]
+            btm = fvg_bear_btm[idx]
+            if c_high >= btm:
+                pass
+            else:
+                next_bear_fvgs.append(idx)
+                best_bear_fvg_idx = idx
+        bear_fvg_idxs = next_bear_fvgs
+        
+        # 2. Add new zones created at this index
+        # And implicitly they are the "best" (most recent) if created now
+        if not np.isnan(ob_bull_top[i]): 
+            bull_ob_idxs.append(i)
+            best_bull_ob_idx = i
+            
+        if not np.isnan(ob_bear_top[i]): 
+            bear_ob_idxs.append(i)
+            best_bear_ob_idx = i
+            
+        if not np.isnan(fvg_bull_top[i]): 
+            bull_fvg_idxs.append(i)
+            best_bull_fvg_idx = i
+            
+        if not np.isnan(fvg_bear_top[i]): 
+            bear_fvg_idxs.append(i)
+            best_bear_fvg_idx = i
+        
+        # 3. Write "Active" features for this bar
+        if best_bull_ob_idx != -1:
+            act_bull_ob_top[i] = ob_bull_top[best_bull_ob_idx]
+            act_bull_ob_btm[i] = ob_bull_btm[best_bull_ob_idx]
+            
+        if best_bear_ob_idx != -1:
+            act_bear_ob_top[i] = ob_bear_top[best_bear_ob_idx]
+            act_bear_ob_btm[i] = ob_bear_btm[best_bear_ob_idx]
+
+        if best_bull_fvg_idx != -1:
+            act_bull_fvg_top[i] = fvg_bull_top[best_bull_fvg_idx]
+            act_bull_fvg_btm[i] = fvg_bull_btm[best_bull_fvg_idx]
+            
+        if best_bear_fvg_idx != -1:
+            act_bear_fvg_top[i] = fvg_bear_top[best_bear_fvg_idx]
+            act_bear_fvg_btm[i] = fvg_bear_btm[best_bear_fvg_idx]
+
+    return (
+        act_bull_ob_top, act_bull_ob_btm,
+        act_bear_ob_top, act_bear_ob_btm,
+        act_bull_fvg_top, act_bull_fvg_btm,
+        act_bear_fvg_top, act_bear_fvg_btm
+    )
+
+# =============================================================================
+# WRAPPER CLASS
+# =============================================================================
+
+class SMCLuxAlgoNumba:
+    """Numba-optimized SMC replacement."""
+    
+    def __init__(self, df: pd.DataFrame, internal_length: int = 5, swing_length: int = 50):
+        self.df = df
+        self.internal_length = internal_length
+        self.swing_length = swing_length
+        
+        # Prepare arrays
+        self.high = df['high'].values.astype(float)
+        self.low = df['low'].values.astype(float)
+        self.close = df['close'].values.astype(float)
+        self.n = len(df)
+        
+    def get_signals(self) -> pd.DataFrame:
+        # 1. Run Core Kernel
+        (
+            ib_bull, ib_bear, ic_bull, ic_bear,
+            sb_bull, sb_bear, sc_bull, sc_bear,
+            i_trend, s_trend,
+            ob_bt_raw, ob_bb_raw, ob_bet_raw, ob_beb_raw,
+            fvg_bt_raw, fvg_bb_raw, fvg_bet_raw, fvg_beb_raw,
+            sw_high, sw_low # NEW Output
+        ) = _smc_signals_kernel(
+            self.high, self.low, self.close, self.n,
+            self.internal_length, self.swing_length
+        )
+        
+        # 2. Run Zone Kernel (Active Memory)
+        (
+            act_ob_bt, act_ob_bb, act_ob_bet, act_ob_beb,
+            act_fvg_bt, act_fvg_bb, act_fvg_bet, act_fvg_beb
+        ) = _smc_zones_kernel(
+            self.high, self.low, self.close,
+            ob_bt_raw, ob_bb_raw, ob_bet_raw, ob_beb_raw,
+            fvg_bt_raw, fvg_bb_raw, fvg_bet_raw, fvg_beb_raw,
+            self.n
+        )
+        
+        # 3. Construct DataFrame
+        df = pd.DataFrame(index=self.df.index)
+        
+        # Signals
+        df['internal_bos_bullish'] = ib_bull
+        df['internal_bos_bearish'] = ib_bear
+        df['internal_choch_bullish'] = ic_bull
+        df['internal_choch_bearish'] = ic_bear
+        
+        df['swing_bos_bullish'] = sb_bull
+        df['swing_bos_bearish'] = sb_bear
+        df['swing_choch_bullish'] = sc_bull
+        df['swing_choch_bearish'] = sc_bear
+        
+        df['internal_trend'] = i_trend
+        df['swing_trend'] = s_trend
+        
+        # New P/D Logic Levels
+        df['swing_high'] = sw_high
+        df['swing_low'] = sw_low
+        # Calculate Equilibrium (0.5 level)
+        # Note: sw_high/low might be NaN at the start.
+        df['equilibrium'] = (df['swing_high'] + df['swing_low']) / 2.0
+        
+        # Active Zones (For ML & Plotting)
+        df['active_bullish_ob_top'] = act_ob_bt
+        df['active_bullish_ob_bottom'] = act_ob_bb
+        df['active_bearish_ob_top'] = act_ob_bet
+        df['active_bearish_ob_bottom'] = act_ob_beb
+        
+        df['active_bullish_fvg_top'] = act_fvg_bt
+        df['active_bullish_fvg_bottom'] = act_fvg_bb
+        df['active_bearish_fvg_top'] = act_fvg_bet
+        df['active_bearish_fvg_bottom'] = act_fvg_beb
+        
+        return df
+

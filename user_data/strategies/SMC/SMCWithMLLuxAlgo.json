@@ -1,0 +1,53 @@
+{
+    "strategy_name": "SMCWithMLLuxAlgo",
+    "params": {
+        "roi": {
+            "0": 99
+        },
+        "stoploss": {
+            "stoploss": -0.03
+        },
+        "max_open_trades": {
+            "max_open_trades": 3
+        },
+        "buy": {
+            "enable_auto_training": true,
+            "internal_length": 5,
+            "swing_length": 50,
+            "use_internal_signals": true,
+            "use_swing_signals": true,
+            "require_choch": true,
+            "require_ob_zone": false,
+            "require_fvg_zone": true,
+            "trade_with_trend": true,
+            "require_premium_discount": true,
+            "signal_lookback": 3,
+            "use_ml_filter": true,
+            "ml_threshold": 0.25
+        },
+        "sell": {
+            "tp1_enabled": false,
+            "tp1_pct": 0.03,
+            "tp1_amount": 50.0,
+            "move_be_at_tp1": false,
+            "tp2_pct": 0.60,
+            "exit_on_opposite_choch": true
+        },
+        "protection": {},
+        "trailing": {
+            "trailing_stop": false,
+            "trailing_stop_positive": 0.005,
+            "trailing_stop_positive_offset": 0.01,
+            "trailing_only_offset_is_reached": true
+        }
+    },
+    "ft_stratparam_v": 1,
+    "export_time": "2025-12-14 16:40:00.000000+00:00",
+    "notes": {
+        "stoploss": "Default -5% price movement (leverage applied separately)",
+        "require_choch": "True = Only Reversals (Pine Script default behavior)",
+        "signal_lookback": "1 = Immediate signals (Pine Script behavior)",
+        "tp1_pct": "1% price movement triggers TP1 and BE",
+        "tp1_amount": "50% position closed at TP1"
+    }
+}
