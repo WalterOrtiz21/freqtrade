@@ -286,6 +286,10 @@ class LorentzianSuperTrend(IStrategy):
     _breakeven_logged = set()
     _tp_logged = set()
     _sl_logged = set()
+    
+    # Cache para stoploss calculado (evita recalculos innecesarios)
+    # Formato: {trade_id: (fixed_stop_price, is_breakeven_active)}
+    _sl_cache = {}
 
     # ================= PARÁMETROS (Coinciden con JSON) =================
     
@@ -850,13 +854,25 @@ class LorentzianSuperTrend(IStrategy):
 
     def custom_stoploss(self, pair: str, trade: 'Trade', current_time: datetime,
                         current_rate: float, current_profit: float, **kwargs) -> float:
+        """
+        Custom stoploss con cache para evitar recalculos innecesarios.
         
+        El SL solo se recalcula cuando:
+        1. Es la primera vez que se calcula para este trade
+        2. Se activa el breakeven (R:R alcanzado)
+        
+        Esto evita que Freqtrade cancele/recoloque órdenes en cada tick.
+        """
+        
+        # Obtener datos de la vela de entrada
         entry_data = self._get_entry_candle(pair, trade.open_date_utc)
-        if entry_data is None: return self.stoploss 
+        if entry_data is None: 
+            return self.stoploss 
         
         entry_price = trade.open_rate
-        sl_dist = 0.0
         
+        # Calcular distancia del SL (solo necesitamos esto para el cálculo inicial y breakeven)
+        sl_dist = 0.0
         if self.stoploss_type.value == 'atr':
             sl_dist = entry_data['atr_sl'] * float(self.atr_stop_mult.value)
         else:
@@ -865,48 +881,81 @@ class LorentzianSuperTrend(IStrategy):
             else:
                 sl_dist = abs(entry_price - entry_data['swing_low'])
 
-        if sl_dist <= 0: return self.stoploss
-
+        if sl_dist <= 0: 
+            return self.stoploss
+        
+        # Verificar si ya tenemos cache para este trade
+        if trade.id in self._sl_cache:
+            cached_stop_price, is_breakeven_active = self._sl_cache[trade.id]
+            
+            # Si el breakeven ya está activo, usar el precio cacheado (entry_price)
+            if is_breakeven_active:
+                return stoploss_from_absolute(cached_stop_price, current_rate, 
+                                              is_short=trade.is_short, leverage=trade.leverage)
+            
+            # Si el breakeven NO está activo, verificar si ahora califica para activarlo
+            if self.use_breakeven.value:
+                if trade.is_short:
+                    be_dist = sl_dist * float(self.be_rr_short.value)
+                    be_trigger = entry_price - be_dist
+                    if trade.min_rate <= be_trigger:
+                        # ¡Activar breakeven! Actualizar cache con entry_price
+                        self._sl_cache[trade.id] = (entry_price, True)
+                        
+                        # Log breakeven activation (una sola vez)
+                        if trade.id not in self._breakeven_logged:
+                            self._breakeven_logged.add(trade.id)
+                            profit_pct = ((entry_price - current_rate) / entry_price) * 100
+                            be_date = current_time.strftime('%Y-%m-%d %H:%M:%S')
+                            entry_date = trade.open_date_utc.strftime('%Y-%m-%d %H:%M:%S')
+                            if self.analysis_logging.value:
+                                trade_logger.info(f"BE_ACTIVATED,SHORT,{pair},{current_rate:.8f},{profit_pct:.2f},R:R={self.be_rr_short.value},Date={be_date},EntryDate={entry_date}")
+                                logger.info(f"⚖️ Breakeven SHORT activated: {pair} @ {current_rate:.8f} | R:R={self.be_rr_short.value} | Date: {be_date}")
+                        
+                        return stoploss_from_absolute(entry_price, current_rate, 
+                                                      is_short=trade.is_short, leverage=trade.leverage)
+                else:
+                    be_dist = sl_dist * float(self.be_rr_long.value)
+                    be_trigger = entry_price + be_dist
+                    if trade.max_rate >= be_trigger:
+                        # ¡Activar breakeven! Actualizar cache con entry_price
+                        self._sl_cache[trade.id] = (entry_price, True)
+                        
+                        # Log breakeven activation (una sola vez)
+                        if trade.id not in self._breakeven_logged:
+                            self._breakeven_logged.add(trade.id)
+                            profit_pct = ((current_rate - entry_price) / entry_price) * 100
+                            be_date = current_time.strftime('%Y-%m-%d %H:%M:%S')
+                            entry_date = trade.open_date_utc.strftime('%Y-%m-%d %H:%M:%S')
+                            if self.analysis_logging.value:
+                                trade_logger.info(f"BE_ACTIVATED,LONG,{pair},{current_rate:.8f},{profit_pct:.2f},R:R={self.be_rr_long.value},Date={be_date},EntryDate={entry_date}")
+                                logger.info(f"⚖️ Breakeven LONG activated: {pair} @ {current_rate:.8f} | R:R={self.be_rr_long.value} | Date: {be_date}")
+                        
+                        return stoploss_from_absolute(entry_price, current_rate, 
+                                                      is_short=trade.is_short, leverage=trade.leverage)
+            
+            # Breakeven no activado, usar el precio de SL cacheado
+            return stoploss_from_absolute(cached_stop_price, current_rate, 
+                                          is_short=trade.is_short, leverage=trade.leverage)
+        
+        # PRIMERA VEZ: Calcular el SL inicial y cachearlo
         if trade.is_short:
             fixed_stop_price = entry_price + sl_dist
         else:
             fixed_stop_price = entry_price - sl_dist
-            
-        if self.use_breakeven.value:
-            if trade.is_short:
-                be_dist = sl_dist * float(self.be_rr_short.value)
-                be_trigger = entry_price - be_dist
-                if trade.min_rate <= be_trigger:
-                    # Pine: sl_short:=strategy.position_avg_price (exactamente el entry, sin buffer)
-                    fixed_stop_price = entry_price
-                    # Log breakeven activation (una sola vez)
-                    if trade.id not in self._breakeven_logged:
-                        self._breakeven_logged.add(trade.id)
-                        profit_pct = ((entry_price - current_rate) / entry_price) * 100
-                        be_date = current_time.strftime('%Y-%m-%d %H:%M:%S')
-                        entry_date = trade.open_date_utc.strftime('%Y-%m-%d %H:%M:%S')
-                        if self.analysis_logging.value:
-                            trade_logger.info(f"BE_ACTIVATED,SHORT,{pair},{current_rate:.8f},{profit_pct:.2f},R:R={self.be_rr_short.value},Date={be_date},EntryDate={entry_date}")
-                            logger.info(f"⚖️ Breakeven SHORT activated: {pair} @ {current_rate:.8f} | R:R={self.be_rr_short.value} | Date: {be_date}")
-            else:
-                be_dist = sl_dist * float(self.be_rr_long.value)
-                be_trigger = entry_price + be_dist
-                if trade.max_rate >= be_trigger:
-                    # Pine: sl_long:=strategy.position_avg_price (exactamente el entry, sin buffer)
-                    fixed_stop_price = entry_price
-                    # Log breakeven activation (una sola vez)
-                    if trade.id not in self._breakeven_logged:
-                        self._breakeven_logged.add(trade.id)
-                        profit_pct = ((current_rate - entry_price) / entry_price) * 100
-                        be_date = current_time.strftime('%Y-%m-%d %H:%M:%S')
-                        entry_date = trade.open_date_utc.strftime('%Y-%m-%d %H:%M:%S')
-                        if self.analysis_logging.value:
-                            trade_logger.info(f"BE_ACTIVATED,LONG,{pair},{current_rate:.8f},{profit_pct:.2f},R:R={self.be_rr_long.value},Date={be_date},EntryDate={entry_date}")
-                            logger.info(f"⚖️ Breakeven LONG activated: {pair} @ {current_rate:.8f} | R:R={self.be_rr_long.value} | Date: {be_date}")
-
-        # Usar stoploss_from_absolute para calcular correctamente el % relativo a current_rate
-        # Esta función maneja correctamente tanto longs como shorts
-        return stoploss_from_absolute(fixed_stop_price, current_rate, is_short=trade.is_short, leverage=trade.leverage)
+        
+        # Cachear el SL inicial (sin breakeven activo)
+        self._sl_cache[trade.id] = (fixed_stop_price, False)
+        
+        if self.analysis_logging.value:
+            sl_pct = (sl_dist / entry_price) * 100
+            logger.info(f"📍 SL Cached for {pair} (Trade #{trade.id}): "
+                       f"{'SHORT' if trade.is_short else 'LONG'} | "
+                       f"Entry: {entry_price:.8f} | SL: {fixed_stop_price:.8f} ({sl_pct:.2f}%)")
+        
+        # Retornar SL inicial
+        return stoploss_from_absolute(fixed_stop_price, current_rate, 
+                                      is_short=trade.is_short, leverage=trade.leverage)
 
     def leverage(self, pair: str, current_time: datetime, current_rate: float,
                  proposed_leverage: float, max_leverage: float, entry_tag: str | None, side: str,
