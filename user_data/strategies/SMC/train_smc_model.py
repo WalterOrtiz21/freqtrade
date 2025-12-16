@@ -43,39 +43,70 @@ except ImportError as e:
 # CONFIGURATION
 # =============================================================================
 
-CONFIG = {
-    # Paths
-    'data_dir': 'user_data/data/binance/futures',
-    'model_output_dir': 'user_data/strategies/SMC/models',
+def load_config():
+    """Load config dynamically from JSON files."""
     
-    # Training parameters
-    # Adjust pairs/timeframe to match your data
-    'pairs': [
-        'BTC/USDT:USDT', 
-        'ETH/USDT:USDT', 
-        'SOL/USDT:USDT', 
-        'BNB/USDT:USDT',
-        'DOGE/USDT:USDT', 
-        'SUI/USDT:USDT', 
-        'STX/USDT:USDT'
-    ], 
-    'timeframe': '15m',
-    'training_start': '2020-01-01',
-    'training_end': '2025-01-01',
+    # Base config (static values)
+    config = {
+        # Paths
+        'data_dir': 'user_data/data/binance/futures',
+        'model_output_dir': 'user_data/strategies/SMC/models',
+        
+        # Training pairs (static - adjust manually)
+        'pairs': [
+            'BTC/USDT:USDT', 
+            'ETH/USDT:USDT', 
+            'SOL/USDT:USDT', 
+            'BNB/USDT:USDT',
+            'DOGE/USDT:USDT', 
+            'SUI/USDT:USDT', 
+            'STX/USDT:USDT'
+        ], 
+        
+        # Training date range
+        'training_start': '2020-01-01',
+        'training_end': '2025-01-01',
+        
+        # Target definition
+        'profit_threshold': 0.015,  # 1.5% target for labeling
+        'stop_loss_threshold': 0.01, # 1.0% stop for labeling logic
+        
+        # ML parameters
+        'n_splits': 5,
+        'hyperopt': True,
+        'hyperopt_iter': 100,
+    }
     
-    # Target definition
-    'profit_threshold': 0.015,  # 1.5% target for labeling
-    'stop_loss_threshold': 0.01, # 1.0% stop for labeling logic
+    # Load timeframe from config.json
+    try:
+        with open('config.json', 'r') as f:
+            main_config = json.load(f)
+            config['timeframe'] = main_config.get('timeframe', '15m')
+            logger.info(f"📖 Loaded timeframe from config.json: {config['timeframe']}")
+    except Exception as e:
+        logger.warning(f"Could not load config.json, using default timeframe: {e}")
+        config['timeframe'] = '15m'
     
-    # SMC parameters (MUST MATCH STRATEGY)
-    'internal_length': 5,
-    'swing_length': 50,
+    # Load SMC parameters from strategy JSON
+    try:
+        strat_json_path = 'user_data/strategies/SMC/SMCWithMLLuxAlgo.json'
+        with open(strat_json_path, 'r') as f:
+            strat_config = json.load(f)
+            buy_params = strat_config.get('params', {}).get('buy', {})
+            
+            config['internal_length'] = buy_params.get('internal_length', 5)
+            config['swing_length'] = buy_params.get('swing_length', 50)
+            
+            logger.info(f"📖 Loaded SMC params from JSON: internal={config['internal_length']}, swing={config['swing_length']}")
+    except Exception as e:
+        logger.warning(f"Could not load strategy JSON, using defaults: {e}")
+        config['internal_length'] = 5
+        config['swing_length'] = 50
     
-    # ML parameters
-    'n_splits': 5,
-    'hyperopt': True, # Enable RandomizedSearchCV
-    'hyperopt_iter': 50, # Increased to 50 for better search over 5 years of data
-}
+    return config
+
+# Load config at module level
+CONFIG = load_config()
 
 # =============================================================================
 # FEATURE ENGINEERING
@@ -414,7 +445,7 @@ def train_model():
         except ValueError:
             logger.info("Test AUC: N/A (Only one class present in test set)")
             
-        logger.info("\n" + classification_report(y_test, preds))
+        logger.info("\n" + classification_report(y_test, preds, zero_division=0))
         
         # 6. Save
         os.makedirs(CONFIG['model_output_dir'], exist_ok=True)

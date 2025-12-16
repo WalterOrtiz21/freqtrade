@@ -40,8 +40,15 @@ from freqtrade.persistence import Trade
 import talib.abstract as ta
 
 # Import LuxAlgo-style SMC library
-# from smc_luxalgo import SMCLuxAlgo, calculate_smc_luxalgo
-from smc_luxalgo_numba import SMCLuxAlgoNumba as SMCLuxAlgo
+# Module copied to user_data/strategies/ for Hyperopt compatibility
+try:
+    from smc_luxalgo_numba import SMCLuxAlgoNumba as SMCLuxAlgo
+except ImportError:
+    # Fallback: try local import
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parent))
+    from smc_luxalgo_numba import SMCLuxAlgoNumba as SMCLuxAlgo
 
 # Import Training Logic
 try:
@@ -132,10 +139,10 @@ class SMCWithMLLuxAlgo(IStrategy):
     # Note: ML logic is currently disabled in entry generation to ensure 
     # strict fidelity to Pine Script logic.
     
-    use_ml_filter = BooleanParameter(default=True, space='buy', optimize=True)
+    use_ml_filter = BooleanParameter(default=True, space='buy', optimize=False)
     ml_threshold = DecimalParameter(0.05, 0.50, default=0.15, decimals=2, space='buy', optimize=True)
     ml_model_path = "user_data/strategies/SMC/models"
-    enable_auto_training = BooleanParameter(default=True, space='buy', optimize=False)
+    enable_auto_training = BooleanParameter(default=False, space='buy', optimize=False)
     _ml_model = None
 
     # ==========================================================================
@@ -510,27 +517,36 @@ class SMCWithMLLuxAlgo(IStrategy):
             (dataframe['high'] >= dataframe['active_bearish_fvg_bottom'])
         )
         
-        # Zone requirements
-        bullish_zone = pd.Series(True, index=dataframe.index)
-        bearish_zone = pd.Series(True, index=dataframe.index)
+        # Zone requirements - OR logic (any enabled filter can pass)
+        # If NO zone filter is enabled, all bars pass (default True)
+        any_zone_enabled = self.require_ob_zone.value or self.require_fvg_zone.value or self.require_premium_discount.value
         
-        if self.require_ob_zone.value:
-            bullish_zone &= in_bullish_ob
-            bearish_zone &= in_bearish_ob
-        
-        if self.require_fvg_zone.value:
-            bullish_zone &= in_bullish_fvg
-            bearish_zone &= in_bearish_fvg
-            
         # P/D Logic:
-        # Discount: Close < Equilibrium (<0.5)
-        # Premium: Close > Equilibrium (>0.5)
+        # Discount: Close < Equilibrium (<0.5) - Good for LONG
+        # Premium: Close > Equilibrium (>0.5) - Good for SHORT
         in_discount = dataframe['close'] < dataframe['equilibrium']
         in_premium = dataframe['close'] > dataframe['equilibrium']
         
-        if self.require_premium_discount.value:
-            bullish_zone &= in_discount
-            bearish_zone &= in_premium
+        if any_zone_enabled:
+            # Start with False, use OR to add conditions
+            bullish_zone = pd.Series(False, index=dataframe.index)
+            bearish_zone = pd.Series(False, index=dataframe.index)
+            
+            if self.require_ob_zone.value:
+                bullish_zone |= in_bullish_ob
+                bearish_zone |= in_bearish_ob
+            
+            if self.require_fvg_zone.value:
+                bullish_zone |= in_bullish_fvg
+                bearish_zone |= in_bearish_fvg
+            
+            if self.require_premium_discount.value:
+                bullish_zone |= in_discount
+                bearish_zone |= in_premium
+        else:
+            # No zone filters enabled - all pass
+            bullish_zone = pd.Series(True, index=dataframe.index)
+            bearish_zone = pd.Series(True, index=dataframe.index)
         
         # Debugging Zone Counts (Only if backtesting/dry)
         if self.dp: 

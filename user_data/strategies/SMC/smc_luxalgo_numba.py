@@ -193,8 +193,9 @@ def _smc_signals_kernel(
                 if ip_high_idx < i:
                     ob_idx = _find_lowest_low(low, ip_high_idx, i)
                     if ob_idx != -1:
-                        ob_bull_top[ob_idx] = high[ob_idx]
-                        ob_bull_btm[ob_idx] = low[ob_idx]
+                        # FIX: Write at confirmation index i, not geometry index
+                        ob_bull_top[i] = high[ob_idx]
+                        ob_bull_btm[i] = low[ob_idx]
 
         # Bearish Break
         if not ip_low_crossed and not np.isnan(ip_low_level):
@@ -210,8 +211,9 @@ def _smc_signals_kernel(
                 if ip_low_idx < i:
                     ob_idx = _find_highest_high(high, ip_low_idx, i)
                     if ob_idx != -1:
-                        ob_bear_top[ob_idx] = high[ob_idx]
-                        ob_bear_btm[ob_idx] = low[ob_idx]
+                        # FIX: Write at confirmation index i, not geometry index
+                        ob_bear_top[i] = high[ob_idx]
+                        ob_bear_btm[i] = low[ob_idx]
         
         int_trend[i] = curr_int_trend
 
@@ -230,8 +232,9 @@ def _smc_signals_kernel(
                 if sp_high_idx < i:
                     ob_idx = _find_lowest_low(low, sp_high_idx, i)
                     if ob_idx != -1:
-                        ob_bull_top[ob_idx] = high[ob_idx]
-                        ob_bull_btm[ob_idx] = low[ob_idx]
+                        # FIX: Write at confirmation index i, not geometry index
+                        ob_bull_top[i] = high[ob_idx]
+                        ob_bull_btm[i] = low[ob_idx]
 
         if not sp_low_crossed and not np.isnan(sp_low_level):
             if prev_close >= sp_low_level and curr_close < sp_low_level:
@@ -246,8 +249,9 @@ def _smc_signals_kernel(
                 if sp_low_idx < i:
                     ob_idx = _find_highest_high(high, sp_low_idx, i)
                     if ob_idx != -1:
-                        ob_bear_top[ob_idx] = high[ob_idx]
-                        ob_bear_btm[ob_idx] = low[ob_idx]
+                        # FIX: Write at confirmation index i, not geometry index
+                        ob_bear_top[i] = high[ob_idx]
+                        ob_bear_btm[i] = low[ob_idx]
         
         sw_trend[i] = curr_sw_trend
         

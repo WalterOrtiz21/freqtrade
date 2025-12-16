@@ -1,0 +1,23 @@
+{
+    "strategy_name": "AlexMarketStructureNumba",
+    "params": {
+        "buy": {
+            "structure_period": 20,
+            "volatility_multiplier": 2.0,
+            "atr_period": 14,
+            "tsa_max_length": 50,
+            "tsa_accel_multiplier": 5.0
+        },
+        "sell": {},
+        "protection": {},
+        "custom": {
+            "enable_logging": false,
+            "tp1_exit_pct": 0.30,
+            "tp2_exit_pct": 0.30,
+            "max_long_positions": 15,
+            "max_short_positions": 15
+        }
+    },
+    "minimal_roi": {},
+    "stoploss": -0.07
+}
