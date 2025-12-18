@@ -845,41 +845,76 @@ class LorentzianSuperTrend(IStrategy):
 
     def _get_entry_candle(self, pair, open_date):
         dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+        
+        # Calcular duración del timeframe en minutos
         tf_min = int(self.timeframe[:-1]) * (60 if 'h' in self.timeframe else 1)
-        signal_date = open_date - timedelta(minutes=tf_min)
+        
+        # Asegurar que open_date sea compatible (pd.Timestamp UTC)
+        # En backtesting y dry-run, freqtrade usa datetimes con UTC
+        open_date = pd.to_datetime(open_date, utc=True)
+            
+        # Lógica de redondeo robusta usando pd.Timestamp
+        # Floor al inicio del timeframe
+        tf_delta = pd.Timedelta(minutes=tf_min)
+        candle_date = open_date.floor(tf_delta)
+        
+        # La vela de SEÑAL suele ser la anterior a la vela actual (entry candle)
+        signal_date = candle_date - tf_delta
+        
         try:
-            return dataframe.loc[dataframe['date'] == signal_date].iloc[0]
-        except:
+            # Intentar match exacto con signal_date
+            row = dataframe.loc[dataframe['date'] == signal_date]
+            if not row.empty:
+                return row.iloc[0]
+            
+            # Fallback: Intentar con candle_date
+            row = dataframe.loc[dataframe['date'] == candle_date]
+            if not row.empty:
+                return row.iloc[0]
+                
+            # Fallback 2: Buscar la última vela disponible anterior o igual a signal_date
+            # Usando asof (más eficiente y robusto)
+            # Necesitamos que dataframe esté indexado por fecha o usar searchsorted
+            # Pero 'date' es una columna normal aquí. Usamos boolean masking seguro.
+            
+            possible_candles = dataframe[dataframe['date'] <= signal_date]
+            if not possible_candles.empty:
+                return possible_candles.iloc[-1]
+                
+            return None
+        except Exception as e:
+            # Evitar spam de logs en backtesting si faltan datos al inicio
+            # logger.error(f"Error getting entry candle for {pair} at {open_date}: {e}")
             return None
 
     def custom_stoploss(self, pair: str, trade: 'Trade', current_time: datetime,
                         current_rate: float, current_profit: float, **kwargs) -> float:
         """
         Custom stoploss con cache para evitar recalculos innecesarios.
-        
-        El SL solo se recalcula cuando:
-        1. Es la primera vez que se calcula para este trade
-        2. Se activa el breakeven (R:R alcanzado)
-        
-        Esto evita que Freqtrade cancele/recoloque órdenes en cada tick.
         """
         
         # Obtener datos de la vela de entrada
         entry_data = self._get_entry_candle(pair, trade.open_date_utc)
         if entry_data is None: 
+            # logger.warning(f"Stoploss: No entry candle found for {pair}")
             return self.stoploss 
         
         entry_price = trade.open_rate
         
         # Calcular distancia del SL (solo necesitamos esto para el cálculo inicial y breakeven)
         sl_dist = 0.0
+        atr_val = entry_data.get('atr_sl', 0)
+        swing_val = 0
+        
         if self.stoploss_type.value == 'atr':
-            sl_dist = entry_data['atr_sl'] * float(self.atr_stop_mult.value)
+            sl_dist = atr_val * float(self.atr_stop_mult.value)
         else:
             if trade.is_short:
-                sl_dist = abs(entry_data['swing_high'] - entry_price)
+                swing_val = entry_data.get('swing_high', 0)
+                sl_dist = abs(swing_val - entry_price)
             else:
-                sl_dist = abs(entry_price - entry_data['swing_low'])
+                swing_val = entry_data.get('swing_low', 0)
+                sl_dist = abs(entry_price - swing_val)
 
         if sl_dist <= 0: 
             return self.stoploss
@@ -943,15 +978,18 @@ class LorentzianSuperTrend(IStrategy):
             fixed_stop_price = entry_price + sl_dist
         else:
             fixed_stop_price = entry_price - sl_dist
+            
+        # Redondear para evitar actualizaciones innecesarias por precision flotante
+        fixed_stop_price = round(fixed_stop_price, 8)
         
         # Cachear el SL inicial (sin breakeven activo)
         self._sl_cache[trade.id] = (fixed_stop_price, False)
         
         if self.analysis_logging.value:
             sl_pct = (sl_dist / entry_price) * 100
-            logger.info(f"📍 SL Cached for {pair} (Trade #{trade.id}): "
+            logger.info(f"📍 SL Calculated for {pair} (Trade #{trade.id}): "
                        f"{'SHORT' if trade.is_short else 'LONG'} | "
-                       f"Entry: {entry_price:.8f} | SL: {fixed_stop_price:.8f} ({sl_pct:.2f}%)")
+                       f"Entry: {entry_price:.8f} | SL Price: {fixed_stop_price:.8f} | SL Dist: {sl_dist:.8f} ({sl_pct:.2f}%) | Current: {current_rate:.8f}")
         
         # Retornar SL inicial
         return stoploss_from_absolute(fixed_stop_price, current_rate, 
@@ -974,19 +1012,29 @@ class LorentzianSuperTrend(IStrategy):
         
         if self.use_takeprofit.value and trade.nr_of_successful_exits == 0:
             entry_data = self._get_entry_candle(trade.pair, trade.open_date_utc)
-            if entry_data is None: return None
+            if entry_data is None: 
+                # Debug logging para entender por qué falla
+                if self.analysis_logging.value:
+                     logger.warning(f"TP Check Failed: No entry candle found for {trade.pair} (Open: {trade.open_date_utc})")
+                return None
             
             sl_dist = 0.0
             if self.stoploss_type.value == 'atr':
-                sl_dist = entry_data['atr_sl'] * float(self.atr_stop_mult.value)
+                sl_dist = entry_data.get('atr_sl', 0) * float(self.atr_stop_mult.value)
             else:
-                if trade.is_short: sl_dist = abs(entry_data['swing_high'] - trade.open_rate)
-                else: sl_dist = abs(trade.open_rate - entry_data['swing_low'])
+                if trade.is_short: sl_dist = abs(entry_data.get('swing_high', 0) - trade.open_rate)
+                else: sl_dist = abs(trade.open_rate - entry_data.get('swing_low', 0))
             
-            if sl_dist == 0: return None
+            if sl_dist == 0: 
+                return None
 
             if trade.is_short:
                 tp_price = trade.open_rate - (sl_dist * float(self.tp_rr_short.value))
+                
+                # Debug ocasional (cada ~5% de cambio o algo asi? No, muy complejo. Loguear si está cerca)
+                # if self.analysis_logging.value and abs(current_rate - tp_price) / tp_price < 0.01:
+                #    logger.info(f"TP Check SHORT {trade.pair}: Price {current_rate:.8f} vs Target {tp_price:.8f} (Dist: {sl_dist:.8f})")
+
                 if current_rate <= tp_price:
                     # Log take profit (una sola vez)
                     if trade.id not in self._tp_logged:
@@ -1015,7 +1063,7 @@ class LorentzianSuperTrend(IStrategy):
                             logger.info(f"💰 Take Profit LONG ({self.tp_percent.value}%): {trade.pair} @ {current_rate:.8f} | "
                                     f"Profit: {profit_pct:.2f}% | R:R={self.tp_rr_long.value} | Date: {tp_date}")
                     return -(trade.stake_amount * (self.tp_percent.value / 100))
-
+        
         return None
 
     def confirm_trade_entry(self, pair: str, order_type: str, amount: float, rate: float,
