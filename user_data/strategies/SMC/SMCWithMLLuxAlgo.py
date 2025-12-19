@@ -74,26 +74,20 @@ class SMCWithMLLuxAlgo(IStrategy):
     
     # These are BASE values for 1x leverage - will be multiplied by leverage
     minimal_roi = {"0": 1.0}  # Disabled, using custom exits
-    stoploss = -0.05  # Base: -5% price movement (adjusted by leverage in bot_start)
-    timeframe = '15m'
+    stoploss = -0.03  # Base: -3% price movement (adjusted by leverage in bot_start)
+    timeframe = '1h'
     
-    trailing_stop = True
+    trailing_stop = False
     trailing_stop_positive = 0.005  # 0.5% price movement
     trailing_stop_positive_offset = 0.01  # 1% price movement
     trailing_only_offset_is_reached = True
     
-    # order_types = {
-    #     'entry': 'market',
-    #     'exit': 'market',
-    #     'stoploss': 'market',
-    #     'stoploss_on_exchange': True,
-    # }
     
     use_exit_signal = True
     use_custom_stoploss = True  # Enable for breakeven
     position_adjustment_enable = True  # Enable for partial TPs
     max_open_trades = 3
-    startup_candle_count: int = 100
+    startup_candle_count: int = 200
     can_short = True
 
     # ==========================================================================
@@ -142,7 +136,7 @@ class SMCWithMLLuxAlgo(IStrategy):
     use_ml_filter = BooleanParameter(default=True, space='buy', optimize=False)
     ml_threshold = DecimalParameter(0.05, 0.50, default=0.15, decimals=2, space='buy', optimize=True)
     ml_model_path = "user_data/strategies/SMC/models"
-    enable_auto_training = BooleanParameter(default=False, space='buy', optimize=False)
+    enable_auto_training = BooleanParameter(default=True, space='buy', optimize=False)
     _ml_model = None
 
     # ==========================================================================
@@ -332,9 +326,18 @@ class SMCWithMLLuxAlgo(IStrategy):
         df['atr'] = ta.ATR(df, timeperiod=14)
         df['ml_atr_pct'] = df['atr'] / df['close']
         
+        # Volatility Filter (Lorentzian Style: atr_1 > atr_10)
+        atr_1 = ta.ATR(df, timeperiod=1)
+        atr_10 = ta.ATR(df, timeperiod=10)
+        df['ml_volatility_high'] = (atr_1 > atr_10).astype(float)
+        
         # Volume
         df['volume_ma'] = ta.SMA(df['volume'], timeperiod=20)
         df['ml_volume_ratio'] = df['volume'] / df['volume_ma'].replace(0, 1)
+        
+        # RSI(9) - Feature 5 from Lorentzian (separate from RSI 14)
+        df['rsi_9'] = ta.RSI(df['close'], timeperiod=9)
+        df['ml_rsi_9'] = df['rsi_9'] / 100.0
         
         # --- 2. SMC Context ---
         

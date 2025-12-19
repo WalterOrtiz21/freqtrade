@@ -65,7 +65,7 @@ def load_config():
         
         # Training date range
         'training_start': '2020-01-01',
-        'training_end': '2025-01-01',
+        'training_end': '2025-12-31',
         
         # Target definition
         'profit_threshold': 0.015,  # 1.5% target for labeling
@@ -134,7 +134,7 @@ def calculate_ml_features(dataframe: pd.DataFrame) -> pd.DataFrame:
     df['cci'] = ta.CCI(df['high'], df['low'], df['close'], timeperiod=20)
     df['ml_cci'] = df['cci'] / 300.0 # Normalize -1 to 1
 
-    # WaveTrend (Oscillator) - NEW
+    # WaveTrend (Oscillator)
     n1 = 10
     n2 = 21
     ap = (df['high'] + df['low'] + df['close']) / 3
@@ -158,13 +158,22 @@ def calculate_ml_features(dataframe: pd.DataFrame) -> pd.DataFrame:
     df['atr'] = ta.ATR(df, timeperiod=14)
     df['ml_atr_pct'] = df['atr'] / df['close']
     
+    # Volatility Filter (Lorentzian Style: atr_1 > atr_10)
+    atr_1 = ta.ATR(df, timeperiod=1)
+    atr_10 = ta.ATR(df, timeperiod=10)
+    df['ml_volatility_high'] = (atr_1 > atr_10).astype(float)
+    
     # Volume
     df['volume_ma'] = ta.SMA(df['volume'], timeperiod=20)
     df['ml_volume_ratio'] = df['volume'] / df['volume_ma'].replace(0, 1)
     
+    # RSI(9) - Feature 5 from Lorentzian (separate from RSI 14)
+    df['rsi_9'] = ta.RSI(df['close'], timeperiod=9)
+    df['ml_rsi_9'] = df['rsi_9'] / 100.0
+    
     # --- 2. SMC Context ---
     
-    # Premium/Discount Factor - NEW
+    # Premium/Discount Factor
     # Need to handle division by zero if High == Low
     if 'swing_high' in df.columns and 'swing_low' in df.columns:
         swing_range = df['swing_high'] - df['swing_low']

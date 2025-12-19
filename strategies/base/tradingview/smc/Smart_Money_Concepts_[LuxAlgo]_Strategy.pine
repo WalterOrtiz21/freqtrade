@@ -137,10 +137,30 @@ discountZoneColorInput          = input.color(  GREEN,      'Discount Zone',    
 
 // Strategy Inputs
 stratStructureType  = input.string("Swing", "Estructura para Entrada", options=["Swing", "Internal"], group=STRAT_GROUP, tooltip="Define qué tipo de CHoCH dispara la entrada.")
-stratUseTP          = input.bool(false, "Usar Take Profit 1", group=STRAT_GROUP)
-stratTPPercent      = input.float(1.0, "Porcentaje TP1 (%)", minval=0.1, step=0.1, group=STRAT_GROUP)
-stratTPQty          = input.float(50, "Porcentaje a cerrar en TP1", minval=1, maxval=100, step=10, group=STRAT_GROUP)
-stratMoveBE         = input.bool(false, "Mover a Break Even al tocar TP1", group=STRAT_GROUP)
+
+// === STOP LOSS (Porcentaje fijo - SMCWithMLLuxAlgo style) ===
+stratSLPercent      = input.float(3.0, "Stop Loss (%)", minval=0.1, step=0.1, group=STRAT_GROUP, tooltip="Porcentaje de distancia del precio de entrada para el SL")
+
+// === TAKE PROFIT OPTIONS ===
+stratUseTP          = input.bool(true, "Usar Take Profit 1 (Parcial)", group=STRAT_GROUP)
+stratTPQty          = input.float(50, "% Cerrar en TP1", minval=1, maxval=100, step=10, group=STRAT_GROUP)
+stratUseTP2         = input.bool(true, "Usar Take Profit 2 (Full Exit)", group=STRAT_GROUP)
+
+// === RR RATIOS (Lorentzian Style) ===
+stratRRBreakeven    = input.float(1.0, "R:R para Breakeven", step=0.1, group=STRAT_GROUP, tooltip="Ratio Riesgo:Recompensa para activar Break Even")
+stratRRTakeProfit   = input.float(3.0, "R:R para Take Profit", step=0.1, group=STRAT_GROUP, tooltip="Ratio Riesgo:Recompensa para Take Profit final")
+
+// === BREAK EVEN ===
+stratMoveBE         = input.bool(true, "Mover a Break Even al tocar TP1", group=STRAT_GROUP)
+
+// === EXIT ON REVERSE ===
+stratExitOnReverse  = input.bool(true, "Salir con CHoCH Opuesto", group=STRAT_GROUP, tooltip="Cerrar posición si aparece CHoCH en dirección contraria")
+
+// === ZONE FILTERS (OR Logic - from SMCWithMLLuxAlgo) ===
+ZONE_GROUP          = "Zone Filters (OR Logic)"
+stratRequireOB      = input.bool(false, "Filtro Order Block", group=ZONE_GROUP, tooltip="Requiere estar en zona de Order Block")
+stratRequireFVG     = input.bool(false, "Filtro FVG", group=ZONE_GROUP, tooltip="Requiere estar en zona de Fair Value Gap")
+stratRequirePD      = input.bool(false, "Filtro Premium/Discount", group=ZONE_GROUP, tooltip="Long en Discount, Short en Premium")
 
 //---------------------------------------------------------------------------------------------------------------------}
 //DATA STRUCTURES & VARIABLES
@@ -831,49 +851,225 @@ if barstate.islastconfirmedhistory or (barstate.isrealtime and newBar)
         drawLevels('M',timeframe.ismonthly,monthlyLevelsStyleInput,monthlyLevelsColorInput)
 
 //---------------------------------------------------------------------------------------------------------------------}
-// ESTRATEGIA: EJECUCIÓN
+// ESTRATEGIA: EJECUCIÓN MEJORADA (SMCWithMLLuxAlgo + Lorentzian Visualization)
 //---------------------------------------------------------------------------------------------------------------------{
 
-// 1. Determinar condiciones de entrada basadas en la configuración (Internal vs Swing)
+// === TRADE MANAGEMENT VARIABLES ===
+var float sl_long = na
+var float sl_short = na
+var float be_long = na
+var float be_short = na
+var float tp_long = na
+var float tp_short = na
+var float tp2_long = na
+var float tp2_short = na
+var bool be_activated_long = false
+var bool be_activated_short = false
+
+bought = strategy.position_size > 0
+sold = strategy.position_size < 0
+
+// Reset cuando no hay posición
+if not bought
+    sl_long := na
+    be_long := na
+    tp_long := na
+    tp2_long := na
+    be_activated_long := false
+    
+if not sold
+    sl_short := na
+    be_short := na
+    tp_short := na
+    tp2_short := na
+    be_activated_short := false
+
+// === ZONE FILTER LOGIC (OR) ===
+any_zone_filter = stratRequireOB or stratRequireFVG or stratRequirePD
+
+// Premium/Discount Zone Check (usando swing range)
+float swingRange = nz(trailing.top, high) - nz(trailing.bottom, low)
+float equilibrium = nz(trailing.bottom, low) + swingRange / 2
+inDiscount = close < equilibrium  // Bueno para Long (comprar barato)
+inPremium = close > equilibrium   // Bueno para Short (vender caro)
+
+// Simplified zone proximity - check if we're near recent structure
+// OB zone: price within recent swing range
+// FVG zone: similar approach
+nearBullishOB = showInternalOrderBlocksInput and internalOrderBlocks.size() > 0
+nearBearishOB = showInternalOrderBlocksInput and internalOrderBlocks.size() > 0
+nearBullishFVG = showFairValueGapsInput and fairValueGaps.size() > 0
+nearBearishFVG = showFairValueGapsInput and fairValueGaps.size() > 0
+
+// Zone conditions - start permissive
+bullish_zone_ok = true
+bearish_zone_ok = true
+
+if any_zone_filter
+    bullish_zone_ok := false
+    bearish_zone_ok := false
+    
+    // OB Filter: If enabled and OBs exist, allow entry
+    if stratRequireOB
+        if nearBullishOB
+            bullish_zone_ok := true
+        if nearBearishOB
+            bearish_zone_ok := true
+    
+    // FVG Filter: If enabled and FVGs exist, allow entry
+    if stratRequireFVG
+        if nearBullishFVG
+            bullish_zone_ok := true
+        if nearBearishFVG
+            bearish_zone_ok := true
+    
+    // Premium/Discount Filter: Simple zone check
+    if stratRequirePD
+        if inDiscount
+            bullish_zone_ok := true
+        if inPremium
+            bearish_zone_ok := true
+
+// === ENTRY CONDITIONS ===
 bool entryLongCondition = false
 bool entryShortCondition = false
 
 if stratStructureType == "Internal"
-    entryLongCondition := currentAlerts.internalBullishCHoCH
-    entryShortCondition := currentAlerts.internalBearishCHoCH
+    entryLongCondition := currentAlerts.internalBullishCHoCH and bullish_zone_ok
+    entryShortCondition := currentAlerts.internalBearishCHoCH and bearish_zone_ok
 else
-    entryLongCondition := currentAlerts.swingBullishCHoCH
-    entryShortCondition := currentAlerts.swingBearishCHoCH
+    entryLongCondition := currentAlerts.swingBullishCHoCH and bullish_zone_ok
+    entryShortCondition := currentAlerts.swingBearishCHoCH and bearish_zone_ok
 
-// 2. Ejecución de Entradas (Reversión automática si no se especifica lo contrario)
+// === STOPLOSS CALCULATION (Porcentaje fijo) ===
+longStopLoss_calc = close * (1 - stratSLPercent / 100)
+shortStopLoss_calc = close * (1 + stratSLPercent / 100)
+
+// === STRATEGY EXECUTION ===
+
+// LONG ENTRY
 if entryLongCondition
     strategy.entry("Long", strategy.long, comment="CHoCH Bull")
+    sl_long := longStopLoss_calc
+    long_sl_distance = close - sl_long
+    be_long := close + long_sl_distance * stratRRBreakeven
+    tp_long := close + long_sl_distance * stratRRTakeProfit
+    tp2_long := close + long_sl_distance * stratRRTakeProfit
+    be_activated_long := false
 
+// SHORT ENTRY  
 if entryShortCondition
     strategy.entry("Short", strategy.short, comment="CHoCH Bear")
+    sl_short := shortStopLoss_calc
+    short_sl_distance = sl_short - close
+    be_short := close - short_sl_distance * stratRRBreakeven
+    tp_short := close - short_sl_distance * stratRRTakeProfit
+    tp2_short := close - short_sl_distance * stratRRTakeProfit
+    be_activated_short := false
 
-// 3. Gestión de TP y BE
-if stratUseTP
-    // Calculamos precio de TP
-    float longTPPrice = strategy.position_avg_price * (1 + stratTPPercent / 100)
-    float shortTPPrice = strategy.position_avg_price * (1 - stratTPPercent / 100)
+// === LONG POSITION MANAGEMENT ===
+if bought
+    // TP1 Parcial + SL
+    if stratUseTP
+        strategy.exit("TP1 Long", "Long", qty_percent=stratTPQty, limit=tp_long, stop=sl_long)
+    else
+        strategy.exit("SL Long", "Long", stop=sl_long)
     
-    // Si estamos en Long
-    if strategy.position_size > 0
-        // Configurar salida TP1 parcial
-        strategy.exit("TP1 Long", "Long", qty_percent = stratTPQty, limit = longTPPrice)
-        
-        // Lógica Break Even: Si el precio actual supera el TP, movemos el SL a precio de entrada
-        if stratMoveBE and high >= longTPPrice
-            strategy.exit("BE Long", "Long", stop = strategy.position_avg_price)
-            
-    // Si estamos en Short
-    if strategy.position_size < 0
-        // Configurar salida TP1 parcial
-        strategy.exit("TP1 Short", "Short", qty_percent = stratTPQty, limit = shortTPPrice)
-        
-        // Lógica Break Even: Si el precio actual baja del TP, movemos el SL a precio de entrada
-        if stratMoveBE and low <= shortTPPrice
-            strategy.exit("BE Short", "Short", stop = strategy.position_avg_price)
+    // Break Even activation
+    if stratMoveBE and high >= be_long and not be_activated_long
+        sl_long := strategy.position_avg_price
+        be_activated_long := true
+    
+    // TP2 Full Exit (after BE activated)
+    if stratUseTP2 and be_activated_long
+        strategy.exit("TP2 Long", "Long", stop=sl_long, limit=tp2_long)
+    
+    // Exit on opposite CHoCH
+    if stratExitOnReverse and (currentAlerts.internalBearishCHoCH or currentAlerts.swingBearishCHoCH)
+        strategy.close("Long", comment="Reverse CHoCH")
+
+// === SHORT POSITION MANAGEMENT ===
+if sold
+    // TP1 Parcial + SL
+    if stratUseTP
+        strategy.exit("TP1 Short", "Short", qty_percent=stratTPQty, limit=tp_short, stop=sl_short)
+    else
+        strategy.exit("SL Short", "Short", stop=sl_short)
+    
+    // Break Even activation
+    if stratMoveBE and low <= be_short and not be_activated_short
+        sl_short := strategy.position_avg_price
+        be_activated_short := true
+    
+    // TP2 Full Exit (after BE activated)
+    if stratUseTP2 and be_activated_short
+        strategy.exit("TP2 Short", "Short", stop=sl_short, limit=tp2_short)
+    
+    // Exit on opposite CHoCH
+    if stratExitOnReverse and (currentAlerts.internalBullishCHoCH or currentAlerts.swingBullishCHoCH)
+        strategy.close("Short", comment="Reverse CHoCH")
+
+//---------------------------------------------------------------------------------------------------------------------}
+// TRADE VISUALIZATION (Lorentzian Style)
+//---------------------------------------------------------------------------------------------------------------------{
+
+APPEARANCE_GROUP = "============ Trade Visualization ============"
+show_position_on_chart = input.bool(defval=true, title="Mostrar posición en gráfico", group=APPEARANCE_GROUP, tooltip="Muestra líneas de SL, TP, BE durante el trade")
+show_tpbe_on_chart = input.bool(defval=true, title="Mostrar TP/BE/SL en señal", group=APPEARANCE_GROUP, tooltip="Muestra círculos de SL, TP, BE al momento de la señal")
+show_signals = input.bool(defval=true, title="Mostrar señales Buy/Sell", group=APPEARANCE_GROUP)
+
+// === Position Price Line ===
+position_price = plot(show_position_on_chart and (bought or sold) ? strategy.position_avg_price : na, style=plot.style_linebr, color=color.new(#ffffff, 10), linewidth=1, title="Precio Entrada", display=display.all - display.status_line - display.price_scale)
+
+// === Stop Loss Lines ===
+sl_long_price = plot(show_position_on_chart and bought ? sl_long : na, style=plot.style_linebr, color=color.new(color.red, 10), linewidth=1, title="SL Long", display=display.all - display.status_line - display.price_scale)
+sl_short_price = plot(show_position_on_chart and sold ? sl_short : na, style=plot.style_linebr, color=color.new(color.red, 10), linewidth=1, title="SL Short", display=display.all - display.status_line - display.price_scale)
+
+// === Take Profit Lines ===
+tp_long_price = plot(bought and show_position_on_chart and stratUseTP ? tp_long : na, style=plot.style_linebr, color=color.new(#4cd350, 10), linewidth=1, title="TP Long", display=display.all - display.status_line - display.price_scale)
+tp_short_price = plot(sold and show_position_on_chart and stratUseTP ? tp_short : na, style=plot.style_linebr, color=color.new(#4cd350, 10), linewidth=1, title="TP Short", display=display.all - display.status_line - display.price_scale)
+
+// === Break Even Lines ===
+breakeven_long_plot = plot(bought and not be_activated_long and show_position_on_chart and stratMoveBE ? be_long : na, style=plot.style_linebr, color=color.new(#1fc9fd, 60), linewidth=1, title="BE Long", display=display.all - display.status_line - display.price_scale)
+breakeven_short_plot = plot(sold and not be_activated_short and show_position_on_chart and stratMoveBE ? be_short : na, style=plot.style_linebr, color=color.new(#1fc9fd, 60), linewidth=1, title="BE Short", display=display.all - display.status_line - display.price_scale)
+
+// === Profit Zone (green fill when in profit) ===
+position_profit_long = plot(bought and show_position_on_chart and strategy.openprofit > 0 ? close : na, style=plot.style_linebr, color=color.new(#4cd350, 10), linewidth=1, display=display.all - display.status_line - display.price_scale)
+position_profit_short = plot(sold and show_position_on_chart and strategy.openprofit > 0 ? close : na, style=plot.style_linebr, color=color.new(#4cd350, 10), linewidth=1, display=display.all - display.status_line - display.price_scale)
+
+// === Fill Zones ===
+fill(plot1=position_price, plot2=position_profit_long, color=color.new(#4cd350, 90), title="Profit Fill Long")
+fill(plot1=position_price, plot2=position_profit_short, color=color.new(#4cd350, 90), title="Profit Fill Short")
+fill(plot1=position_price, plot2=sl_long_price, color=color.new(color.red, 90), title="SL Fill Long")
+fill(plot1=position_price, plot2=sl_short_price, color=color.new(color.red, 90), title="SL Fill Short")
+fill(plot1=position_price, plot2=tp_long_price, color=color.new(color.green, 90), title="TP Fill Long")
+fill(plot1=position_price, plot2=tp_short_price, color=color.new(color.green, 90), title="TP Fill Short")
+
+// === Entry Signal Markers (circles at signal moment) ===
+be_long_calc = close + (close - longStopLoss_calc) * stratRRBreakeven
+be_short_calc = close - (shortStopLoss_calc - close) * stratRRBreakeven
+tp_long_calc = close + (close - longStopLoss_calc) * stratRRTakeProfit
+tp_short_calc = close - (shortStopLoss_calc - close) * stratRRTakeProfit
+
+plot(show_tpbe_on_chart and entryLongCondition and stratMoveBE ? be_long_calc : na, color=color.new(#1fc9fd, 10), style=plot.style_circles, linewidth=2, title="BE Point Long", display=display.all - display.price_scale)
+plot(show_tpbe_on_chart and entryShortCondition and stratMoveBE ? be_short_calc : na, color=color.new(#1fc9fd, 10), style=plot.style_circles, linewidth=2, title="BE Point Short", display=display.all - display.price_scale)
+plot(show_tpbe_on_chart and entryLongCondition and stratUseTP ? tp_long_calc : na, color=color.new(#4cd350, 10), style=plot.style_circles, linewidth=2, title="TP Point Long", display=display.all - display.price_scale)
+plot(show_tpbe_on_chart and entryShortCondition and stratUseTP ? tp_short_calc : na, color=color.new(#4cd350, 10), style=plot.style_circles, linewidth=2, title="TP Point Short", display=display.all - display.price_scale)
+plot(show_tpbe_on_chart and entryLongCondition ? longStopLoss_calc : na, color=color.white, style=plot.style_circles, linewidth=2, title="SL Point Long")
+plot(show_tpbe_on_chart and entryShortCondition ? shortStopLoss_calc : na, color=color.white, style=plot.style_circles, linewidth=2, title="SL Point Short")
+
+// === Buy/Sell Labels ===
+plotshape(show_signals and entryLongCondition ? low : na, title='Buy', text='Buy', style=shape.labelup, location=location.belowbar, color=color.new(color.green, 20), textcolor=color.new(color.white, 0), size=size.tiny, display=display.all - display.price_scale - display.status_line)
+plotshape(show_signals and entryShortCondition ? high : na, title='Sell', text='Sell', style=shape.labeldown, location=location.abovebar, color=color.new(color.red, 20), textcolor=color.new(color.white, 0), size=size.tiny, display=display.all - display.price_scale - display.status_line)
+
+// Reset lines when TP/BE is hit
+if high > tp_long
+    tp_long := na
+if low < tp_short
+    tp_short := na
+if high > be_long
+    be_long := na
+if low < be_short
+    be_short := na
 
 //---------------------------------------------------------------------------------------------------------------------}
