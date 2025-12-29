@@ -5,41 +5,40 @@
       "max_open_trades": 1
     },
     "buy": {
+      "analysis_logging": false,
       "atr_length": 10,
-      "max_factor": 5.0,
       "min_factor": 1.0,
-      "perf_alpha": 20,
+      "max_factor": 5.0,
+      "factor_step": 0.5,
+      "perf_alpha": 10,
+      "cluster_selection": "best",
       "use_adx_filter": false,
-      "adx_threshold": 30,
-      "_cluster_selection": "['best', 'average', 'worst']",
-      "cluster_selection": "best"
+      "adx_threshold": 20,
+      "use_ema_filter": true,
+      "ema_period": 200,
+      "use_volatility_filter": true
     },
     "sell": {
-      "_exit_mode": "'ama', 'standard', 'none'",
-      "exit_mode": "none"
+      "exit_mode": "standard"
     },
     "protection": {
-      "use_break_even": true,
-      "be_trigger": 0.015,
-      "be_offset": 0.002,
-      "tp1_sell_pct": 0.75
-    },
-    "_roi": {
-      "0": 0.08,
-      "86": 0.04,
-      "211": 0.02,
-      "372": 0.01
+      "atr_stop_len": 14,
+      "atr_stop_mult": 1.5,
+      "use_breakeven": true,
+      "be_rr_long": 1.0,
+      "be_rr_short": 1.0,
+      "use_takeprofit": true,
+      "tp_rr_long": 3.0,
+      "tp_rr_short": 3.0,
+      "tp_percent": 50
     },
     "stoploss": {
-      "stoploss": -0.025
+      "stoploss": -0.5
     },
     "trailing": {
-      "trailing_stop": false,
-      "trailing_stop_positive": 0.015,
-      "trailing_stop_positive_offset": 0.025,
-      "trailing_only_offset_is_reached": true
+      "trailing_stop": false
     }
   },
   "ft_stratparam_v": 1,
-  "export_time": "2025-11-24 00:45:10.358105+00:00"
+  "export_time": "2025-12-26 22:17:00.000000+00:00"
 }

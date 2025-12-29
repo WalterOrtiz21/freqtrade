@@ -23,6 +23,7 @@
             "require_premium_discount": true,
             "signal_lookback": 3,
             "use_ml_filter": true,
+            "use_per_symbol_models": false,
             "ml_threshold": 0.25
         },
         "sell": {

@@ -134,6 +134,7 @@ class SMCWithMLLuxAlgo(IStrategy):
     # strict fidelity to Pine Script logic.
     
     use_ml_filter = BooleanParameter(default=True, space='buy', optimize=False)
+    use_per_symbol_models = BooleanParameter(default=True, space='buy', optimize=False)  # True = per-symbol, False = general
     ml_threshold = DecimalParameter(0.05, 0.50, default=0.15, decimals=2, space='buy', optimize=True)
     ml_model_path = "user_data/strategies/SMC/models"
     enable_auto_training = BooleanParameter(default=True, space='buy', optimize=False)
@@ -232,24 +233,81 @@ class SMCWithMLLuxAlgo(IStrategy):
 
     
     def _load_ml_model(self):
-        """Load pre-trained ML model if exists."""
-        model_file = os.path.join(self.ml_model_path, "smc_xgboost_model.pkl")
-        if os.path.exists(model_file):
+        """Load pre-trained ML model if exists.
+        
+        Tries to load in order:
+        1. Per-symbol model: smc_xgboost_{PAIR}.pkl
+        2. General model: smc_xgboost_model.pkl
+        """
+        if not hasattr(self, '_models_cache'):
+            self._models_cache = {}
+            
+        # General model (fallback) - load once
+        general_model_file = os.path.join(self.ml_model_path, "smc_xgboost_model.pkl")
+        if os.path.exists(general_model_file) and 'general' not in self._models_cache:
             if self.use_ml_filter.value:
                 try:
-                    with open(model_file, 'rb') as f:
-                        self._ml_model = pickle.load(f)
-                    logger.info(f"✅ ML Model successfully loaded from {model_file}")
-                    logger.info(f"   Model Type: {type(self._ml_model)}")
+                    with open(general_model_file, 'rb') as f:
+                        self._models_cache['general'] = pickle.load(f)
+                    logger.info(f"✅ General ML Model loaded from {general_model_file}")
                 except Exception as e:
-                    logger.error(f"❌ Failed to load ML model: {e}")
-                    self._ml_model = None
-            else:
-                logger.info(f"⚠️ ML Model found at {model_file} but use_ml_filter is False.")
-                self._ml_model = None
+                    logger.error(f"❌ Failed to load general ML model: {e}")
+                    self._models_cache['general'] = None
+        
+        # Set default model to general if exists
+        if 'general' in self._models_cache:
+            self._ml_model = self._models_cache['general']
         else:
-            logger.warning(f"⚠️ ML Model NOT found at {model_file}. Filter will be skipped.")
             self._ml_model = None
+            
+    def _get_ml_model_for_pair(self, pair: str):
+        """Get ML model for specific pair (with caching and fallback).
+        
+        If use_per_symbol_models=True: Try per-symbol model, fallback to general
+        If use_per_symbol_models=False: Only use general model
+        """
+        if not self.use_ml_filter.value:
+            return None
+            
+        if not hasattr(self, '_models_cache'):
+            self._models_cache = {}
+        
+        # Convert pair to filename: 'BTC/USDT:USDT' -> 'BTC_USDT'
+        pair_key = pair.replace('/', '_').replace(':', '_').split('_USDT')[0] + '_USDT'
+        
+        # Check cache first
+        if pair_key in self._models_cache:
+            return self._models_cache[pair_key]
+        
+        # If per-symbol models enabled, try to load specific model
+        if self.use_per_symbol_models.value:
+            symbol_model_file = os.path.join(self.ml_model_path, f"smc_xgboost_{pair_key}.pkl")
+            if os.path.exists(symbol_model_file):
+                try:
+                    with open(symbol_model_file, 'rb') as f:
+                        model = pickle.load(f)
+                    self._models_cache[pair_key] = model
+                    logger.info(f"✅ Per-symbol ML Model loaded for {pair}: {symbol_model_file}")
+                    return model
+                except Exception as e:
+                    logger.warning(f"Failed to load per-symbol model for {pair}: {e}")
+        
+        # Fallback to general model (or use it directly if per_symbol disabled)
+        if 'general' not in self._models_cache:
+            general_model_file = os.path.join(self.ml_model_path, "smc_xgboost_model.pkl")
+            if os.path.exists(general_model_file):
+                try:
+                    with open(general_model_file, 'rb') as f:
+                        self._models_cache['general'] = pickle.load(f)
+                    logger.info(f"✅ General ML Model loaded: {general_model_file}")
+                except Exception:
+                    self._models_cache['general'] = None
+            else:
+                self._models_cache['general'] = None
+        
+        # Cache that this pair uses general model
+        self._models_cache[pair_key] = self._models_cache.get('general')
+        return self._models_cache[pair_key]
 
     # ==========================================================================
     # INDICATOR CALCULATION
@@ -577,7 +635,8 @@ class SMCWithMLLuxAlgo(IStrategy):
         short_condition = bearish_structure & bearish_zone & bearish_trend_ok
         
         # ===== ML FILTER =====
-        if self.use_ml_filter.value and self._ml_model:
+        ml_model = self._get_ml_model_for_pair(metadata['pair'])
+        if self.use_ml_filter.value and ml_model:
             try:
                 # Prepare Features
                 feature_cols = [c for c in dataframe.columns if c.startswith('ml_')]
@@ -585,13 +644,13 @@ class SMCWithMLLuxAlgo(IStrategy):
                 # Predict Longs (direction = 1)
                 X_long = dataframe[feature_cols].copy()
                 X_long['direction'] = 1
-                long_proba = self._ml_model.predict_proba(X_long)[:, 1]
+                long_proba = ml_model.predict_proba(X_long)[:, 1]
                 ml_long_ok = long_proba > self.ml_threshold.value
                 
                 # Predict Shorts (direction = -1)
                 X_short = dataframe[feature_cols].copy()
                 X_short['direction'] = -1
-                short_proba = self._ml_model.predict_proba(X_short)[:, 1]
+                short_proba = ml_model.predict_proba(X_short)[:, 1]
                 ml_short_ok = short_proba > self.ml_threshold.value
                 
                 # Apply Filter
@@ -600,10 +659,10 @@ class SMCWithMLLuxAlgo(IStrategy):
                 
                 # Log only if a signal was blocked significantly (optional)
                 if (long_condition.sum() < ml_long_ok.sum()) or (short_condition.sum() < ml_short_ok.sum()):
-                     logger.info(f"🤖 ML Filter Blocked Signals. Active Threshold: {self.ml_threshold.value}")
+                     logger.info(f"🤖 ML Filter ({metadata['pair']}) Blocked Signals. Threshold: {self.ml_threshold.value}")
 
             except Exception as e:
-                logger.error(f"❌ ML Inference Failed: {e}")
+                logger.error(f"❌ ML Inference Failed for {metadata['pair']}: {e}")
                 pass
         
         # Apply signals
@@ -714,16 +773,25 @@ class SMCWithMLLuxAlgo(IStrategy):
             if not self.tp1_enabled.value or self.tp1_amount.value == 0:
                 return None
             
-            # Count how many sells we've done
-            filled_sells = [o for o in trade.orders if o.side == 'sell' and o.status == 'closed']
+            # For LONG: closing partial = sell order
+            # For SHORT: closing partial = buy order (re-buy to reduce short position)
+            exit_side = 'buy' if trade.is_short else 'sell'
             
-            if len(filled_sells) == 0:
+            # Count how many partial exits we've done (excluding entry orders)
+            partial_exits = [
+                o for o in trade.orders 
+                if o.side == exit_side 
+                and o.status == 'closed'
+                and o.ft_order_side == 'exit'  # Only exit orders, not entries
+            ]
+            
+            if len(partial_exits) == 0:
                 # Close tp1_amount% of position
                 close_amount = trade.amount * (self.tp1_amount.value / 100.0)
                 sell_value = close_amount * current_rate
                 logger.info(
-                    f"TP1 for {trade.pair}: price moved {price_movement:.2%}, "
-                    f"closing {self.tp1_amount.value:.0f}%"
+                    f"TP1 for {trade.pair} ({'SHORT' if trade.is_short else 'LONG'}): "
+                    f"price moved {price_movement:.2%}, closing {self.tp1_amount.value:.0f}%"
                 )
                 return (-sell_value, "TP1_partial")
         

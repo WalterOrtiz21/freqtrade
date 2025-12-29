@@ -46,26 +46,29 @@ except ImportError as e:
 def load_config():
     """Load config dynamically from JSON files."""
     
+    # Default fallback pairs
+    default_pairs = [
+        'BTC/USDT:USDT', 
+        'ETH/USDT:USDT', 
+        'SOL/USDT:USDT', 
+        'BNB/USDT:USDT',
+        'DOGE/USDT:USDT', 
+        'SUI/USDT:USDT', 
+        'STX/USDT:USDT'
+    ]
+    
     # Base config (static values)
     config = {
         # Paths
         'data_dir': 'user_data/data/binance/futures',
         'model_output_dir': 'user_data/strategies/SMC/models',
         
-        # Training pairs (static - adjust manually)
-        'pairs': [
-            'BTC/USDT:USDT', 
-            'ETH/USDT:USDT', 
-            'SOL/USDT:USDT', 
-            'BNB/USDT:USDT',
-            'DOGE/USDT:USDT', 
-            'SUI/USDT:USDT', 
-            'STX/USDT:USDT'
-        ], 
+        # Training pairs - will be loaded from config.json
+        'pairs': default_pairs,
         
         # Training date range
         'training_start': '2020-01-01',
-        'training_end': '2025-12-31',
+        'training_end': '2024-12-31',
         
         # Target definition
         'profit_threshold': 0.015,  # 1.5% target for labeling
@@ -74,17 +77,33 @@ def load_config():
         # ML parameters
         'n_splits': 5,
         'hyperopt': True,
-        'hyperopt_iter': 100,
+        'hyperopt_iter': 50,
+        
+        # Per-symbol training mode
+        'per_symbol_models': False,  # If True, train one model per symbol
     }
     
-    # Load timeframe from config.json
+    # Load from config.json
     try:
         with open('config.json', 'r') as f:
             main_config = json.load(f)
+            
+            # Load timeframe
             config['timeframe'] = main_config.get('timeframe', '15m')
             logger.info(f"📖 Loaded timeframe from config.json: {config['timeframe']}")
+            
+            # Load pairs from whitelist
+            exchange_config = main_config.get('exchange', {})
+            pairs_whitelist = exchange_config.get('pair_whitelist', [])
+            
+            if pairs_whitelist:
+                config['pairs'] = pairs_whitelist
+                logger.info(f"📖 Loaded {len(pairs_whitelist)} pairs from config.json whitelist")
+            else:
+                logger.warning("No pair_whitelist in config.json, using default pairs")
+                
     except Exception as e:
-        logger.warning(f"Could not load config.json, using default timeframe: {e}")
+        logger.warning(f"Could not load config.json, using defaults: {e}")
         config['timeframe'] = '15m'
     
     # Load SMC parameters from strategy JSON
@@ -463,12 +482,78 @@ def train_model():
             pickle.dump(model, f)
             
         logger.info(f"Model saved to {model_path}")
-        return True
+        return model  # Return model for per-symbol training
         
     except Exception as e:
         logger.error(f"Training Failed: {e}")
         return False
 
+def pair_to_filename(pair: str) -> str:
+    """Convert pair name to safe filename. E.g. 'BTC/USDT:USDT' -> 'BTC_USDT'"""
+    return pair.replace('/', '_').replace(':', '_').split('_USDT')[0] + '_USDT'
+
+
+def train_per_symbol():
+    """Train individual models for each symbol."""
+    global CONFIG
+    CONFIG = load_config()
+    
+    pairs = CONFIG['pairs']
+    logger.info(f"🚀 Per-Symbol Training Mode: {len(pairs)} pairs")
+    
+    successful = 0
+    failed = []
+    
+    for i, pair in enumerate(pairs, 1):
+        logger.info(f"\n{'='*60}")
+        logger.info(f"📊 Training [{i}/{len(pairs)}]: {pair}")
+        logger.info(f"{'='*60}")
+        
+        # Override pairs to train only this one
+        original_pairs = CONFIG['pairs']
+        CONFIG['pairs'] = [pair]
+        
+        try:
+            model = train_model()
+            
+            if model:
+                # Save with pair-specific name
+                pair_filename = pair_to_filename(pair)
+                model_path = Path(CONFIG['model_output_dir']) / f'smc_xgboost_{pair_filename}.pkl'
+                
+                with open(model_path, 'wb') as f:
+                    pickle.dump(model, f)
+                    
+                logger.info(f"✅ Model saved: {model_path}")
+                successful += 1
+            else:
+                failed.append(pair)
+                
+        except Exception as e:
+            logger.error(f"❌ Failed training {pair}: {e}")
+            failed.append(pair)
+        
+        # Restore pairs for next iteration
+        CONFIG['pairs'] = original_pairs
+    
+    # Summary
+    logger.info(f"\n{'='*60}")
+    logger.info(f"📈 TRAINING COMPLETE")
+    logger.info(f"{'='*60}")
+    logger.info(f"✅ Successful: {successful}/{len(pairs)}")
+    if failed:
+        logger.info(f"❌ Failed: {failed}")
+        
+    return successful > 0
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-    train_model()
+    
+    # Reload config to get latest settings
+    CONFIG = load_config()
+    
+    if CONFIG.get('per_symbol_models', False):
+        train_per_symbol()
+    else:
+        train_model()
