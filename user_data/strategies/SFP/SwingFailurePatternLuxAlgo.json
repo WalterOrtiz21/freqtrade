@@ -1,0 +1,31 @@
+{
+    "strategy_name": "SwingFailurePatternLuxAlgo",
+    "params": {
+        "roi": {
+            "0": 99
+        },
+        "stoploss": {
+            "stoploss": -0.03
+        },
+        "buy": {
+            "swing_length": 5,
+            "require_confirmation": true,
+            "enable_logging": false
+        },
+        "sell": {
+            "tp1_enabled": false,
+            "tp1_pct": 0.03,
+            "tp1_amount": 50.0,
+            "move_be_at_tp1": false
+        },
+        "protection": {},
+        "custom": {
+            "enable_logging": false
+        },
+        "trailing": {
+            "trailing_stop": false
+        }
+    },
+    "ft_stratparam_v": 1,
+    "export_time": "2026-01-05T17:52:00.000000+00:00"
+}

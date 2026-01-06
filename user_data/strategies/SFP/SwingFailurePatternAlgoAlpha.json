@@ -1,0 +1,32 @@
+{
+    "strategy_name": "SwingFailurePatternAlgoAlpha",
+    "params": {
+        "roi": {
+            "0": 99
+        },
+        "stoploss": {
+            "stoploss": -0.03
+        },
+        "buy": {
+            "pivot_length": 21,
+            "max_pivot_edge": 50,
+            "patience": 7,
+            "tolerance": 0.7
+        },
+        "sell": {
+            "tp1_enabled": true,
+            "tp1_pct": 0.03,
+            "tp1_amount": 50.0,
+            "move_be_at_tp1": false
+        },
+        "protection": {},
+        "custom": {
+            "enable_logging": false
+        },
+        "trailing": {
+            "trailing_stop": false
+        }
+    },
+    "ft_stratparam_v": 1,
+    "export_time": "2026-01-02T21:38:00.000000+00:00"
+}

@@ -31,7 +31,7 @@
             "tp1_pct": 0.03,
             "tp1_amount": 50.0,
             "move_be_at_tp1": true,
-            "tp2_pct": 0.60,
+            "tp2_pct": 99.60,
             "exit_on_opposite_choch": true
         },
         "protection": {},

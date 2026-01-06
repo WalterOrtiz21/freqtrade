@@ -1,0 +1,292 @@
+// This work is licensed under a Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0) https://creativecommons.org/licenses/by-nc-sa/4.0/
+// © LuxAlgo (Original Indicator)
+// Strategy Adaptation with TP/SL/BE by User
+
+//@version=5
+strategy('Swing Failure Pattern Strategy [LuxAlgo]', 'SFP Strategy', overlay=true, 
+  default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+  initial_capital=1000, commission_type=strategy.commission.percent, commission_value=0.04,
+  pyramiding=0, process_orders_on_close=true)
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Settings
+//---------------------------------------------------------------------------------------------------------------------{
+grpSFP     = "SFP Detection"
+len        = input.int(5, 'Swing Length', minval=1, group=grpSFP)
+bull       = input.bool(true, 'Bullish SFP (Long)', group=grpSFP)
+bear       = input.bool(true, 'Bearish SFP (Short)', group=grpSFP)
+reqConfirm = input.bool(false, 'Require Confirmation', group=grpSFP, 
+  tooltip='If enabled, wait for price to break the Opposite Point before entry. If disabled, enter immediately on SFP detection.')
+
+grpTP      = "Take Profit / Stop Loss"
+tp1Enabled = input.bool(true, 'Enable TP1 (Partial)', group=grpTP)
+tp1Pct     = input.float(2.0, 'TP1 Price Move %', minval=0.1, maxval=50, step=0.1, group=grpTP) / 100
+tp1Amount  = input.float(50.0, 'TP1 Close %', minval=1, maxval=100, step=1, group=grpTP)
+moveBE     = input.bool(true, 'Move SL to BE at TP1', group=grpTP)
+slPct      = input.float(3.0, 'Stop Loss %', minval=0.1, maxval=50, step=0.1, group=grpTP) / 100
+
+grpStyle   = "Style"
+dSwingLine = input.bool(true, 'Swing Lines', group=grpStyle)
+dOpposLine = input.bool(true, 'Confirmation Lines', group=grpStyle)
+dSFP_Line  = input.bool(true, 'SFP Wick', group=grpStyle)
+dSFP_Label = input.bool(true, 'SFP Label', group=grpStyle)
+colBl      = input.color(#089981, 'Bull Color', group=grpStyle)
+colBr      = input.color(#f23645, 'Bear Color', group=grpStyle)
+
+//---------------------------------------------------------------------------------------------------------------------}
+// UDT
+//---------------------------------------------------------------------------------------------------------------------{
+type piv
+    float swing_prc
+    int   swing_bix
+    float oppos_prc
+    int   oppos_bix
+    bool  active    
+    bool  confirmed 
+    line  swing_line 
+    line  oppos_line 
+    line  wicky_line
+    label wicky_label
+
+type swing 
+    int   bix 
+    float prc 
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Variables
+//---------------------------------------------------------------------------------------------------------------------{
+var swing swingH = swing.new() 
+var swing swingL = swing.new() 
+var piv pivH     = piv.new()
+var piv pivL     = piv.new()
+
+// Trade management
+var float entryPrice = na
+var float tp1Price   = na
+var float slPrice    = na
+var bool  tp1Hit     = false
+var bool  inLong     = false
+var bool  inShort    = false
+
+INV = color(na)
+n   = bar_index
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Pivot Detection
+//---------------------------------------------------------------------------------------------------------------------{
+ph = ta.pivothigh(len, 1)
+pl = ta.pivotlow(len, 1)
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Bearish SFP Detection
+//---------------------------------------------------------------------------------------------------------------------{
+if bear
+    // Update Swing High
+    if not na(ph)
+        swingH.bix := n - 1 
+        swingH.prc := ph 
+
+    sw = swingH.prc
+    bx = swingH.bix
+    
+    // SFP Detection: wick above swing, body closes below
+    if not na(sw) and high > sw and open < sw and close < sw
+        // Calculate opposite point (lowest low between pivot and now)
+        opposL = sw 
+        opposB = n
+        for i = 1 to n - bx - 1
+            if low[i] < opposL 
+                opposL := low[i]
+                opposB := n - i
+
+        // Clean up previous unconfirmed pattern
+        if not pivH.confirmed
+            pivH.swing_line.delete()
+            pivH.oppos_line.delete()
+            pivH.wicky_line.delete()                
+            pivH.wicky_label.delete()
+
+        pivH := piv.new(sw, bx, opposL, opposB, true, false)
+
+        // Draw visuals
+        if dSwingLine 
+            pivH.swing_line := line.new(bx, sw, n, sw, color=colBr)
+        if dOpposLine 
+            pivH.oppos_line := line.new(opposB, opposL, n, opposL, color=colBr, style=line.style_dotted)
+        if dSFP_Line 
+            pivH.wicky_line := line.new(n, high, n, sw, color=color.new(colBr, 50), width=3)
+        if dSFP_Label  
+            pivH.wicky_label := label.new(n, high, style=label.style_label_down, text='SFP', textcolor=colBr, color=INV, size=size.normal)
+        
+        // If NOT requiring confirmation, enter SHORT immediately
+        if not reqConfirm
+            strategy.entry('Short', strategy.short)
+            entryPrice := close
+            slPrice    := close * (1 + slPct)
+            tp1Price   := close * (1 - tp1Pct)
+            tp1Hit     := false
+            inShort    := true
+            inLong     := false
+
+    // Check for confirmation (price breaks opposite point)
+    if pivH.active and not pivH.confirmed 
+        pivH.swing_line.set_x2(n)
+        pivH.oppos_line.set_x2(n)
+
+        if close < pivH.oppos_prc
+            pivH.confirmed := true
+            
+            // Add confirmation arrow
+            if not na(pivH.wicky_label) // Check label exists
+                if pivH.wicky_label.get_x() == n  
+                    pivH.wicky_label.set_text('SFP\n▼')
+                else 
+                    label.new(n, high, style=label.style_label_down, text='▼', textcolor=colBr, color=INV, size=size.normal)
+            
+            // If requiring confirmation, enter SHORT now
+            if reqConfirm
+                strategy.entry('Short', strategy.short)
+                entryPrice := close
+                slPrice    := close * (1 + slPct)
+                tp1Price   := close * (1 - tp1Pct)
+                tp1Hit     := false
+                inShort    := true
+                inLong     := false
+
+    // Invalidation
+    if n - pivH.swing_bix > 500 or close > pivH.swing_prc
+        pivH.active := false 
+        if not pivH.confirmed
+            pivH.swing_line.delete() 
+            pivH.oppos_line.delete() 
+            pivH.wicky_line.delete() 
+            pivH.wicky_label.delete() 
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Bullish SFP Detection
+//---------------------------------------------------------------------------------------------------------------------{
+if bull
+    // Update Swing Low
+    if not na(pl)
+        swingL.bix := n - 1 
+        swingL.prc := pl 
+
+    sw = swingL.prc
+    bx = swingL.bix
+    
+    // SFP Detection: wick below swing, body closes above
+    if not na(sw) and low < sw and open > sw and close > sw
+        // Calculate opposite point (highest high between pivot and now)
+        opposH = sw 
+        opposB = n
+        for i = 1 to n - bx - 1
+            if high[i] > opposH 
+                opposH := high[i]
+                opposB := n - i
+
+        // Clean up previous unconfirmed pattern
+        if not pivL.confirmed
+            pivL.swing_line.delete()
+            pivL.oppos_line.delete()
+            pivL.wicky_line.delete()                
+            pivL.wicky_label.delete()
+
+        pivL := piv.new(sw, bx, opposH, opposB, true, false)
+
+        // Draw visuals
+        if dSwingLine 
+            pivL.swing_line := line.new(bx, sw, n, sw, color=colBl)
+        if dOpposLine 
+            pivL.oppos_line := line.new(opposB, opposH, n, opposH, color=colBl, style=line.style_dotted)
+        if dSFP_Line 
+            pivL.wicky_line := line.new(n, low, n, sw, color=color.new(colBl, 50), width=3)
+        if dSFP_Label  
+            pivL.wicky_label := label.new(n, low, style=label.style_label_up, text='SFP', textcolor=colBl, color=INV, size=size.normal)
+        
+        // If NOT requiring confirmation, enter LONG immediately
+        if not reqConfirm
+            strategy.entry('Long', strategy.long)
+            entryPrice := close
+            slPrice    := close * (1 - slPct)
+            tp1Price   := close * (1 + tp1Pct)
+            tp1Hit     := false
+            inLong     := true
+            inShort    := false
+
+    // Check for confirmation (price breaks opposite point)
+    if pivL.active and not pivL.confirmed 
+        pivL.swing_line.set_x2(n)
+        pivL.oppos_line.set_x2(n)
+
+        if close > pivL.oppos_prc
+            pivL.confirmed := true
+                
+            // Add confirmation arrow
+            if not na(pivL.wicky_label)
+                if pivL.wicky_label.get_x() == n  
+                    pivL.wicky_label.set_text('▲\nSFP')
+                else 
+                    label.new(n, low, style=label.style_label_up, text='▲', textcolor=colBl, color=INV, size=size.normal)
+            
+            // If requiring confirmation, enter LONG now
+            if reqConfirm
+                strategy.entry('Long', strategy.long)
+                entryPrice := close
+                slPrice    := close * (1 - slPct)
+                tp1Price   := close * (1 + tp1Pct)
+                tp1Hit     := false
+                inLong     := true
+                inShort    := false
+
+    // Invalidation
+    if n - pivL.swing_bix > 500 or close < pivL.swing_prc
+        pivL.active := false 
+        if not pivL.confirmed
+            pivL.swing_line.delete() 
+            pivL.oppos_line.delete() 
+            pivL.wicky_line.delete() 
+            pivL.wicky_label.delete() 
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Trade Management: TP1, BE, SL
+//---------------------------------------------------------------------------------------------------------------------{
+if strategy.position_size > 0
+    inLong := true
+    inShort := false
+    
+    // Check TP1
+    if tp1Enabled and not tp1Hit and high >= tp1Price
+        tp1Hit := true
+        strategy.close('Long', comment='TP1', qty_percent=tp1Amount)
+        if moveBE
+            slPrice := entryPrice
+    
+    // Exit SL
+    strategy.exit('Long Exit', 'Long', stop=slPrice)
+
+if strategy.position_size < 0
+    inShort := true
+    inLong := false
+    
+    // Check TP1
+    if tp1Enabled and not tp1Hit and low <= tp1Price
+        tp1Hit := true
+        strategy.close('Short', comment='TP1', qty_percent=tp1Amount)
+        if moveBE
+            slPrice := entryPrice
+
+    // Exit SL
+    strategy.exit('Short Exit', 'Short', stop=slPrice)
+
+if strategy.position_size == 0
+    inLong  := false
+    inShort := false
+    tp1Hit  := false
+
+//---------------------------------------------------------------------------------------------------------------------}
+// Plot TP/SL levels
+//---------------------------------------------------------------------------------------------------------------------{
+plot(strategy.position_size > 0 ? tp1Price : na, 'TP1 Long', color.new(colBl, 50), style=plot.style_linebr)
+plot(strategy.position_size > 0 ? slPrice : na, 'SL Long', color.new(colBr, 50), style=plot.style_linebr)
+plot(strategy.position_size < 0 ? tp1Price : na, 'TP1 Short', color.new(colBl, 50), style=plot.style_linebr)
+plot(strategy.position_size < 0 ? slPrice : na, 'SL Short', color.new(colBr, 50), style=plot.style_linebr)
