@@ -789,11 +789,17 @@ class SMCWithMLLuxAlgo(IStrategy):
                 # Close tp1_amount% of position
                 close_amount = trade.amount * (self.tp1_amount.value / 100.0)
                 sell_value = close_amount * current_rate
+                
+                # FIX: adjust_trade_position expects change in STAKE (margin), not notional value.
+                # Must divide by leverage to get the margin amount to remove.
+                stake_change = sell_value / trade.leverage
+                
                 logger.info(
                     f"TP1 for {trade.pair} ({'SHORT' if trade.is_short else 'LONG'}): "
-                    f"price moved {price_movement:.2%}, closing {self.tp1_amount.value:.0f}%"
+                    f"price moved {price_movement:.2%}, closing {self.tp1_amount.value:.0f}% "
+                    f"(Notional: {sell_value:.2f}, Margin: {stake_change:.2f})"
                 )
-                return (-sell_value, "TP1_partial")
+                return (-stake_change, "TP1_partial")
         
         return None
     
