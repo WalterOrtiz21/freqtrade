@@ -718,14 +718,16 @@ class SMCWithMLLuxAlgo(IStrategy):
     def custom_stoploss(self, pair: str, trade: Trade, current_time: datetime,
                         current_rate: float, current_profit: float, **kwargs) -> float:
         """
-        Breakeven logic.
-        If move_be_at_tp1 is True, moves stoploss to entry when price reaches TP1.
+        Break Even Logic with persistent state.
+        Once BE is activated (when price reaches TP1), the stoploss is fixed at entry price + small buffer for fees.
         """
         if not self.move_be_at_tp1.value:
             return 1  # Use default stoploss
         
-        # Calculate price movement (remove leverage from profit)
-        # Fix: Use max_rate (Long) or min_rate (Short) to detect if we HIT TP1 during the trade
+        # Check if BE was already activated (persistent across ticks)
+        be_activated = trade.get_custom_data('be_activated', default=False)
+        
+        # Calculate price movement to check if we should activate BE
         if trade.is_short:
             current_extremum = trade.min_rate if trade.min_rate is not None else current_rate
             price_movement = (trade.open_rate - current_extremum) / trade.open_rate
@@ -733,17 +735,29 @@ class SMCWithMLLuxAlgo(IStrategy):
             current_extremum = trade.max_rate if trade.max_rate is not None else current_rate
             price_movement = (current_extremum - trade.open_rate) / trade.open_rate
         
-        # If price moved past TP1 at any point, move stoploss to breakeven
-        if price_movement >= self.tp1_pct.value:
-            # Calculate stoploss at breakeven (0% profit)
-            if trade.is_short:
-                sl_relative = (current_rate - trade.open_rate) / current_rate
-            else:
-                sl_relative = (trade.open_rate - current_rate) / current_rate
+        # Activate BE if price moved past TP1 and not already activated
+        if not be_activated and price_movement >= self.tp1_pct.value:
+            trade.set_custom_data('be_activated', True)
+            be_activated = True
+            logger.info(f"BE activated for {pair} at price move {price_movement:.2%}")
+        
+        # If BE is activated, return fixed stoploss at entry + small buffer
+        if be_activated:
+            # Add 0.1% buffer to cover fees (in price terms)
+            fee_buffer_pct = 0.001  # 0.1% price buffer
             
-            # Only return if it improves position (locks profit)
-            if sl_relative < 0:
-                return sl_relative
+            if trade.is_short:
+                # For short, stop is ABOVE entry. We want stop at entry - buffer (price below entry = small profit)
+                target_stop = trade.open_rate * (1 - fee_buffer_pct)
+                # Stoploss relative to current rate
+                sl_relative = (target_stop - current_rate) / current_rate
+            else:
+                # For long, stop is BELOW entry. We want stop at entry + buffer (price above entry = small profit)
+                target_stop = trade.open_rate * (1 + fee_buffer_pct)
+                # Stoploss relative to current rate
+                sl_relative = (target_stop - current_rate) / current_rate
+            
+            return sl_relative
         
         return 1  # Use default stoploss
     

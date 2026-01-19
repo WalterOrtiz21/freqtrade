@@ -1,0 +1,29 @@
+{
+    "strategy_name": "TrendlinesWithBreaks",
+    "params": {
+        "roi": {
+            "0": 1.0
+        },
+        "stoploss": {
+            "stoploss": -0.03
+        },
+        "trailing": {
+            "trailing_stop": false,
+            "trailing_stop_positive": null,
+            "trailing_stop_positive_offset": 0.0,
+            "trailing_only_offset_is_reached": false
+        },
+        "buy": {
+            "length": 14,
+            "mult": 1.0,
+            "calc_method": "Stdev"
+        },
+        "sell": {
+            "tp1_pct": 0.03,
+            "tp1_enabled": true,
+            "tp1_amount": 50.0,
+            "be_enabled": true,
+            "be_trigger_pct": 0.02
+        }
+    }
+}

@@ -9,12 +9,12 @@
         },
         "buy": {
             "swing_length": 5,
-            "require_confirmation": true,
+            "require_confirmation": false,
             "enable_logging": false
         },
         "sell": {
             "tp1_enabled": false,
-            "tp1_pct": 0.03,
+            "tp1_pct": 0.02,
             "tp1_amount": 50.0,
             "move_be_at_tp1": false
         },

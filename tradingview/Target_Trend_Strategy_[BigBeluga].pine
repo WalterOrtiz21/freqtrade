@@ -1,0 +1,282 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © BigBeluga
+// Modified by Assistant for Strategy Implementation
+
+//@version=5
+strategy("Target Trend Strategy [BigBeluga]", overlay = true, max_lines_count = 100, max_labels_count = 100)
+
+// ――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+// ＩＮＰＵＴＳ
+// ――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+
+// --- Configuración Original del Indicador ---
+grp_ind = "Indicator Settings"
+length = input.int(10, "Trend Length", group=grp_ind)
+target_offset = input.int(0, "Set Targets Offset", group=grp_ind, tooltip="Ajusta la distancia de los targets.")
+
+// --- Configuración de la Estrategia ---
+grp_strat = "Strategy & Management"
+be_trigger = input.string("Target 1", "Trigger Breakeven at:", options=["Target 1", "Target 2", "Target 3", "Never"], group=grp_strat, tooltip="Elige qué Target mueve el Stop Loss al precio de entrada.")
+
+// Configuración de Salidas Parciales
+tp1_percent = input.float(33.0, "TP 1 Exit %", minval=0.0, maxval=100.0, step=5, group=grp_strat, inline="tp1")
+tp2_percent = input.float(33.0, "TP 2 Exit %", minval=0.0, maxval=100.0, step=5, group=grp_strat, inline="tp2")
+tp3_percent = input.float(0.0,  "TP 3 Exit %", minval=0.0, maxval=100.0, step=5, group=grp_strat, inline="tp3")
+
+// ――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+// ＣＡＬＣＵＬＡＴＩＯＮＳ (Lógica Original)
+// ――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+
+var bool trend    = na
+float trend_value = na
+
+// Colors
+color up_color = #06b690
+color dn_color = color.rgb(182, 112, 6)
+
+// ATR Seguro
+float safe_atr = nz(ta.sma(ta.atr(200), 200) * 0.8, ta.atr(14))
+series float atr_value = math.max(safe_atr, syminfo.mintick * 10)
+
+// Moving averages for trend detection
+series float sma_high  = ta.sma(high, length) + atr_value
+series float sma_low   = ta.sma(low, length) - atr_value
+color      plot_color = color.new(chart.fg_color, 80)
+
+// Determine trend based on crossovers
+if ta.crossover(close, sma_high)
+    trend := true
+if ta.crossunder(close, sma_low)
+    trend := false
+
+trend_value := switch
+    trend     => sma_low
+    not trend => sma_high
+
+trend_color = trend ? up_color : not trend ? dn_color : na
+
+// Signal detection
+bool signal_up   = ta.change(trend) and trend
+bool signal_down = ta.change(trend) and not trend
+
+// ――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+// ＳＴＲＡＴＥＧＹ ＬＯＧＩＣ
+// ――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+
+// Variables de estado de la operación
+var float entry_price = na
+var float sl_origin = na
+var bool  be_active = false
+var int   entry_bar = na  // Rastrear la vela de entrada para evitar BE prematuro
+
+// Variables para precios de Targets
+var float price_t1 = na
+var float price_t2 = na
+var float price_t3 = na
+
+// Lógica de distancias con PROTECCIÓN
+float m1 = math.max(0.5, 5.0 + target_offset)
+float m2 = math.max(1.0, 10.0 + target_offset * 2)
+float m3 = math.max(1.5, 15.0 + target_offset * 3)
+
+// --- ENTRADAS Y REVERSOS ---
+
+if signal_up
+    // Cancelar órdenes exit anteriores (importante en caso de reverso Short→Long)
+    strategy.cancel_all()
+    strategy.entry("Long", strategy.long)
+    
+    entry_price := close
+    // Asegurar que el SL esté por debajo del precio de entrada con un buffer mínimo
+    sl_origin   := math.min(sma_low, close - atr_value * 0.5)
+    // Targets arriba de la entrada
+    price_t1    := close + (atr_value * m1)
+    price_t2    := close + (atr_value * m2)
+    price_t3    := close + (atr_value * m3)
+    be_active   := false
+    entry_bar   := bar_index  // Guardar barra de entrada
+
+if signal_down
+    // Cancelar órdenes exit anteriores (importante en caso de reverso Long→Short)
+    strategy.cancel_all()
+    strategy.entry("Short", strategy.short)
+    
+    entry_price := close
+    // Asegurar que el SL esté por encima del precio de entrada con un buffer mínimo
+    sl_origin   := math.max(sma_high, close + atr_value * 0.5)
+    // Targets abajo de la entrada
+    price_t1    := close - (atr_value * m1)
+    price_t2    := close - (atr_value * m2)
+    price_t3    := close - (atr_value * m3)
+    be_active   := false
+    entry_bar   := bar_index  // Guardar barra de entrada
+
+// --- GESTIÓN DE POSICIÓN ---
+
+float current_sl = sl_origin
+
+if strategy.position_size != 0
+    // Lógica de activación de Breakeven (solo después de la vela de entrada)
+    if be_trigger != "Never" and not be_active and bar_index > entry_bar
+        if strategy.position_size > 0 // Long
+            if (be_trigger == "Target 1" and high >= price_t1) or (be_trigger == "Target 2" and high >= price_t2) or (be_trigger == "Target 3" and high >= price_t3)
+                be_active := true
+        else // Short
+            if (be_trigger == "Target 1" and low <= price_t1) or (be_trigger == "Target 2" and low <= price_t2) or (be_trigger == "Target 3" and low <= price_t3)
+                be_active := true
+    
+    // Si BE está activo, el SL es el precio de entrada
+    if be_active
+        current_sl := entry_price
+
+    string dir = strategy.position_size > 0 ? "Long" : "Short"
+    string id_prefix = strategy.position_size > 0 ? "L" : "S"
+    
+    // Textos para las etiquetas (Para saber si fue SL o TP)
+    string comment_sl_txt = be_active ? "Breakeven" : "Stop Loss"
+
+    // Target 1
+    if tp1_percent > 0
+        strategy.exit("TP1 " + id_prefix, dir, qty_percent = tp1_percent, limit = price_t1, stop = current_sl, comment_profit = "Take Profit 1", comment_loss = comment_sl_txt)
+    
+    // Target 2
+    if tp2_percent > 0
+        strategy.exit("TP2 " + id_prefix, dir, qty_percent = tp2_percent, limit = price_t2, stop = current_sl, comment_profit = "Take Profit 2", comment_loss = comment_sl_txt)
+        
+    // Target 3
+    if tp3_percent > 0
+        strategy.exit("TP3 " + id_prefix, dir, qty_percent = tp3_percent, limit = price_t3, stop = current_sl, comment_profit = "Take Profit 3", comment_loss = comment_sl_txt)
+
+    // Runner
+    strategy.exit("Runner " + id_prefix, dir, stop = current_sl, comment_loss = comment_sl_txt)
+
+
+// ――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+// ＶＩＳＵＡＬＳ (Original Indicators Logic)
+// ――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――
+
+type TrendTargets
+    line[] lines
+    label[] labels
+
+var TrendTargets targets_up   = TrendTargets.new(array.new_line(), array.new_label())
+var TrendTargets targets_down = TrendTargets.new(array.new_line(), array.new_label())
+
+method draw_targets(TrendTargets targets, bool signal1, bool signal2, bool direction)=>
+    float base           = direction ? sma_low : sma_high
+    // atr_multiplier es POSITIVO si direction=true (Long), NEGATIVO si direction=false (Short)
+    float atr_multiplier = atr_value * (direction ? 1 : -1)
+
+    var int count_up   = 0
+    var int count_down = 0
+
+    if trend 
+        count_down := 0
+        count_up += 1
+    if not trend 
+        count_down += 1
+        count_up := 0
+
+    int count = direction ? count_up : count_down
+
+    if signal1
+        // Multiplicamos el ATR (positivo o negativo) por la distancia (siempre positiva)
+        float target_len1 = atr_multiplier * math.max(0.5, 5.0 + target_offset)
+        float target_len2 = atr_multiplier * math.max(1.0, 10.0 + target_offset * 2)
+        float target_len3 = atr_multiplier * math.max(1.5, 15.0 + target_offset * 3)
+                
+        for line_i in targets.lines
+            int i = targets.lines.indexof(line_i)
+            label.delete(targets.labels.get(i))
+            line.delete(line_i)
+
+        array.clear(targets.lines)
+        array.clear(targets.labels)
+
+        // En Short, target_len es negativo, así que close + (-val) = precio más bajo. Correcto.
+        line stop_loss_line = line.new(bar_index, base, bar_index + 20, base)
+        line entry_line     = line.new(bar_index, close, bar_index + 20, close)
+        line target1_line   = line.new(bar_index, close + target_len1, bar_index + 20, close + target_len1)
+        line target2_line   = line.new(bar_index, close + target_len2, bar_index + 20, close + target_len2)
+        line target3_line   = line.new(bar_index, close + target_len3, bar_index + 20, close + target_len3)
+
+        linefill.new(stop_loss_line, entry_line, color.new(dn_color, 95))
+        linefill.new(entry_line, target3_line, color.new(up_color, 95))
+
+        label stop_loss_label = label.new(bar_index + 20, base, str.tostring(math.round(base, 2)))
+        label entry_label     = label.new(bar_index + 20, close, str.tostring(math.round(close, 2)))
+        label target1_label   = label.new(bar_index + 20, close + target_len1, "１ - " + str.tostring(math.round(close + target_len1, 2)))
+        label target2_label   = label.new(bar_index + 20, close + target_len2, "２ - " + str.tostring(math.round(close + target_len2, 2)))
+        label target3_label   = label.new(bar_index + 20, close + target_len3, "３ - " + str.tostring(math.round(close + target_len3, 2)))
+
+        targets.lines.push(stop_loss_line)
+        targets.lines.push(entry_line)
+        targets.lines.push(target1_line)
+        targets.lines.push(target2_line)
+        targets.lines.push(target3_line)
+
+        targets.labels.push(stop_loss_label)
+        targets.labels.push(entry_label)
+        targets.labels.push(target1_label)
+        targets.labels.push(target2_label)
+        targets.labels.push(target3_label)
+
+        for lbl in targets.labels
+            int  idx      = targets.labels.indexof(lbl)
+            line line_ref = targets.lines.get(idx)
+            lbl.set_style(label.style_label_left)
+            lbl.set_color(chart.fg_color)
+            lbl.set_textcolor(chart.bg_color)
+            line_ref.set_color(chart.fg_color)
+
+    if signal2
+        for line_i in targets.lines
+            int i = targets.lines.indexof(line_i)
+            label.delete(targets.labels.get(i))
+            line.delete(line_i)
+
+        array.clear(targets.lines)
+        array.clear(targets.labels)
+
+    for line_i in targets.lines
+        int   idx           = targets.lines.indexof(line_i)
+        label lbl_ref       = targets.labels.get(idx)
+        label first_label   = targets.labels.first()
+        line  entry_line    = targets.lines.get(1)
+        label entry_label   = targets.labels.get(1)
+
+        // Targets Logic Check
+        if high >= line.get_y2(line_i) and low <= line.get_y2(line_i) and count > 1
+            lbl_ref.set_style(label.style_label_left)
+            lbl_ref.set_color(chart.fg_color)
+            lbl_ref.set_text("   ✔   ")
+            lbl_ref.set_textcolor(#16ac09)
+            line_i.set_style(line.style_dashed)
+            line_i.set_color(plot_color)
+
+        // Stop Loss Check
+        if high >= line.get_y2(targets.lines.first()) and low <= line.get_y2(targets.lines.first()) and count > 1
+            first_label.set_text("  ✖  ")
+
+        if direction ? trend : not trend
+            first_label.set_textcolor(#db1e1e)
+            line_i.set_x2(bar_index + 20)
+            targets.lines.first().set_color(#db1e1e)
+            
+            label.set_x(targets.labels.get(idx), bar_index + 20)
+
+            entry_line.set_style(line.style_solid)
+            entry_line.set_color(up_color)
+            entry_label.set_text("◉ " + str.tostring(math.round(line.get_y2(entry_line), 2)))
+            entry_label.set_textcolor(#1d80dd)
+
+targets_down.draw_targets(signal_down, signal_up, false)
+targets_up.draw_targets(signal_up, signal_down, true)
+
+plotcandle(open, high, low, close, title = 'Title', color = trend_color, wickcolor = trend_color, bordercolor = trend_color)
+
+float sigUp = signal_up ? low - atr_value*2 : na
+float sigDn = signal_down ? high + atr_value*2 : na
+
+plotshape(sigUp,   "", shape.triangleup, location.absolute, up_color, size = size.tiny)
+plotshape(sigDn, "", shape.triangledown, location.absolute, dn_color, size = size.tiny)
