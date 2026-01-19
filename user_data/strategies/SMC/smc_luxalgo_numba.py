@@ -283,52 +283,54 @@ def _smc_zones_kernel(
     fvg_bull_top: np.ndarray, fvg_bull_btm: np.ndarray,
     fvg_bear_top: np.ndarray, fvg_bear_btm: np.ndarray,
     n: int
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray,
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray,
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray  # NEW: Breakers
+]:
     
-    # Active Zone Output (Most relevant one at each index)
-    # We reconstruct the "Zone Memory" feature here.
-    # Logic: At index i, what is the nearest unmitigated OB?
-    
+    # --- Output Arrays ---
+    # OBs
     act_bull_ob_top = np.zeros(n)
     act_bull_ob_btm = np.zeros(n)
     act_bear_ob_top = np.zeros(n)
     act_bear_ob_btm = np.zeros(n)
     
+    # FVGs
     act_bull_fvg_top = np.zeros(n)
     act_bull_fvg_btm = np.zeros(n)
     act_bear_fvg_top = np.zeros(n)
     act_bear_fvg_btm = np.zeros(n)
     
-    # Lists to track active zones (Fixed size arrays or dynamic?)
-    # Numba lists are supported but can be slow if large.
-    # Since we need to iterate "active" ones, a simple list is easiest.
-    # We store index of creation.
+    # Breakers (NEW)
+    act_brk_bull_top = np.zeros(n)
+    act_brk_bull_btm = np.zeros(n)
+    act_brk_bear_top = np.zeros(n)
+    act_brk_bear_btm = np.zeros(n)
     
-    # Using arrays as stacks (max 100 active zones?) 
-    # Let's trust list performance for now or use boolean mask... 
-    # Actually, we can just iterate backwards? No, forward.
-    
-    # Stack structure: [index, top, bottom]
-    # We split into separate lists for types
-    
-    
-    # Lists of indices for ACTIVE zones
-    # Fix untyped list error: Initialize as typed lists
-    # We use a trick: [int64(x) for x in range(0)] creates an empty list but typed as int64
+    # --- State Lists (Indices) ---
     bull_ob_idxs = [np.int64(x) for x in range(0)]
     bear_ob_idxs = [np.int64(x) for x in range(0)]
+    
     bull_fvg_idxs = [np.int64(x) for x in range(0)]
     bear_fvg_idxs = [np.int64(x) for x in range(0)]
+    
+    # Breaker Lists
+    # Bullish Breaker = Old Bearish OB that was broken up (Now Support)
+    bull_brk_idxs = [np.int64(x) for x in range(0)]
+    
+    # Bearish Breaker = Old Bullish OB that was broken down (Now Resistance)
+    bear_brk_idxs = [np.int64(x) for x in range(0)]
     
     for i in range(n):
         c_high = high[i]
         c_low = low[i]
+        c_close = close[i]
         
-        # 1. Check Mitigation (Remove from list if mitigated)
-        # We do this BEFORE adding new ones, so new ones don't self-mitigate immediately
+        # --- 1. Process Existing Zones (Mitigation / Flip) ---
         
-        # Bullish OBs (Mitigated if Low < Bottom)
-        # Use a temp list for surviving zones
+        # A) Bullish OBs (Support)
+        # Broken if Close < Bottom -> Becomes Bearish Breaker (Resistance)
         next_bull_obs = [np.int64(x) for x in range(0)]
         best_bull_ob_idx = -1
         
@@ -336,62 +338,72 @@ def _smc_zones_kernel(
             top = ob_bull_top[idx]
             btm = ob_bull_btm[idx]
             
-            # Check mitigation (Standard: Price breaks below bottom)
-            # Or simpler: Wick checks?
-            if c_low < btm:
-                pass # Mitigated/Broken, drop it
+            if c_close < btm:
+                # BROKEN! Flux to Bearish Breaker
+                bear_brk_idxs.append(idx)
+            elif c_low < btm:
+                 # WICKED below (but closed above)? 
+                 # Standard SMC: If body closes below, it's invalid. 
+                 # If just wick, it's still valid or mitigated? 
+                 # User says: "Mitiga rompiendo su base (por cuerpo, mecha o media)".
+                 # "Un OB se convierte en Breaker cuando el precio lo mitiga rompiendo su base... si el precio lo rompe a la baja"
+                 # Let's stick to CLOSE for a confirm break to keep it stable.
+                 # If Close < Bottom -> Flip.
+                 # If Low < Bottom but Close > Bottom -> Just wick? Keep it? 
+                 # Let's keep it for now unless closed below.
+                 next_bull_obs.append(idx)
+                 best_bull_ob_idx = idx
             else:
-                next_bull_obs.append(idx)
-                # Track "best" (nearest/most recent) for feature output
-                best_bull_ob_idx = idx
-        
+                 next_bull_obs.append(idx)
+                 best_bull_ob_idx = idx
         bull_ob_idxs = next_bull_obs
         
-        # Bearish OBs (Mitigated if High > Top)
+        # B) Bearish OBs (Resistance)
+        # Broken if Close > Top -> Becomes Bullish Breaker (Support)
         next_bear_obs = [np.int64(x) for x in range(0)]
         best_bear_ob_idx = -1
+        
         for idx in bear_ob_idxs:
             top = ob_bear_top[idx]
             btm = ob_bear_btm[idx]
-            if c_high > top:
-                pass 
+            
+            if c_close > top:
+                # BROKEN! Flip to Bullish Breaker
+                bull_brk_idxs.append(idx)
             else:
                 next_bear_obs.append(idx)
                 best_bear_ob_idx = idx
         bear_ob_idxs = next_bear_obs
         
-        # FVGs (Mitigated if price fills gap)
-        # Bullish Gap (Low > Top). Mitigated if Low <= Top.
-        # Wait, FVG definition: Top=Low[i], Bottom=High[i-2].
-        # Gap is between Bottom and Top. 
-        # Mitigated if Price dips INTO it? Or FILLS it? 
-        # LuxAlgo strategy "mitigates" when price touches.
-        # Bull FVG: Top is the upper boundary (created by current low). 
-        # Wait, standard FVG: The gap is between Candle 3 Low and Candle 1 High.
-        # My kernel saved: Top=Low[i], Btm=High[i-2].
-        # So "Top" is the higher price. "Btm" is lower.
-        # Mitigation: Price comes DOWN to touch Top.
+        # C) FVGs (Standard mitigation)
+        # Bull FVG: Broken if Close < Low? Or just touched? 
+        # Usually FVG is one-time use or stays until filled?
+        # User: "Breaker FVG... cuando el precio entra y cruza su límite inválido"
+        # Let's keep standard FVG logic for now: Remove if filled.
+        # Bull FVG (Gap b/w btm and top). Filled if c_low <= top?
         
         next_bull_fvgs = [np.int64(x) for x in range(0)]
         best_bull_fvg_idx = -1
         for idx in bull_fvg_idxs:
             top = fvg_bull_top[idx]
-            btm = fvg_bull_btm[idx]
+            # btm = fvg_bull_btm[idx] # Unused for mitigation check
             if c_low <= top:
-                # Touched/Filled. 
-                pass
+                # Filled/Mitigated?
+                # User says "Breaker FVG" also exists.
+                # If it crosses invalid limit (Top), becomes Breaker FVG (Resistance).
+                # Bull FVG (Support) -> Broken -> Bearish Breaker FVG (Resistance).
+                # Not implementing Breaker FVG yet to save complexity, just standard FVG.
+                # We just drop it.
+                pass 
             else:
                 next_bull_fvgs.append(idx)
                 best_bull_fvg_idx = idx
         bull_fvg_idxs = next_bull_fvgs
         
-        # Bearish FVG: Top=Low[i-2], Btm=High[i].
-        # Top > Btm. Gap is between them.
-        # Mitigation: Price comes UP to touch Btm.
         next_bear_fvgs = [np.int64(x) for x in range(0)]
         best_bear_fvg_idx = -1
         for idx in bear_fvg_idxs:
-            top = fvg_bear_top[idx]
+            # top = fvg_bear_top[idx]
             btm = fvg_bear_btm[idx]
             if c_high >= btm:
                 pass
@@ -400,8 +412,47 @@ def _smc_zones_kernel(
                 best_bear_fvg_idx = idx
         bear_fvg_idxs = next_bear_fvgs
         
-        # 2. Add new zones created at this index
-        # And implicitly they are the "best" (most recent) if created now
+        # D) Breakers Validation
+        # Bullish Breaker (Support): Created from broken Bearish OB.
+        # Limits: Top/Bottom of original Bear IB.
+        # Invalidated if Close < Bottom (Broken completely back down).
+        
+        next_bull_brks = [np.int64(x) for x in range(0)]
+        best_bull_brk_idx = -1
+        for idx in bull_brk_idxs:
+            # It was a Bear OB, so use bear arrays
+            top = ob_bear_top[idx]
+            btm = ob_bear_btm[idx]
+            
+            if c_close < btm:
+                # Broken again (Failed support) - Delete
+                pass
+            else:
+                next_bull_brks.append(idx)
+                best_bull_brk_idx = idx
+        bull_brk_idxs = next_bull_brks
+        
+        # Bearish Breaker (Resistance): Created from broken Bullish OB.
+        # Limits: Top/Bottom of original Bull OB.
+        # Invalidated if Close > Top (Broken completely back up).
+        
+        next_bear_brks = [np.int64(x) for x in range(0)]
+        best_bear_brk_idx = -1
+        for idx in bear_brk_idxs:
+            # It was a Bull OB
+            top = ob_bull_top[idx]
+            btm = ob_bull_btm[idx]
+            
+            if c_close > top:
+                # Broken again (Failed resistance) - Delete
+                pass
+            else:
+                next_bear_brks.append(idx)
+                best_bear_brk_idx = idx
+        bear_brk_idxs = next_bear_brks
+            
+        
+        # --- 2. Add New Zones (OBs/FVGs) ---
         if not np.isnan(ob_bull_top[i]): 
             bull_ob_idxs.append(i)
             best_bull_ob_idx = i
@@ -418,7 +469,7 @@ def _smc_zones_kernel(
             bear_fvg_idxs.append(i)
             best_bear_fvg_idx = i
         
-        # 3. Write "Active" features for this bar
+        # --- 3. Write Active Outputs ---
         if best_bull_ob_idx != -1:
             act_bull_ob_top[i] = ob_bull_top[best_bull_ob_idx]
             act_bull_ob_btm[i] = ob_bull_btm[best_bull_ob_idx]
@@ -434,12 +485,25 @@ def _smc_zones_kernel(
         if best_bear_fvg_idx != -1:
             act_bear_fvg_top[i] = fvg_bear_top[best_bear_fvg_idx]
             act_bear_fvg_btm[i] = fvg_bear_btm[best_bear_fvg_idx]
+            
+        # Breakers Output
+        if best_bull_brk_idx != -1:
+            # Bullish Breaker comes from Bear OB array
+            act_brk_bull_top[i] = ob_bear_top[best_bull_brk_idx]
+            act_brk_bull_btm[i] = ob_bear_btm[best_bull_brk_idx]
+            
+        if best_bear_brk_idx != -1:
+            # Bearish Breaker comes from Bull OB array
+            act_brk_bear_top[i] = ob_bull_top[best_bear_brk_idx]
+            act_brk_bear_btm[i] = ob_bull_btm[best_bear_brk_idx]
 
     return (
         act_bull_ob_top, act_bull_ob_btm,
         act_bear_ob_top, act_bear_ob_btm,
         act_bull_fvg_top, act_bull_fvg_btm,
-        act_bear_fvg_top, act_bear_fvg_btm
+        act_bear_fvg_top, act_bear_fvg_btm,
+        act_brk_bull_top, act_brk_bull_btm,
+        act_brk_bear_top, act_brk_bear_btm
     )
 
 # =============================================================================
@@ -468,16 +532,18 @@ class SMCLuxAlgoNumba:
             i_trend, s_trend,
             ob_bt_raw, ob_bb_raw, ob_bet_raw, ob_beb_raw,
             fvg_bt_raw, fvg_bb_raw, fvg_bet_raw, fvg_beb_raw,
-            sw_high, sw_low # NEW Output
+            sw_high, sw_low
         ) = _smc_signals_kernel(
             self.high, self.low, self.close, self.n,
             self.internal_length, self.swing_length
         )
         
-        # 2. Run Zone Kernel (Active Memory)
+        # 2. Run Zone Kernel (Active Memory + Breakers)
         (
             act_ob_bt, act_ob_bb, act_ob_bet, act_ob_beb,
-            act_fvg_bt, act_fvg_bb, act_fvg_bet, act_fvg_beb
+            act_fvg_bt, act_fvg_bb, act_fvg_bet, act_fvg_beb,
+            act_brk_bull_t, act_brk_bull_b,
+            act_brk_bear_t, act_brk_bear_b
         ) = _smc_zones_kernel(
             self.high, self.low, self.close,
             ob_bt_raw, ob_bb_raw, ob_bet_raw, ob_beb_raw,
@@ -505,20 +571,25 @@ class SMCLuxAlgoNumba:
         # New P/D Logic Levels
         df['swing_high'] = sw_high
         df['swing_low'] = sw_low
-        # Calculate Equilibrium (0.5 level)
-        # Note: sw_high/low might be NaN at the start.
         df['equilibrium'] = (df['swing_high'] + df['swing_low']) / 2.0
         
-        # Active Zones (For ML & Plotting)
+        # Active Zones (OBs)
         df['active_bullish_ob_top'] = act_ob_bt
         df['active_bullish_ob_bottom'] = act_ob_bb
         df['active_bearish_ob_top'] = act_ob_bet
         df['active_bearish_ob_bottom'] = act_ob_beb
         
+        # Active Zones (FVGs)
         df['active_bullish_fvg_top'] = act_fvg_bt
         df['active_bullish_fvg_bottom'] = act_fvg_bb
         df['active_bearish_fvg_top'] = act_fvg_bet
         df['active_bearish_fvg_bottom'] = act_fvg_beb
+        
+        # Active Zones (Breakers)
+        df['active_bullish_breaker_top'] = act_brk_bull_t
+        df['active_bullish_breaker_bottom'] = act_brk_bull_b
+        df['active_bearish_breaker_top'] = act_brk_bear_t
+        df['active_bearish_breaker_bottom'] = act_brk_bear_b
         
         return df
 

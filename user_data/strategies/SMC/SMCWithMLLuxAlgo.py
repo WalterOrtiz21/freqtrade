@@ -75,7 +75,7 @@ class SMCWithMLLuxAlgo(IStrategy):
     # These are BASE values for 1x leverage - will be multiplied by leverage
     minimal_roi = {"0": 1.0}  # Disabled, using custom exits
     stoploss = -0.03  # Base: -3% price movement (adjusted by leverage in bot_start)
-    timeframe = '1h'
+    timeframe = '15m'
     
     trailing_stop = False
     trailing_stop_positive = 0.005  # 0.5% price movement
@@ -224,12 +224,24 @@ class SMCWithMLLuxAlgo(IStrategy):
             self.trailing_stop_positive = raw_trailing_pos * config_leverage
             self.trailing_stop_positive_offset = raw_trailing_offset * config_leverage
         
+        
         logger.info(
-            f"SMCWithMLLuxAlgo Configured:"
+            f"SMCWithMLLuxAlgo (Neptune) Configured:"
             f"\n  Leverage: {config_leverage}x"
             f"\n  Base Stoploss (Price): {raw_stoploss:.2%}"
             f"\n  Effective Stoploss (PnL): {self.stoploss:.2%}"
+            f"\n  Structure: MTF (15m) + HTF (4h)"
         )
+
+    def informative_pairs(self):
+        """
+        Define pairs to load. We need HTF (4h) for trend context.
+        """
+        pairs = self.dp.current_whitelist()
+        # Ensure we have 4h and 1h candles
+        informative_pairs = [(pair, '1h') for pair in pairs]
+        informative_pairs += [(pair, '4h') for pair in pairs]
+        return informative_pairs
 
     
     def _load_ml_model(self):
@@ -316,6 +328,7 @@ class SMCWithMLLuxAlgo(IStrategy):
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """Calculate SMC indicators using LuxAlgo-style library."""
         
+        # --- 1. MTF (15m) Calculations ---
         # Calculate SMC signals (Numba)
         # Returns signals AND active zones
         smc = SMCLuxAlgo(
@@ -329,15 +342,45 @@ class SMCWithMLLuxAlgo(IStrategy):
         for col in signals.columns:
             dataframe[col] = signals[col].values
             
+        # --- 2. HTF (4h) Calculations ---
+        # Get Informative 4h Pair
+        if self.dp:
+            inf_4h = self.dp.get_pair_dataframe(metadata['pair'], '4h')
+            # Calculate SMC on 4h
+            smc_4h = SMCLuxAlgo(
+                inf_4h,
+                internal_length=self.internal_length.value, # Use same params or different? Usually HTF is same logic on larger bars.
+                swing_length=self.swing_length.value,
+            )
+            signals_4h = smc_4h.get_signals()
+            
+            # We only need the Trend and maybe major zones
+            # Rename columns to avoid collision
+            inf_4h['4h_swing_trend'] = signals_4h['swing_trend']
+            inf_4h['4h_internal_trend'] = signals_4h['internal_trend']
+            
+            # Merge 4h Trend into 15m dataframe (FFILL to propagate latest 4h state)
+            # Use merge_informative_pair or simple merge_asof?
+            # Freqtrade standard is using dataframe.merge relying on 'date'
+            
+            # Prepare for merge
+            inf_4h = inf_4h[['date', '4h_swing_trend', '4h_internal_trend']].copy()
+            
+            # Merge
+            dataframe = pd.merge(dataframe, inf_4h, on='date', how='left')
+            dataframe['4h_swing_trend'] = dataframe['4h_swing_trend'].ffill()
+            dataframe['4h_internal_trend'] = dataframe['4h_internal_trend'].ffill()
+            
         # Add ML Features (Context & Technicals)
         dataframe = self._add_ml_features(dataframe)
         
         # Log summary
-        logger.info(
-            f"SMC LuxAlgo indicators for {metadata['pair']}: "
-            f"Internal BOS/CHoCH={signals['internal_bos_bullish'].sum() + signals['internal_bos_bearish'].sum() + signals['internal_choch_bullish'].sum() + signals['internal_choch_bearish'].sum()}, "
-            f"Swing BOS/CHoCH={signals['swing_bos_bullish'].sum() + signals['swing_bos_bearish'].sum() + signals['swing_choch_bullish'].sum() + signals['swing_choch_bearish'].sum()}"
-        )
+        if self.dp: # Only log if not backtesting or sparse
+            logger.info(
+                f"SMC LuxAlgo indicators for {metadata['pair']}: "
+                f"MTF Trend Valid={dataframe['swing_trend'].notna().sum()}/{len(dataframe)} "
+                f"HTF Trend Valid={dataframe.get('4h_swing_trend', pd.Series()).notna().sum()}/{len(dataframe)}"
+            )
         
         return dataframe
 
@@ -596,6 +639,24 @@ class SMCWithMLLuxAlgo(IStrategy):
             if self.require_ob_zone.value:
                 bullish_zone |= in_bullish_ob
                 bearish_zone |= in_bearish_ob
+                
+                # Add Breakers to OB logic (User description: Breaker OB is a key entry point)
+                if 'active_bullish_breaker_top' in dataframe.columns:
+                     in_bull_breaker = (
+                        (dataframe['active_bullish_breaker_top'] > 0) & 
+                        # Price touching breaker (Breaker acts as Support)
+                        (dataframe['low'] <= dataframe['active_bullish_breaker_top']) & 
+                        (dataframe['high'] >= dataframe['active_bullish_breaker_bottom'])
+                     )
+                     bullish_zone |= in_bull_breaker
+                     
+                     in_bear_breaker = (
+                        (dataframe['active_bearish_breaker_top'] > 0) & 
+                        # Price touching breaker (Breaker acts as Resistance)
+                        (dataframe['high'] >= dataframe['active_bearish_breaker_bottom']) &
+                        (dataframe['low'] <= dataframe['active_bearish_breaker_top'])
+                     )
+                     bearish_zone |= in_bear_breaker
             
             if self.require_fvg_zone.value:
                 bullish_zone |= in_bullish_fvg
@@ -621,11 +682,25 @@ class SMCWithMLLuxAlgo(IStrategy):
                 logger.warning(f"   Active Bull OB Candles: {(dataframe['active_bullish_ob_top'] > 0).sum()}")
                 logger.warning(f"   Active Bull FVG Candles: {(dataframe['active_bullish_fvg_top'] > 0).sum()}")
         
-        # ===== TREND FILTER (Optional) =====
+        # ===== TREND FILTER (Neptune Logic: HTF Alignment) =====
+        # HTF (4h) Filter:
+        # Long only if 4h is Bullish (1) or Neutral/Internal-Bullish
+        # Strict mode: 4h Swing Trend must be 1.
+        
         if self.trade_with_trend.value:
-            # Use swing trend for filtering
-            bullish_trend_ok = dataframe['swing_trend'] == 1
-            bearish_trend_ok = dataframe['swing_trend'] == -1
+            # Check if we have 4h data
+            if '4h_swing_trend' in dataframe.columns:
+                # Long: HTF is Bullish
+                htf_bull = dataframe['4h_swing_trend'] == 1
+                # Short: HTF is Bearish
+                htf_bear = dataframe['4h_swing_trend'] == -1
+                
+                bullish_trend_ok = htf_bull
+                bearish_trend_ok = htf_bear
+            else:
+                # Fallback to local trend if 4h missing (backtest safety)
+                bullish_trend_ok = dataframe['swing_trend'] == 1
+                bearish_trend_ok = dataframe['swing_trend'] == -1
         else:
             bullish_trend_ok = True
             bearish_trend_ok = True
