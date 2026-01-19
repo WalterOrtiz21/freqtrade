@@ -515,7 +515,7 @@ EXCHANGES = {
         ],
     },
     "hyperliquid": {
-        "pair": "UBTC/USDC",
+        "pair": "BTC/USDC",
         "stake_currency": "USDC",
         "hasQuoteVolume": False,
         "timeframe": "30m",
