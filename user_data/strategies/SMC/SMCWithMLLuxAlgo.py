@@ -126,6 +126,13 @@ class SMCWithMLLuxAlgo(IStrategy):
     # Lookback for recent signals - Pine uses immediate alerts (current bar)
     # kept slightly > 1 to avoid missing signals due to candle closing timing
     signal_lookback = IntParameter(1, 3, default=1, space='buy', optimize=True)
+    
+    # NEW: Toggle for HTF (4h) Filter
+    use_htf_filter = BooleanParameter(default=True, space='buy', optimize=True)
+    
+    # NEW: Dynamic Stoploss Toggle & Offset
+    use_dynamic_stoploss = BooleanParameter(default=True, space='sell', optimize=True)
+    sl_buffer_pct = DecimalParameter(0.001, 0.01, default=0.002, decimals=3, space='sell', optimize=True)
 
     # ==========================================================================
     # ML PARAMETERS (Placeholder)
@@ -661,10 +668,58 @@ class SMCWithMLLuxAlgo(IStrategy):
             if self.require_fvg_zone.value:
                 bullish_zone |= in_bullish_fvg
                 bearish_zone |= in_bearish_fvg
+
+            # --- DYNAMIC STOPLOSS CALCULATION (For DataFrame) ---
+            # We calculate what the SL PRICE would be for this candle if we entered.
+            # Long SL = Lowest Support Zone Bottom - offset
+            # Short SL = Highest Resistance Zone Top + offset
+            
+            # Helper to get "Best" zone bottom for Long (OB or Breaker)
+            # We want the zone that is "active" and closest to price?
+            # Actually, we want the zone that is "holding" the price.
+            # If multiple overlapping, use the lowest bottom for safety?
+            # Or the bottom of the one we are touching.
+            
+            # Simple approach: Max of available support zone bottoms? No, SL is below bottom.
+            # So, Min of bottoms?
+            
+            # Create temporary series
+            bull_sl_price = pd.Series(np.nan, index=dataframe.index)
+            bear_sl_price = pd.Series(np.nan, index=dataframe.index)
+            
+            # Find relevant zone limit for SL
+            # Bull OB Bottom
+            mask_bull_ob = (dataframe['active_bullish_ob_bottom'] > 0)
+            bull_sl_price[mask_bull_ob] = dataframe.loc[mask_bull_ob, 'active_bullish_ob_bottom']
+            
+            # Bull Breaker Bottom (might overwrite if present - usually we touch one or other)
+            if 'active_bullish_breaker_bottom' in dataframe.columns:
+                mask_bull_brk = (dataframe['active_bullish_breaker_bottom'] > 0)
+                # If we have both, take the lower one?
+                # Let's take the one we are touching if possible.
+                # Simplification: Assume 'active' columns already represent the relevant nearest zone.
+                # If both exist, take the lower bottom to be safe.
+                bull_sl_price = np.fmin(bull_sl_price, dataframe['active_bullish_breaker_bottom'])
+
+            # Apply offset
+            dataframe['sl_long_price'] = bull_sl_price * (1 - self.sl_buffer_pct.value)
+            
+            # Same for Shorts (Top + offset)
+            bear_sl_price[mask_bull_ob] = np.nan # reset? logic error in thought, new series
+            bear_sl_price = pd.Series(np.nan, index=dataframe.index)
+            
+            mask_bear_ob = (dataframe['active_bearish_ob_top'] > 0)
+            bear_sl_price[mask_bear_ob] = dataframe.loc[mask_bear_ob, 'active_bearish_ob_top']
+            
+            if 'active_bearish_breaker_top' in dataframe.columns:
+                 bear_sl_price = np.fmax(bear_sl_price, dataframe['active_bearish_breaker_top'])
+            
+            dataframe['sl_short_price'] = bear_sl_price * (1 + self.sl_buffer_pct.value)
             
             if self.require_premium_discount.value:
                 bullish_zone |= in_discount
                 bearish_zone |= in_premium
+                
         else:
             # No zone filters enabled - all pass
             bullish_zone = pd.Series(True, index=dataframe.index)
@@ -687,20 +742,24 @@ class SMCWithMLLuxAlgo(IStrategy):
         # Long only if 4h is Bullish (1) or Neutral/Internal-Bullish
         # Strict mode: 4h Swing Trend must be 1.
         
+        # ===== TREND FILTER (Neptune Logic: HTF Alignment) =====
+        # HTF (4h) Filter:
+        # Long only if 4h is Bullish (1) or Neutral/Internal-Bullish
+        # Strict mode: 4h Swing Trend must be 1.
+        
         if self.trade_with_trend.value:
-            # Check if we have 4h data
-            if '4h_swing_trend' in dataframe.columns:
-                # Long: HTF is Bullish
-                htf_bull = dataframe['4h_swing_trend'] == 1
-                # Short: HTF is Bearish
-                htf_bear = dataframe['4h_swing_trend'] == -1
-                
-                bullish_trend_ok = htf_bull
-                bearish_trend_ok = htf_bear
-            else:
-                # Fallback to local trend if 4h missing (backtest safety)
-                bullish_trend_ok = dataframe['swing_trend'] == 1
-                bearish_trend_ok = dataframe['swing_trend'] == -1
+            # Local Trend Filter
+            bullish_trend_ok = dataframe['swing_trend'] == 1
+            bearish_trend_ok = dataframe['swing_trend'] == -1
+            
+            # HTF (4h) Filter - Now Optional
+            if self.use_htf_filter.value:
+                if '4h_swing_trend' in dataframe.columns:
+                    htf_bull = dataframe['4h_swing_trend'] == 1
+                    htf_bear = dataframe['4h_swing_trend'] == -1
+                    
+                    bullish_trend_ok &= htf_bull
+                    bearish_trend_ok &= htf_bear
         else:
             bullish_trend_ok = True
             bearish_trend_ok = True
@@ -796,11 +855,57 @@ class SMCWithMLLuxAlgo(IStrategy):
         Break Even Logic with persistent state.
         Once BE is activated (when price reaches TP1), the stoploss is fixed at entry price + small buffer for fees.
         """
-        if not self.move_be_at_tp1.value:
+        if not self.move_be_at_tp1.value and not self.use_custom_stoploss:
             return 1  # Use default stoploss
-        
-        # Check if BE was already activated (persistent across ticks)
+            
+        # --- 1. INITIAL DYNAMIC STOPLOSS (At Entry) ---
+        # If trade just opened (no BE yet), we check for Dynamic SL from structure
         be_activated = trade.get_custom_data('be_activated', default=False)
+        
+        if not be_activated and self.use_dynamic_stoploss.value:
+            # Check if we already have the initial SL price stored
+            # This ensures we only read the dataframe ONCE at the start of the trade
+            initial_sl_price = trade.get_custom_data('initial_sl_price')
+            
+            # If not stored, try to find it in the dataframe
+            if initial_sl_price is None:
+                try:
+                    # We need the dataframe. 
+                    # Optimization: Only load analyzed dataframe if we haven't stored the SL yet
+                    dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+                    
+                    # Find the candle where the trade opened
+                    candle = dataframe.loc[dataframe['date'] == trade.open_date_utc]
+                    
+                    if not candle.empty:
+                        row = candle.iloc[0]
+                        price_found = 0.0
+                        
+                        if trade.is_short:
+                            if 'sl_short_price' in row and not pd.isna(row['sl_short_price']):
+                                 price_found = row['sl_short_price']
+                        else:
+                            if 'sl_long_price' in row and not pd.isna(row['sl_long_price']):
+                                 price_found = row['sl_long_price']
+                        
+                        if price_found > 0:
+                            initial_sl_price = price_found
+                            # STORE IT so we don't recalculate again
+                            trade.set_custom_data('initial_sl_price', initial_sl_price)
+                            logger.info(f"Initial Dynamic SL found for {pair}: {initial_sl_price}")
+                except Exception as e:
+                    # Fallback to default
+                    pass
+
+            # If we have a valid initial SL price (either from storage or just found)
+            if initial_sl_price and initial_sl_price > 0:
+                 # Stoploss relative to current rate (Freqtrade requirement)
+                 # sl_relative = (stop_loss_price - current_rate) / current_rate
+                 sl_relative = (initial_sl_price - current_rate) / current_rate
+                 return sl_relative
+
+        # --- 2. BREAK EVEN LOGIC ---
+        # Check if BE was already activated (persistent across ticks)
         
         # Calculate price movement to check if we should activate BE
         if trade.is_short:
@@ -812,25 +917,30 @@ class SMCWithMLLuxAlgo(IStrategy):
         
         # Activate BE if price moved past TP1 and not already activated
         if not be_activated and price_movement >= self.tp1_pct.value:
-            trade.set_custom_data('be_activated', True)
-            be_activated = True
-            logger.info(f"BE activated for {pair} at price move {price_movement:.2%}")
-        
-        # If BE is activated, return fixed stoploss at entry + small buffer
-        if be_activated:
-            # Add 0.1% buffer to cover fees (in price terms)
-            fee_buffer_pct = 0.001  # 0.1% price buffer
+            # Calculate and STORE the BE stop price ONCE
+            fee_buffer_pct = 0.001  # 0.1% price buffer to cover fees
             
             if trade.is_short:
-                # For short, stop is ABOVE entry. We want stop at entry - buffer (price below entry = small profit)
-                target_stop = trade.open_rate * (1 - fee_buffer_pct)
-                # Stoploss relative to current rate
-                sl_relative = (target_stop - current_rate) / current_rate
+                # For SHORT: set stop slightly BELOW entry so if triggered, small profit covers fees
+                # e.g., entry=1.988, stop=1.986 -> if price rises to 1.986, exit with 0.1% profit
+                be_stop_price = trade.open_rate * (1 - fee_buffer_pct)
             else:
-                # For long, stop is BELOW entry. We want stop at entry + buffer (price above entry = small profit)
-                target_stop = trade.open_rate * (1 + fee_buffer_pct)
-                # Stoploss relative to current rate
-                sl_relative = (target_stop - current_rate) / current_rate
+                # For LONG: set stop slightly ABOVE entry so if triggered, small profit covers fees
+                # e.g., entry=100, stop=100.1 -> if price drops to 100.1, exit with 0.1% profit
+                be_stop_price = trade.open_rate * (1 + fee_buffer_pct)
+            
+            trade.set_custom_data('be_activated', True)
+            trade.set_custom_data('be_stop_price', be_stop_price)
+            be_activated = True
+            logger.info(f"BE activated for {pair} at price move {price_movement:.2%}. Stop set at {be_stop_price:.4f} (entry: {trade.open_rate:.4f})")
+        
+        # If BE is activated, use the STORED stop price
+        if be_activated:
+            # Retrieve the stored BE stop price (calculated once when BE activated)
+            be_stop_price = trade.get_custom_data('be_stop_price', default=trade.open_rate)
+            
+            # Calculate relative stoploss from current rate to fixed BE price
+            sl_relative = (be_stop_price - current_rate) / current_rate
             
             return sl_relative
         
@@ -856,39 +966,39 @@ class SMCWithMLLuxAlgo(IStrategy):
             current_extremum = trade.max_rate if trade.max_rate is not None else current_rate
             price_movement = (current_extremum - trade.open_rate) / trade.open_rate
         
-        # Check for TP1
-        if price_movement > self.tp1_pct.value:
+        # Check if TP1 was already taken (persistent flag)
+        tp1_taken = trade.get_custom_data('tp1_taken', default=False)
+        
+        # Check for TP1 (only if not already taken)
+        if not tp1_taken and price_movement > self.tp1_pct.value:
             # Check if TP1 is enabled via boolean or amount
             if not self.tp1_enabled.value or self.tp1_amount.value == 0:
                 return None
             
-            # For LONG: closing partial = sell order
-            # For SHORT: closing partial = buy order (re-buy to reduce short position)
-            exit_side = 'buy' if trade.is_short else 'sell'
+            # Mark TP1 as taken BEFORE placing the order (prevents recursion)
+            trade.set_custom_data('tp1_taken', True)
             
-            # Count how many partial exits we've done (excluding entry orders)
-            partial_exits = [
-                o for o in trade.orders 
-                if o.side == exit_side 
-                and o.status == 'closed'
-                and o.ft_order_side == 'exit'  # Only exit orders, not entries
-            ]
+            # Close tp1_amount% of ORIGINAL position
+            # Note: trade.amount might already be reduced if previous partial filled
+            # So we use stake_amount to calculate original size
+            original_amount = (trade.stake_amount * trade.leverage) / trade.open_rate
+            close_amount = original_amount * (self.tp1_amount.value / 100.0)
             
-            if len(partial_exits) == 0:
-                # Close tp1_amount% of position
-                close_amount = trade.amount * (self.tp1_amount.value / 100.0)
-                sell_value = close_amount * current_rate
-                
-                # FIX: adjust_trade_position expects change in STAKE (margin), not notional value.
-                # Must divide by leverage to get the margin amount to remove.
-                stake_change = sell_value / trade.leverage
-                
-                logger.info(
-                    f"TP1 for {trade.pair} ({'SHORT' if trade.is_short else 'LONG'}): "
-                    f"price moved {price_movement:.2%}, closing {self.tp1_amount.value:.0f}% "
-                    f"(Notional: {sell_value:.2f}, Margin: {stake_change:.2f})"
-                )
-                return (-stake_change, "TP1_partial")
+            # Make sure we don't try to close more than available
+            close_amount = min(close_amount, trade.amount * 0.99)  # Leave 1% buffer for rounding
+            
+            sell_value = close_amount * current_rate
+            
+            # FIX: adjust_trade_position expects change in STAKE (margin), not notional value.
+            # Must divide by leverage to get the margin amount to remove.
+            stake_change = sell_value / trade.leverage
+            
+            logger.info(
+                f"TP1 for {trade.pair} ({'SHORT' if trade.is_short else 'LONG'}): "
+                f"price moved {price_movement:.2%}, closing {self.tp1_amount.value:.0f}% "
+                f"(Notional: {sell_value:.2f}, Margin: {stake_change:.2f})"
+            )
+            return (-stake_change, "TP1_partial")
         
         return None
     

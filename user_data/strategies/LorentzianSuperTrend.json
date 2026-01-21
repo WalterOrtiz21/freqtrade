@@ -50,6 +50,7 @@
     },
     "sell": {
       "__comment_exits": "=== EXIT SETTINGS ===",
+      "use_exit_manager": true,
       "use_dynamic_exits": true,
       "close_with_supertrend": true,
       "close_only_tp": true,

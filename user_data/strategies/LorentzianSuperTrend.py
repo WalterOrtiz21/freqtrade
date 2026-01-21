@@ -13,6 +13,14 @@ from freqtrade.persistence import Trade
 import talib.abstract as ta
 import logging
 
+# Exit Manager - Intelligent Exit System
+try:
+    from ExitManager import ExitManager, ExitAction, create_exit_manager
+    HAS_EXIT_MANAGER = True
+except ImportError:
+    HAS_EXIT_MANAGER = False
+    ExitManager = None
+
 # =============================================================================
 # DEPENDENCIAS
 # =============================================================================
@@ -290,6 +298,13 @@ class LorentzianSuperTrend(IStrategy):
     # Cache para stoploss calculado (evita recalculos innecesarios)
     # Formato: {trade_id: (fixed_stop_price, is_breakeven_active)}
     _sl_cache = {}
+    
+    # Exit Manager instance (initialized in bot_start if enabled)
+    _exit_manager = None
+    
+    # Exit Manager Parameters
+    use_exit_manager = BooleanParameter(default=True, space='sell', optimize=False)
+    exit_manager_model_path = 'user_data/strategies/models/exit_manager.pkl'
 
     # ================= PARÁMETROS (Coinciden con JSON) =================
     
@@ -344,7 +359,7 @@ class LorentzianSuperTrend(IStrategy):
     # Exits
     use_dynamic_exits = BooleanParameter(default=False, space='sell', optimize=True)
     close_with_supertrend = BooleanParameter(default=True, space='sell', optimize=True)
-    close_only_tp = BooleanParameter(default=False, space='sell', optimize=True)  # Pine: close_only_tp
+
 
     # Protection & Risk
     stoploss_type = CategoricalParameter(['atr', 'swing'], default='atr', space='protection', optimize=True)
@@ -1010,6 +1025,40 @@ class LorentzianSuperTrend(IStrategy):
                               current_entry_profit: float, current_exit_profit: float,
                               **kwargs) -> Optional[float]:
         
+        # === EXIT MANAGER PARTIAL EXIT ===
+        if self.use_exit_manager.value and HAS_EXIT_MANAGER:
+            # Initialize ExitManager if not already done
+            if self._exit_manager is None:
+                self._exit_manager = ExitManager(
+                    model_path=self.exit_manager_model_path,
+                    config={
+                        'partial_exit_profit': 0.03,
+                        'partial_exit_amount': 0.50,
+                        'tighten_sl_drawdown': 0.02,
+                    }
+                )
+            
+            dataframe, _ = self.dp.get_analyzed_dataframe(trade.pair, self.timeframe)
+            
+            # Get recommendation from ExitManager
+            recommendation = self._exit_manager.predict_action(
+                trade=trade,
+                current_rate=current_rate,
+                dataframe=dataframe,
+                current_profit=current_profit
+            )
+            
+            # Act on PARTIAL_EXIT recommendation (before standard TP logic)
+            if recommendation.action == ExitAction.PARTIAL_EXIT and trade.nr_of_successful_exits == 0:
+                if recommendation.confidence > 0.6:
+                    partial_amount = recommendation.details.get('amount', 0.50)
+                    exit_stake = -(trade.stake_amount * partial_amount)
+                    
+                    if self.analysis_logging.value:
+                        logger.info(f"🤖 ExitManager PARTIAL_EXIT: {trade.pair} ({partial_amount*100:.0f}%, conf={recommendation.confidence:.2f})")
+                    return exit_stake
+        
+        # === ORIGINAL TP LOGIC ===
         if self.use_takeprofit.value and trade.nr_of_successful_exits == 0:
             entry_data = self._get_entry_candle(trade.pair, trade.open_date_utc)
             if entry_data is None: 
@@ -1192,10 +1241,37 @@ class LorentzianSuperTrend(IStrategy):
     def custom_exit(self, pair: str, trade: 'Trade', current_time: datetime, current_rate: float,
                     current_profit: float, **kwargs):
         """
-        Logging de salidas con razón específica (incluye detección de Stop Loss)
+        Intelligent exit with ExitManager + original signal logic.
         """
         dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
         last_candle = dataframe.iloc[-1].squeeze()
+        
+        # === EXIT MANAGER CONSULTATION ===
+        if self.use_exit_manager.value and HAS_EXIT_MANAGER:
+            # Initialize ExitManager if not already done
+            if self._exit_manager is None:
+                self._exit_manager = ExitManager(
+                    model_path=self.exit_manager_model_path,
+                    config={
+                        'partial_exit_profit': 0.03,
+                        'partial_exit_amount': 0.50,
+                        'tighten_sl_drawdown': 0.02,
+                    }
+                )
+            
+            # Get recommendation from ExitManager
+            recommendation = self._exit_manager.predict_action(
+                trade=trade,
+                current_rate=current_rate,
+                dataframe=dataframe,
+                current_profit=current_profit
+            )
+            
+            # Act on FULL_EXIT recommendation
+            if recommendation.action == ExitAction.FULL_EXIT and recommendation.confidence > 0.6:
+                if self.analysis_logging.value:
+                    logger.info(f"🤖 ExitManager FULL_EXIT: {pair} (conf={recommendation.confidence:.2f}, reason={recommendation.details.get('reason', 'ml')})")
+                return f"exit_manager_{recommendation.details.get('reason', 'ml')}"
 
         exit_reason = None
         direction = "SHORT" if trade.is_short else "LONG"
@@ -1207,14 +1283,19 @@ class LorentzianSuperTrend(IStrategy):
         # mensajes confusos cuando el precio se acerca al SL pero luego se recupera.
 
         # Detectar razón de salida normal (señal/supertrend)
-        if last_candle.get('is_new_sell_signal', False) and trade.is_short == False:
-            exit_reason = "SIGNAL_FLIP_SHORT"
-        elif last_candle.get('is_new_buy_signal', False) and trade.is_short == True:
-            exit_reason = "SIGNAL_FLIP_LONG"
-        elif last_candle.get('close_cross_below_st', False) and trade.is_short == False:
-            exit_reason = "SUPERTREND_CROSS_BELOW"
-        elif last_candle.get('close_cross_above_st', False) and trade.is_short == True:
-            exit_reason = "SUPERTREND_CROSS_ABOVE"
+        # 1. Signal Flips (Dynamic Exits)
+        if self.use_dynamic_exits.value:
+            if last_candle.get('is_new_sell_signal', False) and trade.is_short == False:
+                exit_reason = "SIGNAL_FLIP_SHORT"
+            elif last_candle.get('is_new_buy_signal', False) and trade.is_short == True:
+                exit_reason = "SIGNAL_FLIP_LONG"
+        
+        # 2. SuperTrend Cross (Close with SuperTrend)
+        if self.close_with_supertrend.value and not exit_reason:
+            if last_candle.get('close_cross_below_st', False) and trade.is_short == False:
+                exit_reason = "SUPERTREND_CROSS_BELOW"
+            elif last_candle.get('close_cross_above_st', False) and trade.is_short == True:
+                exit_reason = "SUPERTREND_CROSS_ABOVE"
 
         # Si hay razón de exit y tenemos profit, loguear y salir
         if exit_reason and current_profit > 0 and not self.close_only_tp.value:

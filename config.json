@@ -41,7 +41,7 @@
         "price_last_balance": 0.5
     },
     "exchange": {
-        "name": "binance",
+        "name": "bitget",
         "key": "your-api-key-here",
         "secret": "your-api-secret-here",
         "ccxt_config": {},
