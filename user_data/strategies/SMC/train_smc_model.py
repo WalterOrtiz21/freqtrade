@@ -92,8 +92,20 @@ def load_config():
             config['timeframe'] = main_config.get('timeframe', '15m')
             logger.info(f"📖 Loaded timeframe from config.json: {config['timeframe']}")
             
-            # Load pairs from whitelist
+            # Load exchange and build data_dir dynamically
             exchange_config = main_config.get('exchange', {})
+            exchange_name = exchange_config.get('name', 'binance').lower()
+            
+            # Check for trading_mode to determine subfolder (spot vs futures)
+            trading_mode = main_config.get('trading_mode', 'spot')
+            if trading_mode == 'futures':
+                config['data_dir'] = f'user_data/data/{exchange_name}/futures'
+            else:
+                config['data_dir'] = f'user_data/data/{exchange_name}'
+            
+            logger.info(f"📖 Data directory from config: {config['data_dir']}")
+            
+            # Load pairs from whitelist
             pairs_whitelist = exchange_config.get('pair_whitelist', [])
             
             if pairs_whitelist:

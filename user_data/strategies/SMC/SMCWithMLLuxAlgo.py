@@ -35,7 +35,7 @@ import os
 
 logger = logging.getLogger(__name__)
 
-from freqtrade.strategy import IStrategy, IntParameter, DecimalParameter, BooleanParameter
+from freqtrade.strategy import IStrategy, IntParameter, DecimalParameter, BooleanParameter, CategoricalParameter
 from freqtrade.persistence import Trade
 import talib.abstract as ta
 
@@ -89,6 +89,16 @@ class SMCWithMLLuxAlgo(IStrategy):
     max_open_trades = 3
     startup_candle_count: int = 200
     can_short = True
+    
+    # ==========================================================================
+    # HTF TIMEFRAMES (Flexible selection - works with JSON buy params)
+    # ==========================================================================
+    # Set to 'none' to disable that slot
+    # Common options: '5m', '15m', '30m', '1h', '2h', '4h', '8h', '12h', '1d'
+    HTF_OPTIONS = ['none', '5m', '15m', '30m', '1h', '2h', '4h', '8h', '12h', '1d']
+    
+    htf_1 = CategoricalParameter(HTF_OPTIONS, default='1h', space='buy', optimize=False)
+    htf_2 = CategoricalParameter(HTF_OPTIONS, default='4h', space='buy', optimize=False)
 
     # ==========================================================================
     # SMC PARAMETERS (Optimizable)
@@ -188,6 +198,8 @@ class SMCWithMLLuxAlgo(IStrategy):
     
     def __init__(self, config: dict) -> None:
         super().__init__(config)
+        # htf_timeframes is now built dynamically from boolean params
+        # No need to read from config anymore
     
     def bot_start(self, **kwargs) -> None:
         """
@@ -240,14 +252,27 @@ class SMCWithMLLuxAlgo(IStrategy):
             f"\n  Structure: MTF (15m) + HTF (4h)"
         )
 
+    def _get_active_htf_list(self) -> list:
+        """Build list of active HTF timeframes from parameters."""
+        htf_list = []
+        if self.htf_1.value != 'none':
+            htf_list.append(self.htf_1.value)
+        if self.htf_2.value != 'none':
+            htf_list.append(self.htf_2.value)
+        return htf_list
+
     def informative_pairs(self):
         """
-        Define pairs to load. We need HTF (4h) for trend context.
+        Define pairs to load based on htf_1 and htf_2 parameters.
         """
         pairs = self.dp.current_whitelist()
-        # Ensure we have 4h and 1h candles
-        informative_pairs = [(pair, '1h') for pair in pairs]
-        informative_pairs += [(pair, '4h') for pair in pairs]
+        htf_list = self._get_active_htf_list()
+        
+        informative_pairs = []
+        for tf in htf_list:
+            informative_pairs += [(pair, tf) for pair in pairs]
+        
+        logger.info(f"Informative pairs configured for timeframes: {htf_list}")
         return informative_pairs
 
     
@@ -349,34 +374,42 @@ class SMCWithMLLuxAlgo(IStrategy):
         for col in signals.columns:
             dataframe[col] = signals[col].values
             
-        # --- 2. HTF (4h) Calculations ---
-        # Get Informative 4h Pair
+        # --- 2. HTF Calculations (All configured timeframes) ---
         if self.dp:
-            inf_4h = self.dp.get_pair_dataframe(metadata['pair'], '4h')
-            # Calculate SMC on 4h
-            smc_4h = SMCLuxAlgo(
-                inf_4h,
-                internal_length=self.internal_length.value, # Use same params or different? Usually HTF is same logic on larger bars.
-                swing_length=self.swing_length.value,
-            )
-            signals_4h = smc_4h.get_signals()
-            
-            # We only need the Trend and maybe major zones
-            # Rename columns to avoid collision
-            inf_4h['4h_swing_trend'] = signals_4h['swing_trend']
-            inf_4h['4h_internal_trend'] = signals_4h['internal_trend']
-            
-            # Merge 4h Trend into 15m dataframe (FFILL to propagate latest 4h state)
-            # Use merge_informative_pair or simple merge_asof?
-            # Freqtrade standard is using dataframe.merge relying on 'date'
-            
-            # Prepare for merge
-            inf_4h = inf_4h[['date', '4h_swing_trend', '4h_internal_trend']].copy()
-            
-            # Merge
-            dataframe = pd.merge(dataframe, inf_4h, on='date', how='left')
-            dataframe['4h_swing_trend'] = dataframe['4h_swing_trend'].ffill()
-            dataframe['4h_internal_trend'] = dataframe['4h_internal_trend'].ffill()
+            htf_list = self._get_active_htf_list()
+            for htf in htf_list:
+                try:
+                    inf_htf = self.dp.get_pair_dataframe(metadata['pair'], htf)
+                    if inf_htf.empty:
+                        logger.warning(f"No data for {metadata['pair']} {htf}")
+                        continue
+                        
+                    # Calculate SMC on HTF
+                    smc_htf = SMCLuxAlgo(
+                        inf_htf,
+                        internal_length=self.internal_length.value,
+                        swing_length=self.swing_length.value,
+                    )
+                    signals_htf = smc_htf.get_signals()
+                    
+                    # Create column names with timeframe prefix
+                    # e.g., '4h_swing_trend', '1h_swing_trend'
+                    swing_col = f'{htf}_swing_trend'
+                    internal_col = f'{htf}_internal_trend'
+                    
+                    inf_htf[swing_col] = signals_htf['swing_trend']
+                    inf_htf[internal_col] = signals_htf['internal_trend']
+                    
+                    # Prepare for merge
+                    inf_htf = inf_htf[['date', swing_col, internal_col]].copy()
+                    
+                    # Merge
+                    dataframe = pd.merge(dataframe, inf_htf, on='date', how='left')
+                    dataframe[swing_col] = dataframe[swing_col].ffill()
+                    dataframe[internal_col] = dataframe[internal_col].ffill()
+                    
+                except Exception as e:
+                    logger.error(f"Error processing HTF {htf}: {e}")
             
         # Add ML Features (Context & Technicals)
         dataframe = self._add_ml_features(dataframe)
@@ -748,18 +781,22 @@ class SMCWithMLLuxAlgo(IStrategy):
         # Strict mode: 4h Swing Trend must be 1.
         
         if self.trade_with_trend.value:
-            # Local Trend Filter
+            # Local Trend Filter (MTF)
             bullish_trend_ok = dataframe['swing_trend'] == 1
             bearish_trend_ok = dataframe['swing_trend'] == -1
             
-            # HTF (4h) Filter - Now Optional
+            # HTF Filter - Check ALL configured timeframes
             if self.use_htf_filter.value:
-                if '4h_swing_trend' in dataframe.columns:
-                    htf_bull = dataframe['4h_swing_trend'] == 1
-                    htf_bear = dataframe['4h_swing_trend'] == -1
-                    
-                    bullish_trend_ok &= htf_bull
-                    bearish_trend_ok &= htf_bear
+                htf_list = self._get_active_htf_list()
+                for htf in htf_list:
+                    swing_col = f'{htf}_swing_trend'
+                    if swing_col in dataframe.columns:
+                        htf_bull = dataframe[swing_col] == 1
+                        htf_bear = dataframe[swing_col] == -1
+                        
+                        # AND logic: ALL HTFs must align
+                        bullish_trend_ok &= htf_bull
+                        bearish_trend_ok &= htf_bear
         else:
             bullish_trend_ok = True
             bearish_trend_ok = True
@@ -899,9 +936,10 @@ class SMCWithMLLuxAlgo(IStrategy):
 
             # If we have a valid initial SL price (either from storage or just found)
             if initial_sl_price and initial_sl_price > 0:
-                 # Stoploss relative to current rate (Freqtrade requirement)
-                 # sl_relative = (stop_loss_price - current_rate) / current_rate
-                 sl_relative = (initial_sl_price - current_rate) / current_rate
+                 # Freqtrade aplica: stop_price = open_rate * (1 + sl_relative)
+                 # Entonces: sl_relative = (stop_price / open_rate) - 1
+                 sl_relative = (initial_sl_price / trade.open_rate) - 1
+                 logger.debug(f"Dynamic SL for {pair}: sl_price={initial_sl_price:.4f}, open_rate={trade.open_rate:.4f}, sl_relative={sl_relative:.4%}")
                  return sl_relative
 
         # --- 2. BREAK EVEN LOGIC ---
@@ -939,8 +977,10 @@ class SMCWithMLLuxAlgo(IStrategy):
             # Retrieve the stored BE stop price (calculated once when BE activated)
             be_stop_price = trade.get_custom_data('be_stop_price', default=trade.open_rate)
             
-            # Calculate relative stoploss from current rate to fixed BE price
-            sl_relative = (be_stop_price - current_rate) / current_rate
+            # Freqtrade aplica: stop_price = open_rate * (1 + sl_relative)
+            # Entonces: sl_relative = (be_stop_price / open_rate) - 1
+            sl_relative = (be_stop_price / trade.open_rate) - 1
+            logger.debug(f"BE SL for {pair}: be_stop_price={be_stop_price:.4f}, open_rate={trade.open_rate:.4f}, sl_relative={sl_relative:.4%}")
             
             return sl_relative
         

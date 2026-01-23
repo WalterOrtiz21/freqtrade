@@ -11,7 +11,7 @@
             "max_open_trades": 5
         },
         "buy": {
-            "enable_auto_training": true,
+            "enable_auto_training": false,
             "internal_length": 5,
             "swing_length": 25,
             "use_internal_signals": false,
@@ -25,7 +25,9 @@
             "use_ml_filter": true,
             "use_per_symbol_models": false,
             "ml_threshold": 0.25,
-            "use_htf_filter": true
+            "use_htf_filter": true,
+            "htf_1": "4h",
+            "htf_2": "none"
         },
         "sell": {
             "use_dynamic_stoploss": false,
