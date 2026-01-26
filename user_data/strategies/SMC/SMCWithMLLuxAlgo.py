@@ -133,9 +133,10 @@ class SMCWithMLLuxAlgo(IStrategy):
     # (Pine indicator shows trend color, but strategy entry block does not enforce it)
     trade_with_trend = BooleanParameter(default=False, space='buy', optimize=True)
     
-    # Lookback for recent signals - Pine uses immediate alerts (current bar)
-    # kept slightly > 1 to avoid missing signals due to candle closing timing
-    signal_lookback = IntParameter(1, 3, default=1, space='buy', optimize=True)
+    # Lookback for recent signals
+    # 1 = Instant Entry (Signal + Zone on same candle)
+    # > 1 = Retest Logic (Signal happened X bars ago, entering now on Zone or Pullback)
+    entry_signal_lookback = IntParameter(1, 24, default=1, space='buy', optimize=True)
     
     # NEW: Toggle for HTF (4h) Filter
     use_htf_filter = BooleanParameter(default=True, space='buy', optimize=True)
@@ -565,7 +566,7 @@ class SMCWithMLLuxAlgo(IStrategy):
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """Generate entry signals based on SMC LuxAlgo logic."""
         
-        lookback = self.signal_lookback.value
+        lookback = self.entry_signal_lookback.value
         
         # ===== BULLISH STRUCTURE SIGNALS =====
         # Pine Logic: if stratStructureType == "Internal" -> internalBullishCHoCH else swingBullishCHoCH
