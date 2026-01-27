@@ -9,7 +9,7 @@
       "source_type": "close",
       "__comment_ml": "=== ML CORE SETTINGS ===",
       "neighbors_count": 8,
-      "max_bars_back": 2000,
+      "max_bars_back": 500,
       "f1_period": 14,
       "f1_smoothing": 1,
       "f2_ch_len": 10,
@@ -46,11 +46,14 @@
       "position_ema_period": 200,
       "__comment_supertrend": "=== SUPERTREND SETTINGS ===",
       "st_atr_period": 9,
-      "st_factor": 2.5
+      "st_factor": 2.5,
+      "use_htf_filter": true,
+      "htf_1": "1d",
+      "htf_2": "4h"
     },
     "sell": {
       "__comment_exits": "=== EXIT SETTINGS ===",
-      "use_exit_manager": true,
+      "use_exit_manager": false,
       "use_dynamic_exits": true,
       "close_with_supertrend": true,
       "close_only_tp": true,

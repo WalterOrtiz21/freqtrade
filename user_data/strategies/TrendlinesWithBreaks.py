@@ -9,7 +9,7 @@ from numba import njit
 import talib.abstract as ta
 import pandas_ta as pta
 
-from freqtrade.strategy import IStrategy, IntParameter, DecimalParameter, BooleanParameter, CategoricalParameter
+from freqtrade.strategy import IStrategy, IntParameter, DecimalParameter, BooleanParameter, CategoricalParameter, stoploss_from_absolute
 from freqtrade.persistence import Trade
 
 logger = logging.getLogger(__name__)
@@ -220,9 +220,45 @@ class TrendlinesWithBreaks(IStrategy):
     # Logging Control
     enable_logging = BooleanParameter(default=False, space='custom', optimize=False)
 
+    # ==========================================================================
+    # HTF TIMEFRAMES (Flexible selection - works with JSON buy params)
+    # ==========================================================================
+    # Set to 'none' to disable that slot
+    # Common options: '5m', '15m', '30m', '1h', '2h', '4h', '8h', '12h', '1d'
+    HTF_OPTIONS = ['none', '5m', '15m', '30m', '1h', '2h', '4h', '8h', '12h', '1d']
+    
+    htf_1 = CategoricalParameter(HTF_OPTIONS, default='1h', space='buy', optimize=False)
+    htf_2 = CategoricalParameter(HTF_OPTIONS, default='4h', space='buy', optimize=False)
+    
+    # Toggle for HTF Trend Filter
+    use_htf_filter = BooleanParameter(default=True, space='buy', optimize=True)
+
     def __init__(self, config: dict) -> None:
         super().__init__(config)
         self.acc_stoploss = -0.05 # Default internal fallback
+        
+    def _get_active_htf_list(self) -> list:
+        """Build list of active HTF timeframes from parameters."""
+        htf_list = []
+        if self.htf_1.value != 'none':
+            htf_list.append(self.htf_1.value)
+        if self.htf_2.value != 'none':
+            htf_list.append(self.htf_2.value)
+        return htf_list
+
+    def informative_pairs(self):
+        """
+        Define pairs to load based on htf_1 and htf_2 parameters.
+        """
+        pairs = self.dp.current_whitelist()
+        htf_list = self._get_active_htf_list()
+        
+        informative_pairs = []
+        for tf in htf_list:
+            informative_pairs += [(pair, tf) for pair in pairs]
+        
+        logger.info(f"TrendlinesWithBreaks: Informative pairs configured for timeframes: {htf_list}")
+        return informative_pairs
         
     def leverage(self, pair: str, current_time: datetime, current_rate: float,
                  proposed_leverage: float, max_leverage: float, entry_tag: str,
@@ -303,17 +339,93 @@ class TrendlinesWithBreaks(IStrategy):
         dataframe['break_up'] = (dataframe['tl_upos'] > dataframe['tl_upos'].shift(1)).astype(int)
         dataframe['break_down'] = (dataframe['tl_dnos'] > dataframe['tl_dnos'].shift(1)).astype(int)
 
+        # --- 4. HTF Trendline Calculations ---
+        if self.dp:
+            htf_list = self._get_active_htf_list()
+            for htf in htf_list:
+                try:
+                    inf_htf = self.dp.get_pair_dataframe(metadata['pair'], htf)
+                    if inf_htf.empty:
+                        logger.warning(f"No data for {metadata['pair']} {htf}")
+                        continue
+                    
+                    # Calculate trendlines on HTF
+                    htf_high = inf_htf['high'].values
+                    htf_low = inf_htf['low'].values
+                    htf_close = inf_htf['close'].values
+                    
+                    htf_ph = _pivot_high_numba(htf_high, length, length)
+                    htf_pl = _pivot_low_numba(htf_low, length, length)
+                    
+                    # Calculate HTF slope
+                    if method == 'Atr':
+                        htf_atr = ta.ATR(inf_htf, timeperiod=length)
+                        htf_slope = (htf_atr / length) * mult
+                    elif method == 'Stdev':
+                        htf_stdev = inf_htf['close'].rolling(length).std()
+                        htf_slope = (htf_stdev / length) * mult
+                    else:
+                        htf_lr_slope = ta.LINEARREG_SLOPE(inf_htf['close'], timeperiod=length)
+                        htf_slope = htf_lr_slope.abs() / 2 * mult
+                    
+                    htf_slope = htf_slope.fillna(0.0).values
+                    
+                    # Calculate HTF trendlines
+                    htf_upper, htf_lower, _, _ = _calculate_trendlines(htf_close, htf_ph, htf_pl, htf_slope, length)
+                    
+                    # Determine HTF trend
+                    # Bullish: close > upper (broken out above resistance)
+                    # Bearish: close < lower (broken below support)
+                    htf_trend_col = f'{htf}_trend'
+                    inf_htf[htf_trend_col] = 0
+                    inf_htf.loc[inf_htf['close'] > htf_upper, htf_trend_col] = 1
+                    inf_htf.loc[inf_htf['close'] < htf_lower, htf_trend_col] = -1
+                    
+                    # Prepare for merge
+                    inf_htf = inf_htf[['date', htf_trend_col]].copy()
+                    
+                    # Merge into main dataframe
+                    dataframe = pd.merge(dataframe, inf_htf, on='date', how='left')
+                    dataframe[htf_trend_col] = dataframe[htf_trend_col].ffill().fillna(0)
+                    
+                    logger.info(f"HTF {htf} trend calculated for {metadata['pair']}")
+                    
+                except Exception as e:
+                    logger.error(f"Error processing HTF {htf}: {e}")
+
         return dataframe
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         
-        dataframe.loc[
-            (dataframe['break_up'] == 1),
-            'enter_long'] = 1
+        # Base signals from trendline breaks
+        long_condition = dataframe['break_up'] == 1
+        short_condition = dataframe['break_down'] == 1
+        
+        # ===== HTF TREND FILTER =====
+        # HTF provides directional bias, breakout provides entry timing
+        if self.use_htf_filter.value:
+            htf_list = self._get_active_htf_list()
             
-        dataframe.loc[
-            (dataframe['break_down'] == 1),
-            'enter_short'] = 1
+            # Start with True, apply AND for each HTF
+            bullish_htf_ok = pd.Series(True, index=dataframe.index)
+            bearish_htf_ok = pd.Series(True, index=dataframe.index)
+            
+            for htf in htf_list:
+                trend_col = f'{htf}_trend'
+                if trend_col in dataframe.columns:
+                    htf_bull = dataframe[trend_col] == 1
+                    htf_bear = dataframe[trend_col] == -1
+                    
+                    # AND logic: ALL HTFs must align
+                    bullish_htf_ok &= htf_bull
+                    bearish_htf_ok &= htf_bear
+            
+            long_condition = long_condition & bullish_htf_ok
+            short_condition = short_condition & bearish_htf_ok
+        
+        # Apply signals
+        dataframe.loc[long_condition, 'enter_long'] = 1
+        dataframe.loc[short_condition, 'enter_short'] = 1
             
         return dataframe
 
@@ -346,48 +458,33 @@ class TrendlinesWithBreaks(IStrategy):
         
         # Calculate price movement to check if we should activate BE
         if trade.is_short:
-            extremum = trade.min_rate if trade.min_rate else current_rate
+            extremum = trade.min_rate if trade.min_rate is not None else current_rate
             price_move_pct = (trade.open_rate - extremum) / trade.open_rate
         else:
-            extremum = trade.max_rate if trade.max_rate else current_rate
+            extremum = trade.max_rate if trade.max_rate is not None else current_rate
             price_move_pct = (extremum - trade.open_rate) / trade.open_rate
         
         # Activate BE if price moved enough and not already activated
         if not be_activated and price_move_pct >= self.be_trigger_pct.value:
-            trade.set_custom_data('be_activated', True)
-            be_activated = True
-            logger.info(f"BE activated for {pair} at price move {price_move_pct:.2%}")
-        
-        # If BE is activated, return fixed stoploss at entry + small buffer
-        if be_activated:
-            # Add 0.1% buffer to cover fees (in terms of PnL, not price)
-            # For custom_stoploss, we return percentage relative to current_rate
-            # that results in stoploss at open_rate + buffer
-            
-            # Buffer: 0.1% profit in PnL terms (0.001)
-            # For stoploss_on_exchange=False, Freqtrade calculates:
-            #   stop_price = current_rate * (1 + stoploss_value)  [for long when stoploss_value < 0]
-            #   stop_price = current_rate * (1 + stoploss_value)  [for short when stoploss_value > 0]
-            # 
-            # We want stop at open_rate + small buffer for fees
-            # Long: stop should be slightly below open_rate (small loss if hit, but covers fees from profit run)
-            # Short: stop should be slightly above open_rate
-            
-            # Target stop price with 0.1% buffer (in price terms)
+            # Calculate and STORE the BE stop price ONCE
             fee_buffer_pct = 0.001  # 0.1% price buffer
             
             if trade.is_short:
-                # For short, stop is ABOVE entry. We want stop at entry - buffer (price below entry = small profit)
-                target_stop = trade.open_rate * (1 - fee_buffer_pct)
-                # Stoploss relative to current rate
-                sl_relative = (target_stop - current_rate) / current_rate
+                 # For short, we want to exit slightly below entry (profit)
+                 be_stop_price = trade.open_rate * (1 - fee_buffer_pct)
             else:
-                # For long, stop is BELOW entry. We want stop at entry + buffer (price above entry = small profit)
-                target_stop = trade.open_rate * (1 + fee_buffer_pct)
-                # Stoploss relative to current rate
-                sl_relative = (target_stop - current_rate) / current_rate
-            
-            return sl_relative
+                 # For long, we want to exit slightly above entry (profit)
+                 be_stop_price = trade.open_rate * (1 + fee_buffer_pct)
+
+            trade.set_custom_data('be_activated', True)
+            trade.set_custom_data('be_stop_price', be_stop_price)
+            be_activated = True
+            logger.info(f"Trendlines BE activated for {pair} at price move {price_move_pct:.2%}. Stop set at {be_stop_price:.4f}")
+        
+        # If BE is activated, return fixed stoploss using absolute helper
+        if be_activated:
+            be_stop_price = trade.get_custom_data('be_stop_price', default=trade.open_rate)
+            return stoploss_from_absolute(be_stop_price, current_rate, is_short=trade.is_short, leverage=trade.leverage)
         
         return 1  # Use default stoploss
 

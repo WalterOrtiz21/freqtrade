@@ -311,7 +311,8 @@ class LorentzianSuperTrend(IStrategy):
     # ML Settings
     source_type = CategoricalParameter(['close', 'hlc3', 'ohlc4', 'hl2', 'open', 'high', 'low'], default='close', space='buy', optimize=False)
     neighbors_count = IntParameter(2, 20, default=8, space='buy', optimize=False)
-    max_bars_back = IntParameter(500, 3000, default=2000, space='buy', optimize=False)
+    source_type = CategoricalParameter(['close', 'hlc3', 'ohlc4', 'hl2', 'open', 'high', 'low'], default='close', space='buy', optimize=False)
+    max_bars_back = IntParameter(500, 3000, default=1000, space='buy', optimize=False)
 
 
     # Features (Ajustado a Pine)
@@ -380,6 +381,15 @@ class LorentzianSuperTrend(IStrategy):
     st_atr_period = IntParameter(5, 20, default=9, space='buy', optimize=True)
     st_factor = DecimalParameter(1.0, 5.0, default=2.5, decimals=1, space='buy', optimize=True)
 
+    # ==========================================================================
+    # HTF TIMEFRAMES (SuperTrend Filter)
+    # ==========================================================================
+    HTF_OPTIONS = ['none', '5m', '15m', '30m', '1h', '2h', '4h', '8h', '12h', '1d']
+    
+    htf_1 = CategoricalParameter(HTF_OPTIONS, default='1h', space='buy', optimize=False)
+    htf_2 = CategoricalParameter(HTF_OPTIONS, default='4h', space='buy', optimize=False)
+    use_htf_filter = BooleanParameter(default=True, space='buy', optimize=True)
+
     # Configuración Freqtrade
     timeframe = '4h'
     minimal_roi = { "0": 100 } # Desactivamos ROI estandard, usamos Custom
@@ -387,7 +397,9 @@ class LorentzianSuperTrend(IStrategy):
     
     # Con normalización fija (constantes históricas), solo necesitamos velas
     # para los indicadores técnicos (EMA200, ATR, etc.)
-    startup_candle_count = 2200 
+    # Con normalización fija (constantes históricas), solo necesitamos velas
+    # para los indicadores técnicos (EMA200, ATR, etc.)
+    startup_candle_count = 1000 
     
     # REGLA PINE SCRIPT CRUCIAL:
     # El script original dice: if strategy.openprofit > 0 -> close.
@@ -431,9 +443,11 @@ class LorentzianSuperTrend(IStrategy):
             from pathlib import Path
             
             # Construir ruta al archivo de datos
+            # Construir ruta al archivo de datos
             # Formato: user_data/data/{exchange}/futures/{PAIR}-{timeframe}-futures.feather
+            exchange_name = self.config.get('exchange', {}).get('name', 'binance')
             pair_filename = pair.replace("/", "_").replace(":", "_")
-            data_path = Path("user_data/data/binance/futures") / f"{pair_filename}-{self.timeframe}-futures.feather"
+            data_path = Path(f"user_data/data/{exchange_name}/futures") / f"{pair_filename}-{self.timeframe}-futures.feather"
             
             if not data_path.exists():
                 logger.warning(f"Archivo de datos no encontrado: {data_path}")
@@ -486,6 +500,28 @@ class LorentzianSuperTrend(IStrategy):
         
         self._historic_calculated = True
     
+    def _get_active_htf_list(self) -> list:
+        """Build list of active HTF timeframes from parameters."""
+        htf_list = []
+        if self.htf_1.value != 'none':
+            htf_list.append(self.htf_1.value)
+        if self.htf_2.value != 'none':
+            htf_list.append(self.htf_2.value)
+        return htf_list
+
+    def informative_pairs(self):
+        """
+        Define pairs to load based on htf_1 and htf_2 parameters.
+        """
+        pairs = self.dp.current_whitelist()
+        htf_list = self._get_active_htf_list()
+        
+        informative_pairs = []
+        for tf in htf_list:
+            informative_pairs += [(pair, tf) for pair in pairs]
+        
+        return informative_pairs
+
     def _normalize_expanding(self, series: Union[pd.Series, np.ndarray]) -> pd.Series:
         """Replica normalize() de Pine para valores sin limites definidos."""
         # CORRECCION: Verificar si es numpy array y convertir a pandas Series
@@ -561,7 +597,44 @@ class LorentzianSuperTrend(IStrategy):
         dataframe['adx_f4'] = adx_smooth
         dataframe['f4_norm'] = self._normalize_fixed(adx_smooth, 0, 100)
 
-        # --- FEATURE 5: RSI ---
+        # --- HTF SUPERTREND CALCULATION ---
+        if self.dp:
+            htf_list = self._get_active_htf_list()
+            for htf in htf_list:
+                try:
+                    inf_htf = self.dp.get_pair_dataframe(metadata['pair'], htf)
+                    if inf_htf.empty:
+                        logger.warning(f"No data for {metadata['pair']} {htf}")
+                        continue
+                    
+                    # Calculate SuperTrend on HTF
+                    inf_htf['atr_st'] = ta.ATR(inf_htf, timeperiod=self.st_atr_period.value)
+                    hl2_htf = (inf_htf['high'] + inf_htf['low']) / 2
+                    matr_htf = float(self.st_factor.value) * inf_htf['atr_st']
+                    upperband_htf = hl2_htf + matr_htf
+                    lowerband_htf = hl2_htf - matr_htf
+                    
+                    st_htf, direction_htf = _numba_supertrend_recalc(
+                        inf_htf['close'].values.astype(np.float64),
+                        upperband_htf.values.astype(np.float64),
+                        lowerband_htf.values.astype(np.float64)
+                    )
+                    
+                    # Store trend direction
+                    inf_htf[f'{htf}_st_direction'] = direction_htf
+                    
+                    # Prepare for merge
+                    inf_htf = inf_htf[['date', f'{htf}_st_direction']].copy()
+                    
+                    # Merge
+                    dataframe = pd.merge(dataframe, inf_htf, on='date', how='left')
+                    dataframe[f'{htf}_st_direction'] = dataframe[f'{htf}_st_direction'].ffill()
+                    
+                except Exception as e:
+                    logger.error(f"Error processing HTF {htf}: {e}")
+
+        # --- FILTROS ---
+        atr_1 = ta.ATR(dataframe, timeperiod=1)
         rsi5_raw = ta.RSI(dataframe, timeperiod=self.f5_period.value)
         rsi5_smooth = ta.EMA(rsi5_raw, timeperiod=self.f5_smoothing.value) if self.f5_smoothing.value > 1 else rsi5_raw
         dataframe['f5_norm'] = self._normalize_fixed(rsi5_smooth, 0, 100)
@@ -799,6 +872,16 @@ class LorentzianSuperTrend(IStrategy):
             dataframe['is_new_sell_signal'] &
             dataframe['is_bearish_kernel']    # Pine: isBearish
         )
+
+        # HTF Filter
+        if self.use_htf_filter.value:
+            htf_list = self._get_active_htf_list()
+            for htf in htf_list:
+                col = f'{htf}_st_direction'
+                if col in dataframe.columns:
+                    # 1 = Bullish, -1 = Bearish
+                    start_long_trade &= (dataframe[col] == 1)
+                    start_short_trade &= (dataframe[col] == -1)
 
         # Pine (línea 726): if not bought and buy and ... and bullish and ema_filter_long
         # Sistema 2: Filtro de posiciones (bullish/bearish)
