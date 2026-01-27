@@ -35,7 +35,7 @@ import os
 
 logger = logging.getLogger(__name__)
 
-from freqtrade.strategy import IStrategy, IntParameter, DecimalParameter, BooleanParameter, CategoricalParameter
+from freqtrade.strategy import IStrategy, IntParameter, DecimalParameter, BooleanParameter, CategoricalParameter, stoploss_from_absolute
 from freqtrade.persistence import Trade
 import talib.abstract as ta
 
@@ -185,8 +185,9 @@ class SMCWithMLLuxAlgo(IStrategy):
     move_be_at_tp1 = BooleanParameter(default=False, space='sell', optimize=True)
     
     # Final Exit (Reversal)
-    # Pine Strategy implicitly exits/reverses on opposite CHoCH.
-    exit_on_opposite_choch = BooleanParameter(default=True, space='sell', optimize=True)
+    # Granular control over which CHoCH triggers an exit
+    exit_on_internal_choch = BooleanParameter(default=True, space='sell', optimize=True)
+    exit_on_swing_choch = BooleanParameter(default=True, space='sell', optimize=True)
     
     # TP2 (Full Exit) - Optional extention
     # Pine does not have explicit TP2, it holds until reversal or manual close.
@@ -856,18 +857,22 @@ class SMCWithMLLuxAlgo(IStrategy):
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """Generate exit signals on opposite CHoCH (trend reversal)."""
         
-        if self.exit_on_opposite_choch.value:
+        if True: # Always check for exits if parameters are enabled
+            
             # Exit long on bearish CHoCH (trend reversal)
-            exit_long = (
-                (dataframe['internal_choch_bearish'] == 1) |
-                (dataframe['swing_choch_bearish'] == 1)
-            )
+            # Check configured exit triggers
+            exit_long = pd.Series(False, index=dataframe.index)
+            if self.exit_on_internal_choch.value:
+                exit_long |= (dataframe['internal_choch_bearish'] == 1)
+            if self.exit_on_swing_choch.value:
+                exit_long |= (dataframe['swing_choch_bearish'] == 1)
             
             # Exit short on bullish CHoCH
-            exit_short = (
-                (dataframe['internal_choch_bullish'] == 1) |
-                (dataframe['swing_choch_bullish'] == 1)
-            )
+            exit_short = pd.Series(False, index=dataframe.index)
+            if self.exit_on_internal_choch.value:
+                exit_short |= (dataframe['internal_choch_bullish'] == 1)
+            if self.exit_on_swing_choch.value:
+                exit_short |= (dataframe['swing_choch_bullish'] == 1)
         else:
             exit_long = pd.Series(False, index=dataframe.index)
             exit_short = pd.Series(False, index=dataframe.index)
@@ -937,11 +942,9 @@ class SMCWithMLLuxAlgo(IStrategy):
 
             # If we have a valid initial SL price (either from storage or just found)
             if initial_sl_price and initial_sl_price > 0:
-                 # Freqtrade aplica: stop_price = open_rate * (1 + sl_relative)
-                 # Entonces: sl_relative = (stop_price / open_rate) - 1
-                 sl_relative = (initial_sl_price / trade.open_rate) - 1
-                 logger.debug(f"Dynamic SL for {pair}: sl_price={initial_sl_price:.4f}, open_rate={trade.open_rate:.4f}, sl_relative={sl_relative:.4%}")
-                 return sl_relative
+                 # Use Freqtrade's official helper function
+                 logger.debug(f"Dynamic SL for {pair}: sl_price={initial_sl_price:.4f}, current_rate={current_rate:.4f}")
+                 return stoploss_from_absolute(initial_sl_price, current_rate, is_short=trade.is_short, leverage=trade.leverage)
 
         # --- 2. BREAK EVEN LOGIC ---
         # Check if BE was already activated (persistent across ticks)
@@ -955,7 +958,7 @@ class SMCWithMLLuxAlgo(IStrategy):
             price_movement = (current_extremum - trade.open_rate) / trade.open_rate
         
         # Activate BE if price moved past TP1 and not already activated
-        if not be_activated and price_movement >= self.tp1_pct.value:
+        if self.move_be_at_tp1.value and not be_activated and price_movement >= self.tp1_pct.value:
             # Calculate and STORE the BE stop price ONCE
             fee_buffer_pct = 0.001  # 0.1% price buffer to cover fees
             
@@ -978,12 +981,14 @@ class SMCWithMLLuxAlgo(IStrategy):
             # Retrieve the stored BE stop price (calculated once when BE activated)
             be_stop_price = trade.get_custom_data('be_stop_price', default=trade.open_rate)
             
-            # Freqtrade aplica: stop_price = open_rate * (1 + sl_relative)
-            # Entonces: sl_relative = (be_stop_price / open_rate) - 1
-            sl_relative = (be_stop_price / trade.open_rate) - 1
-            logger.debug(f"BE SL for {pair}: be_stop_price={be_stop_price:.4f}, open_rate={trade.open_rate:.4f}, sl_relative={sl_relative:.4%}")
+            # Use Freqtrade's official helper function for absolute price stoploss
+            logger.info(
+                f"BE SL for {pair}: direction={'SHORT' if trade.is_short else 'LONG'}, "
+                f"be_stop_price={be_stop_price:.6f}, open_rate={trade.open_rate:.6f}, "
+                f"current_rate={current_rate:.6f}"
+            )
             
-            return sl_relative
+            return stoploss_from_absolute(be_stop_price, current_rate, is_short=trade.is_short, leverage=trade.leverage)
         
         return 1  # Use default stoploss
     

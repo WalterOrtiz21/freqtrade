@@ -21,22 +21,23 @@
             "require_fvg_zone": true,
             "trade_with_trend": true,
             "require_premium_discount": true,
-            "signal_lookback": 3,
+            "entry_signal_lookback": 3,
             "use_ml_filter": true,
             "use_per_symbol_models": false,
             "ml_threshold": 0.25,
             "use_htf_filter": true,
-            "htf_1": "4h",
-            "htf_2": "none"
+            "htf_1": "none",
+            "htf_2": "4h"
         },
         "sell": {
             "use_dynamic_stoploss": false,
             "tp1_enabled": true,
-            "tp1_pct": 0.025,
+            "tp1_pct": 0.022,
             "tp1_amount": 50.0,
             "move_be_at_tp1": true,
             "tp2_pct": 99.60,
-            "exit_on_opposite_choch": true
+            "exit_on_internal_choch": true,
+            "exit_on_swing_choch": true
         },
         "protection": {},
         "trailing": {
