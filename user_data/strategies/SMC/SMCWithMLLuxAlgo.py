@@ -87,7 +87,7 @@ class SMCWithMLLuxAlgo(IStrategy):
     use_custom_stoploss = True  # Enable for breakeven
     position_adjustment_enable = True  # Enable for partial TPs
     max_open_trades = 3
-    startup_candle_count: int = 200
+    startup_candle_count: int = 250
     can_short = True
     
     # ==========================================================================
@@ -125,9 +125,11 @@ class SMCWithMLLuxAlgo(IStrategy):
     require_choch = BooleanParameter(default=True, space='buy', optimize=True)
     
     # Zone requirements - disabled by default to match Pine Strategy execution logic
-    require_ob_zone = BooleanParameter(default=False, space='buy', optimize=True)
-    require_fvg_zone = BooleanParameter(default=False, space='buy', optimize=True)
+    # Zone Filters
+    require_ob_zone = BooleanParameter(default=True, space='buy', optimize=True)
+    require_fvg_zone = BooleanParameter(default=True, space='buy', optimize=True)
     require_premium_discount = BooleanParameter(default=False, space='buy', optimize=True)
+    premium_discount_threshold = DecimalParameter(0.05, 0.5, default=0.5, space='buy', optimize=True)
     
     # Trend filter - disabled by default to match Pine Strategy execution logic
     # (Pine indicator shows trend color, but strategy entry block does not enforce it)
@@ -144,6 +146,9 @@ class SMCWithMLLuxAlgo(IStrategy):
     # NEW: Dynamic Stoploss Toggle & Offset
     use_dynamic_stoploss = BooleanParameter(default=True, space='sell', optimize=True)
     sl_buffer_pct = DecimalParameter(0.001, 0.01, default=0.002, decimals=3, space='sell', optimize=True)
+    
+    # Logging Control
+    enable_logging = BooleanParameter(default=True, space='custom', optimize=False)
 
     # ==========================================================================
     # ML PARAMETERS (Placeholder)
@@ -417,7 +422,7 @@ class SMCWithMLLuxAlgo(IStrategy):
         dataframe = self._add_ml_features(dataframe)
         
         # Log summary
-        if self.dp: # Only log if not backtesting or sparse
+        if self.dp and self.enable_logging.value: # Only log if not backtesting or sparse (controlled by param)
             logger.info(
                 f"SMC LuxAlgo indicators for {metadata['pair']}: "
                 f"MTF Trend Valid={dataframe['swing_trend'].notna().sum()}/{len(dataframe)} "
@@ -667,11 +672,16 @@ class SMCWithMLLuxAlgo(IStrategy):
         # If NO zone filter is enabled, all bars pass (default True)
         any_zone_enabled = self.require_ob_zone.value or self.require_fvg_zone.value or self.require_premium_discount.value
         
-        # P/D Logic:
-        # Discount: Close < Equilibrium (<0.5) - Good for LONG
-        # Premium: Close > Equilibrium (>0.5) - Good for SHORT
-        in_discount = dataframe['close'] < dataframe['equilibrium']
-        in_premium = dataframe['close'] > dataframe['equilibrium']
+        # P/D Logic with Threshold:
+        # Discount: Price in bottom X% of range (e.g., < 0.05 or < 0.5)
+        # Premium: Price in top X% of range
+        
+        swing_range = dataframe['swing_high'] - dataframe['swing_low']
+        discount_limit = dataframe['swing_low'] + (swing_range * self.premium_discount_threshold.value)
+        premium_limit = dataframe['swing_high'] - (swing_range * self.premium_discount_threshold.value)
+        
+        in_discount = dataframe['close'] < discount_limit
+        in_premium = dataframe['close'] > premium_limit
         
         if any_zone_enabled:
             # Start with False, use OR to add conditions
@@ -703,6 +713,22 @@ class SMCWithMLLuxAlgo(IStrategy):
             if self.require_fvg_zone.value:
                 bullish_zone |= in_bullish_fvg
                 bearish_zone |= in_bearish_fvg
+                
+                # Add FVG Breakers logic
+                if 'active_bullish_fvg_breaker_top' in dataframe.columns:
+                     in_bull_fvg_breaker = (
+                        (dataframe['active_bullish_fvg_breaker_top'] > 0) & 
+                        (dataframe['low'] <= dataframe['active_bullish_fvg_breaker_top']) & 
+                        (dataframe['high'] >= dataframe['active_bullish_fvg_breaker_bottom'])
+                     )
+                     bullish_zone |= in_bull_fvg_breaker
+                     
+                     in_bear_fvg_breaker = (
+                        (dataframe['active_bearish_fvg_breaker_top'] > 0) & 
+                        (dataframe['high'] >= dataframe['active_bearish_fvg_breaker_bottom']) &
+                        (dataframe['low'] <= dataframe['active_bearish_fvg_breaker_top'])
+                     )
+                     bearish_zone |= in_bear_fvg_breaker
 
             # --- DYNAMIC STOPLOSS CALCULATION (For DataFrame) ---
             # We calculate what the SL PRICE would be for this candle if we entered.
@@ -730,17 +756,18 @@ class SMCWithMLLuxAlgo(IStrategy):
             # Bull Breaker Bottom (might overwrite if present - usually we touch one or other)
             if 'active_bullish_breaker_bottom' in dataframe.columns:
                 mask_bull_brk = (dataframe['active_bullish_breaker_bottom'] > 0)
-                # If we have both, take the lower one?
-                # Let's take the one we are touching if possible.
-                # Simplification: Assume 'active' columns already represent the relevant nearest zone.
-                # If both exist, take the lower bottom to be safe.
                 bull_sl_price = np.fmin(bull_sl_price, dataframe['active_bullish_breaker_bottom'])
+
+            # FVG Breaker Bottom (NEW)
+            if 'active_bullish_fvg_breaker_bottom' in dataframe.columns:
+                 # If active, use its bottom
+                 bull_sl_price = np.fmin(bull_sl_price, dataframe['active_bullish_fvg_breaker_bottom'])
 
             # Apply offset
             dataframe['sl_long_price'] = bull_sl_price * (1 - self.sl_buffer_pct.value)
             
             # Same for Shorts (Top + offset)
-            bear_sl_price[mask_bull_ob] = np.nan # reset? logic error in thought, new series
+            bear_sl_price[mask_bull_ob] = np.nan # reset logic
             bear_sl_price = pd.Series(np.nan, index=dataframe.index)
             
             mask_bear_ob = (dataframe['active_bearish_ob_top'] > 0)
@@ -748,6 +775,11 @@ class SMCWithMLLuxAlgo(IStrategy):
             
             if 'active_bearish_breaker_top' in dataframe.columns:
                  bear_sl_price = np.fmax(bear_sl_price, dataframe['active_bearish_breaker_top'])
+
+            # FVG Breaker Top (NEW)
+            if 'active_bullish_fvg_breaker_top' in dataframe.columns: # wait, Bearish FVG Breaker for Shorts
+                 if 'active_bearish_fvg_breaker_top' in dataframe.columns:
+                      bear_sl_price = np.fmax(bear_sl_price, dataframe['active_bearish_fvg_breaker_top'])
             
             dataframe['sl_short_price'] = bear_sl_price * (1 + self.sl_buffer_pct.value)
             
@@ -974,7 +1006,8 @@ class SMCWithMLLuxAlgo(IStrategy):
             trade.set_custom_data('be_activated', True)
             trade.set_custom_data('be_stop_price', be_stop_price)
             be_activated = True
-            logger.info(f"BE activated for {pair} at price move {price_movement:.2%}. Stop set at {be_stop_price:.4f} (entry: {trade.open_rate:.4f})")
+            if self.enable_logging.value:
+                logger.info(f"BE activated for {pair} at price move {price_movement:.2%}. Stop set at {be_stop_price:.4f} (entry: {trade.open_rate:.4f})")
         
         # If BE is activated, use the STORED stop price
         if be_activated:
@@ -982,11 +1015,12 @@ class SMCWithMLLuxAlgo(IStrategy):
             be_stop_price = trade.get_custom_data('be_stop_price', default=trade.open_rate)
             
             # Use Freqtrade's official helper function for absolute price stoploss
-            logger.info(
-                f"BE SL for {pair}: direction={'SHORT' if trade.is_short else 'LONG'}, "
-                f"be_stop_price={be_stop_price:.6f}, open_rate={trade.open_rate:.6f}, "
-                f"current_rate={current_rate:.6f}"
-            )
+            if self.enable_logging.value:
+                logger.info(
+                    f"BE SL for {pair}: direction={'SHORT' if trade.is_short else 'LONG'}, "
+                    f"be_stop_price={be_stop_price:.6f}, open_rate={trade.open_rate:.6f}, "
+                    f"current_rate={current_rate:.6f}"
+                )
             
             return stoploss_from_absolute(be_stop_price, current_rate, is_short=trade.is_short, leverage=trade.leverage)
         

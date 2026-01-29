@@ -20,6 +20,10 @@ from datetime import datetime
 import pandas as pd
 import numpy as np
 import talib.abstract as ta
+import warnings
+
+# Suppress XGBoost/Sklearn device mismatch warning
+warnings.filterwarnings("ignore", message=".*Falling back to prediction using DMatrix.*")
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -32,8 +36,9 @@ from smc_luxalgo_numba import SMCLuxAlgoNumba as SMCLuxAlgo
 
 try:
     from xgboost import XGBClassifier
-    from sklearn.model_selection import TimeSeriesSplit, RandomizedSearchCV
+    from sklearn.model_selection import TimeSeriesSplit, cross_val_score
     from sklearn.metrics import classification_report, roc_auc_score, precision_recall_curve
+    import optuna
 except ImportError as e:
     logger.error(f"Missing import: {e}. Run pip install xgboost scikit-learn")
     sys.exit(1)
@@ -60,7 +65,7 @@ def load_config():
     # Base config (static values)
     config = {
         # Paths
-        'data_dir': 'user_data/data/binance/futures',
+        'data_dir': 'user_data/data/bitget/futures',
         'model_output_dir': 'user_data/strategies/SMC/models',
         
         # Training pairs - will be loaded from config.json
@@ -77,7 +82,7 @@ def load_config():
         # ML parameters
         'n_splits': 5,
         'hyperopt': True,
-        'hyperopt_iter': 50,
+        'hyperopt_iter': 100,
         
         # Per-symbol training mode
         'per_symbol_models': False,  # If True, train one model per symbol
@@ -94,7 +99,7 @@ def load_config():
             
             # Load exchange and build data_dir dynamically
             exchange_config = main_config.get('exchange', {})
-            exchange_name = exchange_config.get('name', 'binance').lower()
+            exchange_name = exchange_config.get('name', 'bitget').lower()
             
             # Check for trading_mode to determine subfolder (spot vs futures)
             trading_mode = main_config.get('trading_mode', 'spot')
@@ -126,13 +131,18 @@ def load_config():
             buy_params = strat_config.get('params', {}).get('buy', {})
             
             config['internal_length'] = buy_params.get('internal_length', 5)
-            config['swing_length'] = buy_params.get('swing_length', 50)
+            config['swing_length'] = buy_params.get('swing_length', 25)
+            
+            # Check for GPU config
+            config['use_gpu'] = buy_params.get('use_gpu', False)
+            if config['use_gpu']:
+                 logger.info("🚀 GPU Training Enabled via JSON")
             
             logger.info(f"📖 Loaded SMC params from JSON: internal={config['internal_length']}, swing={config['swing_length']}")
     except Exception as e:
         logger.warning(f"Could not load strategy JSON, using defaults: {e}")
         config['internal_length'] = 5
-        config['swing_length'] = 50
+        config['swing_length'] = 25
     
     return config
 
@@ -412,51 +422,74 @@ def train_model():
         }
         
         if CONFIG.get('hyperopt', False):
-            logger.info(f"🔎 Starting Hyperopt (RandomizedSearchCV) with {CONFIG['hyperopt_iter']} iterations...")
+            logger.info(f"🔎 Starting Hyperopt (Optuna) with {CONFIG['hyperopt_iter']} trials...")
             
-            # Param Grid
-            param_dist = {
-                'n_estimators': [100, 200, 300, 500],
-                'max_depth': [3, 4, 5, 6, 8, 10],
-                'learning_rate': [0.01, 0.03, 0.05, 0.1, 0.2],
-                'subsample': [0.6, 0.7, 0.8, 0.9, 1.0],
-                'colsample_bytree': [0.6, 0.7, 0.8, 0.9, 1.0],
-                'gamma': [0, 0.1, 0.2, 0.5, 1.0],
-                'min_child_weight': [1, 3, 5]
-            }
+            # Reduce verbosity of Optuna
+            optuna.logging.set_verbosity(optuna.logging.WARNING)
             
-            xgb = XGBClassifier(eval_metric='logloss', n_jobs=-1)
+            def objective(trial):
+                param = {
+                    'n_estimators': trial.suggest_int('n_estimators', 100, 500),
+                    'max_depth': trial.suggest_int('max_depth', 3, 10),
+                    'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.2),
+                    'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+                    'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
+                    'gamma': trial.suggest_float('gamma', 0.0, 1.0),
+                    'min_child_weight': trial.suggest_int('min_child_weight', 1, 5),
+                    # Constant params
+                    'eval_metric': 'logloss',
+                    'n_jobs': -1 
+                }
+
+                # Handle GPU for Trial
+                if CONFIG.get('use_gpu', False):
+                    param.update({'tree_method': 'hist', 'device': 'cuda'})
+                
+                model = XGBClassifier(**param)
+                
+                # TimeSeriesSplit for CV
+                tscv = TimeSeriesSplit(n_splits=5)
+                
+                # If GPU, use sequential CV to avoid OOM
+                cv_jobs = 1 if CONFIG.get('use_gpu', False) else -1
+                
+                # Calculate mean ROC AUC
+                scores = cross_val_score(model, X_train_full, y_train_full, cv=tscv, scoring='roc_auc', n_jobs=cv_jobs)
+                return scores.mean()
+
+            # Create Study
+            study = optuna.create_study(direction='maximize')
+            study.optimize(objective, n_trials=CONFIG['hyperopt_iter'])
             
-            # TimeSeriesSplit for CV to avoid lookahead bias during validation
-            tscv = TimeSeriesSplit(n_splits=5)
-            
-            random_search = RandomizedSearchCV(
-                estimator=xgb,
-                param_distributions=param_dist,
-                n_iter=CONFIG['hyperopt_iter'],
-                scoring='roc_auc',
-                cv=tscv,
-                verbose=1,
-                n_jobs=-1, # Use all cores
-                random_state=42
-            )
-            
-            random_search.fit(X_train_full, y_train_full)
-            
-            best_params = random_search.best_params_
+            best_params = study.best_trial.params
             logger.info(f"✅ Best Params Found: {json.dumps(best_params, indent=2)}")
-            logger.info(f"   Best Validation AUC: {random_search.best_score_:.4f}")
+            logger.info(f"   Best Validation AUC: {study.best_value:.4f}")
             
-            model = random_search.best_estimator_
+            # Re-instantiate model with best params
+            final_args = {
+                **best_params,
+                'eval_metric': 'logloss',
+                'n_jobs': -1
+            }
+            if CONFIG.get('use_gpu', False):
+                 final_args.update({'tree_method': 'hist', 'device': 'cuda'})
+            
+            model = XGBClassifier(**final_args)
+            model.fit(X_train_full, y_train_full)
             
         else:
             # Fixed Params
             logger.info("Using fixed default parameters.")
-            model = XGBClassifier(
+            
+            xgb_args = {
                 **best_params,
-                eval_metric='logloss',
-                n_jobs=-1
-            )
+                'eval_metric': 'logloss',
+                'n_jobs': -1
+            }
+            if CONFIG.get('use_gpu', False):
+                 xgb_args.update({'tree_method': 'hist', 'device': 'cuda'})
+            
+            model = XGBClassifier(**xgb_args)
             model.fit(X_train_full, y_train_full)
         
         # 5. Evaluate on Holdout Test Set

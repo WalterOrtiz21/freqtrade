@@ -286,7 +286,8 @@ def _smc_zones_kernel(
 ) -> Tuple[
     np.ndarray, np.ndarray, np.ndarray, np.ndarray,
     np.ndarray, np.ndarray, np.ndarray, np.ndarray,
-    np.ndarray, np.ndarray, np.ndarray, np.ndarray  # NEW: Breakers
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray, # Breakers (OB)
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray  # Breakers (FVG) - NEW
 ]:
     
     # --- Output Arrays ---
@@ -302,11 +303,17 @@ def _smc_zones_kernel(
     act_bear_fvg_top = np.zeros(n)
     act_bear_fvg_btm = np.zeros(n)
     
-    # Breakers (NEW)
+    # Breakers (OB)
     act_brk_bull_top = np.zeros(n)
     act_brk_bull_btm = np.zeros(n)
     act_brk_bear_top = np.zeros(n)
     act_brk_bear_btm = np.zeros(n)
+
+    # Breakers (FVG) - NEW
+    act_fvg_brk_bull_top = np.zeros(n)
+    act_fvg_brk_bull_btm = np.zeros(n)
+    act_fvg_brk_bear_top = np.zeros(n)
+    act_fvg_brk_bear_btm = np.zeros(n)
     
     # --- State Lists (Indices) ---
     bull_ob_idxs = [np.int64(x) for x in range(0)]
@@ -315,12 +322,16 @@ def _smc_zones_kernel(
     bull_fvg_idxs = [np.int64(x) for x in range(0)]
     bear_fvg_idxs = [np.int64(x) for x in range(0)]
     
-    # Breaker Lists
-    # Bullish Breaker = Old Bearish OB that was broken up (Now Support)
+    # Breaker Lists (OB)
     bull_brk_idxs = [np.int64(x) for x in range(0)]
-    
-    # Bearish Breaker = Old Bullish OB that was broken down (Now Resistance)
     bear_brk_idxs = [np.int64(x) for x in range(0)]
+
+    # Breaker Lists (FVG) - NEW
+    # Bullish FVG Breaker = Old Bearish FVG broken up (Support)
+    bull_fvg_brk_idxs = [np.int64(x) for x in range(0)]
+    
+    # Bearish FVG Breaker = Old Bullish FVG broken down (Resistance)
+    bear_fvg_brk_idxs = [np.int64(x) for x in range(0)]
     
     for i in range(n):
         c_high = high[i]
@@ -330,126 +341,150 @@ def _smc_zones_kernel(
         # --- 1. Process Existing Zones (Mitigation / Flip) ---
         
         # A) Bullish OBs (Support)
-        # Broken if Close < Bottom -> Becomes Bearish Breaker (Resistance)
         next_bull_obs = [np.int64(x) for x in range(0)]
         best_bull_ob_idx = -1
         
         for idx in bull_ob_idxs:
-            top = ob_bull_top[idx]
             btm = ob_bull_btm[idx]
-            
             if c_close < btm:
                 # BROKEN! Flux to Bearish Breaker
                 bear_brk_idxs.append(idx)
-            elif c_low < btm:
-                 # WICKED below (but closed above)? 
-                 # Standard SMC: If body closes below, it's invalid. 
-                 # If just wick, it's still valid or mitigated? 
-                 # User says: "Mitiga rompiendo su base (por cuerpo, mecha o media)".
-                 # "Un OB se convierte en Breaker cuando el precio lo mitiga rompiendo su base... si el precio lo rompe a la baja"
-                 # Let's stick to CLOSE for a confirm break to keep it stable.
-                 # If Close < Bottom -> Flip.
-                 # If Low < Bottom but Close > Bottom -> Just wick? Keep it? 
-                 # Let's keep it for now unless closed below.
-                 next_bull_obs.append(idx)
-                 best_bull_ob_idx = idx
             else:
                  next_bull_obs.append(idx)
                  best_bull_ob_idx = idx
         bull_ob_idxs = next_bull_obs
         
         # B) Bearish OBs (Resistance)
-        # Broken if Close > Top -> Becomes Bullish Breaker (Support)
         next_bear_obs = [np.int64(x) for x in range(0)]
         best_bear_ob_idx = -1
         
         for idx in bear_ob_idxs:
             top = ob_bear_top[idx]
-            btm = ob_bear_btm[idx]
-            
             if c_close > top:
-                # BROKEN! Flip to Bullish Breaker
+                # BROKEN! Flux to Bullish Breaker
                 bull_brk_idxs.append(idx)
             else:
                 next_bear_obs.append(idx)
                 best_bear_ob_idx = idx
         bear_ob_idxs = next_bear_obs
         
-        # C) FVGs (Standard mitigation)
-        # Bull FVG: Broken if Close < Low? Or just touched? 
-        # Usually FVG is one-time use or stays until filled?
-        # User: "Breaker FVG... cuando el precio entra y cruza su límite inválido"
-        # Let's keep standard FVG logic for now: Remove if filled.
-        # Bull FVG (Gap b/w btm and top). Filled if c_low <= top?
+        # C) FVGs (Standard mitigation + Flip)
+        
+        # Bullish FVG (Support) -> Becomes Bearish FVG Breaker if Close < Bottom
+        # Note: FVG Bottom is high[i-2], Top is low[i]. Wait.
+        # In kernel:
+        # fvg_bull_top[i] = low[i] (The top of the gap)
+        # fvg_bull_btm[i] = high[i-2] (The bottom of the gap)
         
         next_bull_fvgs = [np.int64(x) for x in range(0)]
         best_bull_fvg_idx = -1
         for idx in bull_fvg_idxs:
             top = fvg_bull_top[idx]
-            # btm = fvg_bull_btm[idx] # Unused for mitigation check
-            if c_low <= top:
-                # Filled/Mitigated?
-                # User says "Breaker FVG" also exists.
-                # If it crosses invalid limit (Top), becomes Breaker FVG (Resistance).
-                # Bull FVG (Support) -> Broken -> Bearish Breaker FVG (Resistance).
-                # Not implementing Breaker FVG yet to save complexity, just standard FVG.
-                # We just drop it.
-                pass 
+            btm = fvg_bull_btm[idx]
+            
+            # Mitigation Check:
+            # Standard: If filled (Low <= Top)? No, keeps existing.
+            # Inversion Check: If Close < Bottom (Fully crossed)
+            
+            if c_close < btm:
+                # BROKEN! Flip to Bearish FVG Breaker (Resistance)
+                bear_fvg_brk_idxs.append(idx)
+            elif c_low <= top:
+                 # Filled / Mitigated (Touched). 
+                 # Standard logic: often removed if filled.
+                 # User wants Breakers. If it's just filled but not broken (closed below), 
+                 # does it stay? Usually yes until invalid.
+                 # Let's keep it until Broken.
+                 next_bull_fvgs.append(idx)
+                 best_bull_fvg_idx = idx
             else:
                 next_bull_fvgs.append(idx)
                 best_bull_fvg_idx = idx
         bull_fvg_idxs = next_bull_fvgs
         
+        # Bearish FVG (Resistance) -> Becomes Bullish FVG Breaker if Close > Top
+        # fvg_bear_top[i] = low[i-2] (Top of gap)
+        # fvg_bear_btm[i] = high[i] (Bottom of gap)
+        
         next_bear_fvgs = [np.int64(x) for x in range(0)]
         best_bear_fvg_idx = -1
         for idx in bear_fvg_idxs:
-            # top = fvg_bear_top[idx]
+            top = fvg_bear_top[idx]
             btm = fvg_bear_btm[idx]
-            if c_high >= btm:
-                pass
+            
+            if c_close > top:
+                # BROKEN! Flip to Bullish FVG Breaker (Support)
+                bull_fvg_brk_idxs.append(idx)
+            elif c_high >= btm:
+                # Filled/Mitigated
+                next_bear_fvgs.append(idx)
+                best_bear_fvg_idx = idx
             else:
                 next_bear_fvgs.append(idx)
                 best_bear_fvg_idx = idx
         bear_fvg_idxs = next_bear_fvgs
         
-        # D) Breakers Validation
-        # Bullish Breaker (Support): Created from broken Bearish OB.
-        # Limits: Top/Bottom of original Bear IB.
-        # Invalidated if Close < Bottom (Broken completely back down).
+        # D) Breakers Validation (OB)
         
         next_bull_brks = [np.int64(x) for x in range(0)]
         best_bull_brk_idx = -1
         for idx in bull_brk_idxs:
-            # It was a Bear OB, so use bear arrays
-            top = ob_bear_top[idx]
-            btm = ob_bear_btm[idx]
-            
+            btm = ob_bear_btm[idx] # Bear OB Btm
             if c_close < btm:
-                # Broken again (Failed support) - Delete
-                pass
+                pass # Broken again
             else:
                 next_bull_brks.append(idx)
                 best_bull_brk_idx = idx
         bull_brk_idxs = next_bull_brks
         
-        # Bearish Breaker (Resistance): Created from broken Bullish OB.
-        # Limits: Top/Bottom of original Bull OB.
-        # Invalidated if Close > Top (Broken completely back up).
-        
         next_bear_brks = [np.int64(x) for x in range(0)]
         best_bear_brk_idx = -1
         for idx in bear_brk_idxs:
-            # It was a Bull OB
-            top = ob_bull_top[idx]
-            btm = ob_bull_btm[idx]
-            
+            top = ob_bull_top[idx] # Bull OB Top
             if c_close > top:
-                # Broken again (Failed resistance) - Delete
-                pass
+                pass # Broken again
             else:
                 next_bear_brks.append(idx)
                 best_bear_brk_idx = idx
         bear_brk_idxs = next_bear_brks
+
+        # E) Breakers Validation (FVG) - NEW
+        
+        # Bullish FVG Breaker (Support): Created from broken Bearish FVG.
+        # Original Bear FVG: Top=Low[i-2], Btm=High[i]
+        # Valid as Support unless broken back down (Close < Btm) 
+        
+        next_bull_fvg_brks = [np.int64(x) for x in range(0)]
+        best_bull_fvg_brk_idx = -1
+        for idx in bull_fvg_brk_idxs:
+             # Use original Bear FVG coords
+             # top = fvg_bear_top[idx]
+             btm = fvg_bear_btm[idx]
+             
+             if c_close < btm:
+                 pass # Failed support
+             else:
+                 next_bull_fvg_brks.append(idx)
+                 best_bull_fvg_brk_idx = idx
+        bull_fvg_brk_idxs = next_bull_fvg_brks
+
+        # Bearish FVG Breaker (Resistance): Created from broken Bullish FVG.
+        # Original Bull FVG: Top=Low[i], Btm=High[i-2]
+        # Valid as Resistance unless broken back up (Close > Top)
+        
+        next_bear_fvg_brks = [np.int64(x) for x in range(0)]
+        best_bear_fvg_brk_idx = -1
+        for idx in bear_fvg_brk_idxs:
+            # Use original Bull FVG coords
+            top = fvg_bull_top[idx]
+            # btm = fvg_bull_btm[idx]
+            
+            if c_close > top:
+                pass # Failed resistance
+            else:
+                next_bear_fvg_brks.append(idx)
+                best_bear_fvg_brk_idx = idx
+        bear_fvg_brk_idxs = next_bear_fvg_brks
             
         
         # --- 2. Add New Zones (OBs/FVGs) ---
@@ -486,16 +521,25 @@ def _smc_zones_kernel(
             act_bear_fvg_top[i] = fvg_bear_top[best_bear_fvg_idx]
             act_bear_fvg_btm[i] = fvg_bear_btm[best_bear_fvg_idx]
             
-        # Breakers Output
+        # Breakers Output (OB)
         if best_bull_brk_idx != -1:
-            # Bullish Breaker comes from Bear OB array
             act_brk_bull_top[i] = ob_bear_top[best_bull_brk_idx]
             act_brk_bull_btm[i] = ob_bear_btm[best_bull_brk_idx]
             
         if best_bear_brk_idx != -1:
-            # Bearish Breaker comes from Bull OB array
             act_brk_bear_top[i] = ob_bull_top[best_bear_brk_idx]
             act_brk_bear_btm[i] = ob_bull_btm[best_bear_brk_idx]
+
+        # Breakers Output (FVG) - NEW
+        if best_bull_fvg_brk_idx != -1:
+            # Bullish Breaker comes from Bear FVG array
+            act_fvg_brk_bull_top[i] = fvg_bear_top[best_bull_fvg_brk_idx]
+            act_fvg_brk_bull_btm[i] = fvg_bear_btm[best_bull_fvg_brk_idx]
+            
+        if best_bear_fvg_brk_idx != -1:
+            # Bearish Breaker comes from Bull FVG array
+            act_fvg_brk_bear_top[i] = fvg_bull_top[best_bear_fvg_brk_idx]
+            act_fvg_brk_bear_btm[i] = fvg_bull_btm[best_bear_fvg_brk_idx]
 
     return (
         act_bull_ob_top, act_bull_ob_btm,
@@ -503,7 +547,9 @@ def _smc_zones_kernel(
         act_bull_fvg_top, act_bull_fvg_btm,
         act_bear_fvg_top, act_bear_fvg_btm,
         act_brk_bull_top, act_brk_bull_btm,
-        act_brk_bear_top, act_brk_bear_btm
+        act_brk_bear_top, act_brk_bear_btm,
+        act_fvg_brk_bull_top, act_fvg_brk_bull_btm,
+        act_fvg_brk_bear_top, act_fvg_brk_bear_btm
     )
 
 # =============================================================================
@@ -543,7 +589,9 @@ class SMCLuxAlgoNumba:
             act_ob_bt, act_ob_bb, act_ob_bet, act_ob_beb,
             act_fvg_bt, act_fvg_bb, act_fvg_bet, act_fvg_beb,
             act_brk_bull_t, act_brk_bull_b,
-            act_brk_bear_t, act_brk_bear_b
+            act_brk_bear_t, act_brk_bear_b,
+            act_fvg_brk_bull_t, act_fvg_brk_bull_b,
+            act_fvg_brk_bear_t, act_fvg_brk_bear_b
         ) = _smc_zones_kernel(
             self.high, self.low, self.close,
             ob_bt_raw, ob_bb_raw, ob_bet_raw, ob_beb_raw,
@@ -585,11 +633,17 @@ class SMCLuxAlgoNumba:
         df['active_bearish_fvg_top'] = act_fvg_bet
         df['active_bearish_fvg_bottom'] = act_fvg_beb
         
-        # Active Zones (Breakers)
+        # Active Zones (Breakers - OB)
         df['active_bullish_breaker_top'] = act_brk_bull_t
         df['active_bullish_breaker_bottom'] = act_brk_bull_b
         df['active_bearish_breaker_top'] = act_brk_bear_t
         df['active_bearish_breaker_bottom'] = act_brk_bear_b
+
+        # Active Zones (Breakers - FVG) - NEW
+        df['active_bullish_fvg_breaker_top'] = act_fvg_brk_bull_t
+        df['active_bullish_fvg_breaker_bottom'] = act_fvg_brk_bull_b
+        df['active_bearish_fvg_breaker_top'] = act_fvg_brk_bear_t
+        df['active_bearish_fvg_breaker_bottom'] = act_fvg_brk_bear_b
         
         return df
 
