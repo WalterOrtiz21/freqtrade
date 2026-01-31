@@ -412,8 +412,6 @@ class LorentzianSuperTrend(IStrategy):
     position_adjustment_enable = True 
     process_only_new_candles = True # Similar a process_orders_on_close de Pine
 
-    process_only_new_candles = True # Similar a process_orders_on_close de Pine
-
     # Fecha desde la cual calcular min/max históricos para normalización
     # Esto replica el comportamiento de Pine Script que usa todo el historial del chart
     HISTORIC_START_DATE = "2020-01-01"

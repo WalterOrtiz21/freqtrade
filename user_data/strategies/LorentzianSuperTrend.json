@@ -83,7 +83,7 @@
       "0": 100
     },
     "stoploss": {
-      "stoploss": -0.99
+      "stoploss": -0.5
     }
   },
   "ft_stratparam_v": 1,

@@ -1,0 +1,322 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © chhagansinghmeena - Converted to Strategy
+
+//@version=5
+strategy("ML: Cosine Similarity & Euclidean + Lorentzian Distance [Strategy]", overlay=true, 
+         default_qty_type=strategy.percent_of_equity, default_qty_value=100, 
+         initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.1,
+         pyramiding=0, process_orders_on_close=true, max_bars_back=5000)
+
+import chhagansinghmeena/BankNifty_CSM/16 as CSM
+
+//====================================== Thanks to JDEHORTY For coding structure ==========//
+//===============================================================================================//
+
+// === Helper Functions (From Original) ===
+rationalQuadratic(_src, _lookback, _relativeWeight, startAtBar) =>
+    _currentWeight = 0.0
+    _cumulativeWeight = 0.0
+    // Loop from 0 up to either the start of history or max bars back (4999)
+    _loopEnd = math.min(bar_index, 4999) 
+    for i = 0 to _loopEnd
+        y = _src[i]
+        // Weight calculation: decay over distance i
+        w = math.pow(1 + (math.pow(i, 2) / ((math.pow(_lookback, 2) * 2 * _relativeWeight))), -_relativeWeight)
+        _currentWeight += y * w
+        _cumulativeWeight += w
+    rationalQuad = _cumulativeWeight != 0.0 ? _currentWeight / _cumulativeWeight : _src
+    rationalQuad
+
+get_Linear_interpolation(series float src, float oldMax , simple int lookback=100) =>
+    minVal = ta.lowest(src,lookback)
+    (src - minVal) / (oldMax - minVal) 
+
+n_rsi(series float src, simple int n1, simple int n2) =>
+    get_Linear_interpolation(ta.ema(ta.rsi(src, n1), n2),100)
+
+calc_kst(series float src) =>
+    lengthROC1 = 10, lengthROC2 = 15, lengthROC3 = 20, lengthROC4 = 30
+    roc1 = ta.change(src, lengthROC1), roc2 = ta.change(src, lengthROC2), roc3 = ta.change(src, lengthROC3), roc4 = ta.change(src, lengthROC4)
+    smoothed1 = ta.sma(roc1, 3), smoothed2 = ta.sma(roc2, 3), smoothed3 = ta.sma(roc3, 3), smoothed4 = ta.sma(roc4, 3)
+    kstLine = smoothed1 + 2 * smoothed2 + 3 * smoothed3 + 4 * smoothed4
+    rsiKST = ta.rsi(kstLine, 14)
+    rsiKST
+
+get_linear_transformation(series float src = close, float min, float max, int lookback = 200) => 
+    _historicMin = ta.highest(nz(src), lookback) 
+    _historicMax = ta.lowest(nz(src), lookback) 
+    linearValue = min + (max - min) * (src - _historicMin) / math.max(_historicMax - _historicMin, 10e-10)
+    linearValue
+
+sigmoid(series float src, int lookback = 20, float relativeWeight = 8, int startAtBar = 25) =>
+    _currentWeight = 0.0
+    _cumulativeWeight = 0.0
+    // Safely limit loop to avoid 5000+ bar lookup error
+    _loopStart = math.max(0, startAtBar)
+    _loopEnd = math.min(bar_index, 4999) // Cap at 4999
+    
+    // Logic: calculate weighted sum over history
+    for i = 0 to _loopEnd
+        // Only apply weight if within range (or maybe logic intended entire history?)
+        // Assuming intention is global smoothing similar to RQ
+        y = src[i]
+        w = math.pow(1 + (math.pow(i - startAtBar, 2) / (math.pow(lookback, 2) * 2 * relativeWeight)), -relativeWeight)
+        _currentWeight += y * w
+        _cumulativeWeight += w
+        
+    sigmoidValue = _cumulativeWeight != 0.0 ? _currentWeight / _cumulativeWeight : src
+    sigmoidValue
+
+macd(series float src = close) =>
+    [macdLine, signalLine, _] = ta.macd(src, 12, 26, 9)
+    ma = get_linear_transformation(macdLine, 14, 1)
+    sa = get_linear_transformation(signalLine, 14, 1)
+    macd_val = math.avg(ma, sa)
+    macd_val
+
+// === STRATEGY INPUTS ===
+historyLookBack = input.int(title='History Lookback', defval=1000, maxval=4000, group='General Settings', tooltip="Maximum 4000 to stay within Pine Script limits.")
+nearest_Probable_Distance = input.int(title='Nearest Probable Distance', defval=8, group='General Settings')
+trenSelection = input.string(title='Moving Average Selection', options=['CPMA', 'FRMA', 'RationalQuad'], defval='RationalQuad', group='Moving Averages')
+cpmaLength = input.int(title="CPMA Length", defval=9, group='Moving Averages')
+frmaLength = input.int(title="FRMA Length", defval=14, group='Moving Averages')
+enableFilter = input.bool(title="Enable Trend Filter", defval=true, group='Filter')
+isRational = input.bool(title="Use Rational smoothing", defval=true, group='Filter')
+isRationalSigma = input.bool(title="Use Sigmoid smoothing ", defval=true, group='Filter')
+enableCandleFilter = input.bool(title="Enable Candle Pattern Filter", defval=false, group='Filter', tooltip="When enabled, Long entries require bullish candle patterns and Short entries require bearish candle patterns as confirmation.")
+enableSuperTrendFilter = input.bool(title="Enable SuperTrend Filter", defval=true, group='Filter', tooltip="When enabled, only Long when SuperTrend is bullish, only Short when SuperTrend is bearish.")
+methodSelection = input.string(title='Distance Calculation', options=['Lorentzian', 'Euclidean', 'Cosine similarity'], defval='Cosine similarity', group='Machine Learning : Methods')
+
+// SuperTrend Settings
+stFactor = input.float(title="SuperTrend Factor", defval=3.0, minval=1.0, maxval=10.0, step=0.5, group='SuperTrend')
+stAtrPeriod = input.int(title="SuperTrend ATR Period", defval=10, minval=1, maxval=50, group='SuperTrend')
+
+// Strategy-specific inputs (Position Management)
+// Strategy-specific inputs (Position Management)
+longTakeProfitPerc = input.float(title="Long Take Profit (%)", defval=5.0, minval=0.1, step=0.1, group='Position Management', tooltip="Take profit percentage for Long positions.")
+shortTakeProfitPerc = input.float(title="Short Take Profit (%)", defval=5.0, minval=0.1, step=0.1, group='Position Management', tooltip="Take profit percentage for Short positions.")
+stopLossPerc = input.float(title="Stop Loss (%)", defval=3.0, minval=0.1, step=0.1, group='Position Management', tooltip="Stop loss percentage.")
+trailingTakeProfitPerc = input.float(title="Trailing Take Profit (%)", defval=1.0, minval=0.01, step=0.1, group='Position Management', tooltip="Trailing stop percentage once take profit is reached.")
+start = input.time(title='Start Date', defval=timestamp('01 Jan 2023 03:30 +0000'), group='Backtesting')
+finish = input.time(title='End Date', defval=timestamp('1 Jan 2099 15:30 +0000'), group='Backtesting')
+
+// Get CPMA and FRMA
+CPMA = CSM.CSM_CPMA(length = cpmaLength)
+FRMA = CSM.frama_Calculation(close,length = frmaLength)
+
+// === FEATURE TYPES ===
+type FeatureArrays
+    array<float> f1
+    array<float> f2
+    array<float> f3
+    array<float> f4
+    array<float> f5
+    array<float> f6
+
+type FeatureSeries
+    float f1
+    float f2
+    float f3
+    float f4
+    float f5
+    float f6
+
+series_from(feature_string, _close, _high, _low, _hlc3, f_paramA, f_paramB) =>
+    switch feature_string
+        "RSI" => n_rsi(_close, f_paramA, f_paramB)    
+        "KST" => get_Linear_interpolation(calc_kst(src = _close),100)
+        "CPMA"=> get_linear_transformation(CPMA,14,1)
+        "VWAP"=> get_linear_transformation(ta.vwap(_close),14,1)
+        "FRAMA"=> get_linear_transformation(FRMA,14,1) 
+        "MACD"=> macd(_close)     
+        
+featureSeries = 
+ FeatureSeries.new(
+   series_from("CPMA", close, high, low, hlc3, 0, 0),
+   series_from("RSI", close, high, low, hlc3, 14, 1),
+   series_from("VWAP", close, high, low, hlc3, 0, 0),
+   series_from("KST", close, high, low, hlc3, 0, 0),
+   series_from("FRAMA", close, high, low, hlc3, 0, 0),
+   series_from("MACD", close, high, low, hlc3, 0, 0)
+ )
+
+var f1Array = array.new_float()
+var f2Array = array.new_float()
+var f3Array = array.new_float()
+var f4Array = array.new_float()
+var f5Array = array.new_float()
+var f6Array = array.new_float()
+
+array.push(f1Array, featureSeries.f1)
+array.push(f2Array, featureSeries.f2)
+array.push(f3Array, featureSeries.f3)
+array.push(f4Array, featureSeries.f4)
+array.push(f5Array, featureSeries.f5)
+array.push(f6Array, featureSeries.f6)
+
+featureArrays = 
+ FeatureArrays.new(
+   f1Array,
+   f2Array,
+   f3Array,
+   f4Array,
+   f5Array,
+   f6Array
+ )
+
+rqkValue = isRationalSigma ? sigmoid(close) : rationalQuadratic(close, 8, 0.5, 25)
+
+// === DISTANCE FUNCTIONS ===
+get_euclidean_distance(int i, FeatureSeries featureSeries, FeatureArrays featureArrays) =>
+    distance = 0.0
+    distance += math.pow(featureSeries.f1 - array.get(featureArrays.f1, i), 2)
+    distance += math.pow(featureSeries.f2 - array.get(featureArrays.f2, i), 2)
+    distance += math.pow(featureSeries.f4 - array.get(featureArrays.f4, i), 2)
+    distance += math.pow(featureSeries.f5 - array.get(featureArrays.f5, i), 2)
+    distance += math.pow(featureSeries.f6 - array.get(featureArrays.f6, i), 2)
+    if str.tonumber(timeframe.period) <= 20
+        distance += math.pow(featureSeries.f3 - array.get(featureArrays.f3, i), 2)
+    math.sqrt(distance)
+
+get_lorentzian_distance(int i, FeatureSeries featureSeries, FeatureArrays featureArrays) =>
+    distance = 0.0
+    distance += math.log(1+math.abs(featureSeries.f1 - array.get(featureArrays.f1, i)))
+    distance += math.log(1+math.abs(featureSeries.f2 - array.get(featureArrays.f2, i)))
+    distance += math.log(1+math.abs(featureSeries.f4 - array.get(featureArrays.f4, i)))
+    distance += math.log(1+math.abs(featureSeries.f5 - array.get(featureArrays.f5, i)))
+    distance += math.log(1+math.abs(featureSeries.f6 - array.get(featureArrays.f6, i)))
+    if str.tonumber(timeframe.period) <= 20
+        distance += math.log(1+math.abs(featureSeries.f3 - array.get(featureArrays.f3, i)))
+    math.sqrt(distance)
+
+get_cosine_similarity(i, featureSeries, featureArrays) =>
+    dotProduct = 0.0
+    magnitudeSeries = 0.0
+    magnitudeArray = 0.0
+    dotProduct += featureSeries.f1 * array.get(featureArrays.f1, i)
+    dotProduct += featureSeries.f2 * array.get(featureArrays.f2, i)
+    dotProduct += featureSeries.f4 * array.get(featureArrays.f4, i)
+    dotProduct += featureSeries.f5 * array.get(featureArrays.f5, i)
+    dotProduct += featureSeries.f6 * array.get(featureArrays.f6, i)
+    magnitudeSeries +=  math.pow(featureSeries.f1, 2)
+    magnitudeSeries +=  math.pow(featureSeries.f2, 2)
+    magnitudeSeries +=  math.pow(featureSeries.f4, 2)
+    magnitudeSeries +=  math.pow(featureSeries.f5, 2)
+    magnitudeSeries +=  math.pow(featureSeries.f6, 2)
+    magnitudeArray += math.pow(array.get(featureArrays.f1, i), 2)
+    magnitudeArray += math.pow(array.get(featureArrays.f2, i), 2)
+    magnitudeArray += math.pow(array.get(featureArrays.f4, i), 2)
+    magnitudeArray += math.pow(array.get(featureArrays.f5, i), 2)
+    magnitudeArray += math.pow(array.get(featureArrays.f6, i), 2)
+    if str.tonumber(timeframe.period) <= 20
+        dotProduct += featureSeries.f3 * array.get(featureArrays.f3, i)
+        magnitudeSeries +=  math.pow(featureSeries.f3, 2)
+        magnitudeArray += math.pow(array.get(featureArrays.f3, i), 2)
+    magnitudeSeries := math.sqrt(magnitudeSeries)
+    magnitudeArray := math.sqrt(magnitudeArray)
+    if magnitudeSeries == 0.0 or magnitudeArray == 0.0
+        0.0
+    else
+        dotProduct / (magnitudeSeries * magnitudeArray)
+
+// === ML LOGIC ===
+maxBarsBackIndex = last_bar_index >= historyLookBack ? last_bar_index - historyLookBack : 0
+
+src = close
+y_train_series = src[4] < src[0] ? -1 : src[4] > src[0] ? 1 : 0
+var y_train_array = array.new_int(0)
+var predictions = array.new_float(0)
+var prediction = 0.
+var signal = 0
+var distances = array.new_float(0)
+
+array.push(y_train_array, y_train_series)
+
+lastDistance = -1.0
+size = math.min(historyLookBack-1, array.size(y_train_array)-1)
+sizeLoop = math.min(historyLookBack-1, size)
+
+get_ML_Distance(i) =>
+    switch
+        methodSelection == 'Lorentzian' => get_lorentzian_distance(i, featureSeries, featureArrays)
+        methodSelection == 'Euclidean' => get_euclidean_distance(i, featureSeries, featureArrays)
+        methodSelection == 'Cosine similarity' => get_cosine_similarity(i, featureSeries, featureArrays)
+
+if bar_index >= maxBarsBackIndex
+    for i = 0 to sizeLoop
+        d = get_ML_Distance(i)
+        if d >= lastDistance and i % 4
+            lastDistance := d
+            array.push(distances, d)
+            array.push(predictions, math.round(array.get(y_train_array, i)))
+            if array.size(predictions) > nearest_Probable_Distance
+                lastDistance := array.get(distances, math.round(nearest_Probable_Distance * 3 / 4))
+                array.shift(distances)
+                array.shift(predictions)
+    prediction := array.sum(predictions)
+
+// === TREND ===
+getTrend() =>
+    switch
+        trenSelection == 'CPMA' => isRational ? isRationalSigma ? sigmoid(CPMA) : rationalQuadratic(CPMA, 8, 0.5, 25) : CPMA
+        trenSelection == 'FRMA' => isRational ? isRationalSigma ? sigmoid(FRMA) : rationalQuadratic(FRMA, 8, 0.5, 25) : FRMA
+        trenSelection == 'RationalQuad' => rqkValue
+
+trend = getTrend()
+bool isBullishSmooth = close >= trend
+bool isBearishSmooth = close <= trend
+
+// === SIGNALS ===
+signal := prediction > 0 and (enableFilter ? isBullishSmooth : true) ? 1 : prediction < 0 and (enableFilter ? isBearishSmooth : true) ? -1 : nz(signal[1])
+isDifferentSignalType = ta.change(signal)
+isBuySignal = signal == 1
+isSellSignal = signal == -1
+isNewBuySignal = isBuySignal and isDifferentSignalType
+isNewSellSignal = isSellSignal and isDifferentSignalType
+
+// === CANDLESTICK PATTERN FILTER ===
+// Bullish patterns: Engulfing, Rising Window, Marubozu, Dragonfly Doji, Hammer, Morning Star, etc.
+isBullishCandlePattern = CSM.candlepatternbullish() or CSM.BullishCandlePatternOnDownTrend()
+// Bearish patterns: Engulfing, Falling Window, Dark Cloud, Evening Star, Shooting Star, etc.
+isBearishCandlePattern = CSM.candlepatternbearish() or CSM.BearishCandlePatternOnUpTrend()
+
+// Apply candle filter if enabled
+bullishCandleConfirm = enableCandleFilter ? isBullishCandlePattern : true
+bearishCandleConfirm = enableCandleFilter ? isBearishCandlePattern : true
+
+// === SUPERTREND FILTER ===
+[superTrend, stDirection] = ta.supertrend(stFactor, stAtrPeriod)
+isSuperTrendBullish = stDirection < 0  // direction < 0 means bullish (price above supertrend)
+isSuperTrendBearish = stDirection > 0  // direction > 0 means bearish (price below supertrend)
+
+// Apply SuperTrend filter if enabled
+superTrendLongConfirm = enableSuperTrendFilter ? isSuperTrendBullish : true
+superTrendShortConfirm = enableSuperTrendFilter ? isSuperTrendBearish : true
+
+// === WINDOW ===
+window() =>
+    time >= start and time <= finish ? true : false
+
+// === STRATEGY EXECUTION ===
+longCondition = isNewBuySignal and bullishCandleConfirm and superTrendLongConfirm and window()
+shortCondition = isNewSellSignal and bearishCandleConfirm and superTrendShortConfirm and window()
+
+// Calculate absolute price values from percentages for the library
+longTakeProfitVal = close * (longTakeProfitPerc / 100)
+shortTakeProfitVal = close * (shortTakeProfitPerc / 100)
+stopLossVal = close * (stopLossPerc / 100)
+trailingTakeProfitVal = close * (trailingTakeProfitPerc / 100)
+
+// Use the library's position management function
+// We pass the calculated absolute values
+CSM.entryExitinStrategy(longCondition, shortCondition, window(), longTakeProfitVal, shortTakeProfitVal, stopLossVal, trailingTakeProfitVal)
+
+// === PLOTTING ===
+[avgrationalQuad, plotColor] = CSM.getGradientColor(isFirstbar = barstate.isfirst, src = trend, length = trenSelection == 'CPMA' ? cpmaLength : trenSelection == 'FRMA' ? frmaLength : 14, isSmoothed = false)
+plot(avgrationalQuad, color=plotColor, linewidth=2, title="Trend")
+
+// Plot SuperTrend
+plot(enableSuperTrendFilter ? superTrend : na, color=isSuperTrendBullish ? color.green : color.red, linewidth=2, title="SuperTrend")
+
+plotshape(longCondition ? low : na, 'Buy', shape.labelup, location.belowbar, color=color.green, size=size.small, offset=0)
+plotshape(shortCondition ? high : na, 'Sell', shape.labeldown, location.abovebar, color=color.red, size=size.small, offset=0)

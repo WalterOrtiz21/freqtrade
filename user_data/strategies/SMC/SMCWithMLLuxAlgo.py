@@ -859,12 +859,18 @@ class SMCWithMLLuxAlgo(IStrategy):
                 ml_short_ok = short_proba > self.ml_threshold.value
                 
                 # Apply Filter
+                long_signals_count = long_condition.sum()
+                short_signals_count = short_condition.sum()
+                
                 long_condition &= ml_long_ok
                 short_condition &= ml_short_ok
                 
-                # Log only if a signal was blocked significantly (optional)
-                if (long_condition.sum() < ml_long_ok.sum()) or (short_condition.sum() < ml_short_ok.sum()):
-                     logger.info(f"🤖 ML Filter ({metadata['pair']}) Blocked Signals. Threshold: {self.ml_threshold.value}")
+                # Log only if a signal was blocked
+                blocked_long = long_signals_count - long_condition.sum()
+                blocked_short = short_signals_count - short_condition.sum()
+                
+                if blocked_long > 0 or blocked_short > 0:
+                     logger.info(f"🤖 ML Filter ({metadata['pair']}) Blocked {blocked_long} Longs, {blocked_short} Shorts. Threshold: {self.ml_threshold.value}")
 
             except Exception as e:
                 logger.error(f"❌ ML Inference Failed for {metadata['pair']}: {e}")
