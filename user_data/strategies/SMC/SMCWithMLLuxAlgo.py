@@ -380,6 +380,15 @@ class SMCWithMLLuxAlgo(IStrategy):
         # Merge signals into dataframe
         for col in signals.columns:
             dataframe[col] = signals[col].values
+        
+        # --- LOOKAHEAD BIAS FIX ---
+        # Zone columns (OB/FVG) must be shifted by 1 to avoid using zones
+        # that are created by the CURRENT candle for entry on that same candle.
+        # We evaluate entry at candle close, but should only use zones that
+        # existed BEFORE the candle started.
+        zone_cols = [c for c in dataframe.columns if c.startswith('active_')]
+        for col in zone_cols:
+            dataframe[col] = dataframe[col].shift(1).fillna(0)
             
         # --- 2. HTF Calculations (All configured timeframes) ---
         if self.dp:
@@ -879,6 +888,34 @@ class SMCWithMLLuxAlgo(IStrategy):
         # Apply signals
         dataframe.loc[long_condition, 'enter_long'] = 1
         dataframe.loc[short_condition, 'enter_short'] = 1
+        
+        # === DETAILED ENTRY LOGGING ===
+        # Log each entry with zone details (only if logging enabled)
+        # 
+        # NOTE: Future consideration - stricter zone validation:
+        # Current logic: high >= fvg_bottom (price touches or passes zone)
+        # Stricter: (high >= fvg_bottom) & (high <= fvg_top) (price INSIDE zone)
+        #
+        if self.enable_logging.value:
+            short_entries = dataframe[short_condition].copy()
+            for idx, row in short_entries.iterrows():
+                bear_fvg = f"[{row.get('active_bearish_fvg_bottom', 0):.5f}, {row.get('active_bearish_fvg_top', 0):.5f}]" if row.get('active_bearish_fvg_top', 0) > 0 else "None"
+                bear_ob = f"[{row.get('active_bearish_ob_bottom', 0):.5f}, {row.get('active_bearish_ob_top', 0):.5f}]" if row.get('active_bearish_ob_top', 0) > 0 else "None"
+                logger.info(
+                    f"📉 SHORT ENTRY: {metadata['pair']} @ {row['date']} | "
+                    f"Close={row['close']:.5f} High={row['high']:.5f} | "
+                    f"Bearish FVG={bear_fvg} OB={bear_ob}"
+                )
+            
+            long_entries = dataframe[long_condition].copy()
+            for idx, row in long_entries.iterrows():
+                bull_fvg = f"[{row.get('active_bullish_fvg_bottom', 0):.5f}, {row.get('active_bullish_fvg_top', 0):.5f}]" if row.get('active_bullish_fvg_top', 0) > 0 else "None"
+                bull_ob = f"[{row.get('active_bullish_ob_bottom', 0):.5f}, {row.get('active_bullish_ob_top', 0):.5f}]" if row.get('active_bullish_ob_top', 0) > 0 else "None"
+                logger.info(
+                    f"📈 LONG ENTRY: {metadata['pair']} @ {row['date']} | "
+                    f"Close={row['close']:.5f} Low={row['low']:.5f} | "
+                    f"Bullish FVG={bull_fvg} OB={bull_ob}"
+                )
         
         # Log stats
         logger.info(
