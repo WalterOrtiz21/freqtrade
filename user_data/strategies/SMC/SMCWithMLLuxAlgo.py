@@ -27,7 +27,7 @@ Exit Logic:
 import logging
 import numpy as np
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 from pandas import DataFrame
 from typing import Optional, Dict, List
 import pickle
@@ -929,6 +929,56 @@ class SMCWithMLLuxAlgo(IStrategy):
                  side: str, **kwargs) -> float:
         """Get leverage from config."""
         return self.config.get('leverage', 10.0)
+    
+    def _get_timeframe_minutes(self) -> int:
+        """Convert timeframe string to minutes."""
+        tf = self.timeframe
+        if tf.endswith('m'):
+            return int(tf[:-1])
+        elif tf.endswith('h'):
+            return int(tf[:-1]) * 60
+        elif tf.endswith('d'):
+            return int(tf[:-1]) * 1440
+        return 15  # Default fallback
+    
+    def confirm_trade_entry(self, pair: str, order_type: str, amount: float, rate: float,
+                           time_in_force: str, current_time: datetime, entry_tag: str | None,
+                           side: str, **kwargs) -> bool:
+        """
+        Prevent entry if:
+        1. Already have an open trade for this pair
+        2. Recently closed a trade for this pair (cooldown based on entry_signal_lookback)
+        
+        This ensures ONE TRADE PER SYMBOL at a time and prevents re-entry
+        on the same signal after SL hit.
+        """
+        # 1. Check for existing open trades on this pair
+        open_trades = Trade.get_trades_proxy(pair=pair, is_open=True)
+        if open_trades:
+            logger.info(f"Entry blocked for {pair}: Already have an open trade")
+            return False
+        
+        # 2. Cooldown after closed trade (prevent immediate re-entry on same signal)
+        # Cooldown = entry_signal_lookback * timeframe_minutes
+        lookback_minutes = self.entry_signal_lookback.value * self._get_timeframe_minutes()
+        cooldown_start = current_time - timedelta(minutes=lookback_minutes)
+        
+        recent_trades = Trade.get_trades_proxy(
+            pair=pair,
+            is_open=False,
+        )
+        
+        # Filter trades that closed within the cooldown period
+        for trade in recent_trades:
+            if trade.close_date and trade.close_date >= cooldown_start:
+                minutes_since_close = (current_time - trade.close_date).total_seconds() / 60
+                logger.info(
+                    f"Entry blocked for {pair}: Trade closed {minutes_since_close:.0f}m ago, "
+                    f"cooldown is {lookback_minutes}m (lookback={self.entry_signal_lookback.value})"
+                )
+                return False
+        
+        return True
     
     def custom_stoploss(self, pair: str, trade: Trade, current_time: datetime,
                         current_rate: float, current_profit: float, **kwargs) -> float:

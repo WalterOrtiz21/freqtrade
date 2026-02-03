@@ -34,7 +34,7 @@
         "sell": {
             "use_dynamic_stoploss": true,
             "tp1_enabled": true,
-            "tp1_pct": 0.022,
+            "tp1_pct": 0.025,
             "tp1_amount": 50.0,
             "move_be_at_tp1": false,
             "tp2_pct": 99.60,

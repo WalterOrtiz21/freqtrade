@@ -506,15 +506,13 @@ class TrendlinesWithBreaks(IStrategy):
         # TP1 Logic
         if self.tp1_enabled.value:
             if price_move >= self.tp1_pct.value:
-                # Check if we already exited via TP1?
-                # We can check number of trades or orders.
-                # Or use a flag. Freqtrade doesn't handle custom flags easily on Trade object purely.
-                # We check if we have any exit orders.
-                
-                # Filter for exit orders
-                # We specifically look for "tp1" orders to verify if we already took profit.
-                if any(o.ft_order_tag == 'tp1' and o.status == 'closed' for o in trade.orders):
+                # Check if TP1 was already taken using persistent flag
+                tp1_taken = trade.get_custom_data('tp1_taken', default=False)
+                if tp1_taken:
                     return None
+
+                # Mark TP1 as taken BEFORE placing the order (prevents duplicate execution)
+                trade.set_custom_data('tp1_taken', True)
 
                 # First exit (TP1)
                 # Calculate amount to sell
