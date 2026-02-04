@@ -19,11 +19,12 @@
             "use_swing_signals": true,
             "require_choch": true,
             "require_ob_zone": true,
+            "fvg_min_size_pct": 0.001,
             "require_fvg_zone": true,
             "trade_with_trend": true,
-            "require_premium_discount": true,
+            "require_premium_discount": false,
             "premium_discount_threshold": 0.05,
-            "entry_signal_lookback": 10,
+            "entry_signal_lookback": 5,
             "use_ml_filter": true,
             "use_per_symbol_models": false,
             "ml_threshold": 0.25,
@@ -49,7 +50,10 @@
             "trailing_only_offset_is_reached": true
         },
         "custom": {
-            "enable_logging": false
+            "enable_logging": true,
+            "circuit_breaker_enabled": true,
+            "circuit_breaker_window": 30,
+            "circuit_breaker_limit": 3
         }
     },
     "ft_stratparam_v": 1,

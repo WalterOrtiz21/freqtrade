@@ -147,8 +147,17 @@ class SMCWithMLLuxAlgo(IStrategy):
     use_dynamic_stoploss = BooleanParameter(default=True, space='sell', optimize=True)
     sl_buffer_pct = DecimalParameter(0.001, 0.01, default=0.002, decimals=3, space='sell', optimize=True)
     
+    # NEW: FVG Min Size Filter
+    # Filter out "Micro FVGs" that are practically noise (e.g. < 0.1% width)
+    fvg_min_size_pct = DecimalParameter(0.000, 0.01, default=0.001, decimals=4, space='buy', optimize=True)
+    
     # Logging Control
     enable_logging = BooleanParameter(default=True, space='custom', optimize=False)
+    
+    # Circuit Breaker (Panic Mode) - Blocks trades during high volatility
+    circuit_breaker_enabled = BooleanParameter(default=True, space='custom', optimize=False)
+    circuit_breaker_window = IntParameter(15, 120, default=30, space='custom', optimize=False)  # Minutes
+    circuit_breaker_limit = IntParameter(2, 10, default=3, space='custom', optimize=False)  # Max SL hits
 
     # ==========================================================================
     # ML PARAMETERS (Placeholder)
@@ -380,6 +389,26 @@ class SMCWithMLLuxAlgo(IStrategy):
         # Merge signals into dataframe
         for col in signals.columns:
             dataframe[col] = signals[col].values
+            
+        # --- FVG MIN SIZE FILTER ---
+        # Zero out FVGs that are too small (noise)
+        # Bullish FVGs
+        if self.fvg_min_size_pct.value > 0:
+            bull_range = dataframe['active_bullish_fvg_top'] - dataframe['active_bullish_fvg_bottom']
+            # Avoid division by zero
+            bull_denom = dataframe['active_bullish_fvg_bottom'].replace(0, 1)
+            bull_pct = bull_range / bull_denom
+            
+            mask_small_bull = (dataframe['active_bullish_fvg_top'] > 0) & (bull_pct < self.fvg_min_size_pct.value)
+            dataframe.loc[mask_small_bull, ['active_bullish_fvg_top', 'active_bullish_fvg_bottom']] = 0
+            
+            # Bearish FVGs
+            bear_range = dataframe['active_bearish_fvg_top'] - dataframe['active_bearish_fvg_bottom']
+            bear_denom = dataframe['active_bearish_fvg_bottom'].replace(0, 1)
+            bear_pct = bear_range / bear_denom
+            
+            mask_small_bear = (dataframe['active_bearish_fvg_top'] > 0) & (bear_pct < self.fvg_min_size_pct.value)
+            dataframe.loc[mask_small_bear, ['active_bearish_fvg_top', 'active_bearish_fvg_bottom']] = 0
         
         # --- LOOKAHEAD BIAS FIX ---
         # Zone columns (OB/FVG) must be shifted by 1 to avoid using zones
@@ -652,30 +681,36 @@ class SMCWithMLLuxAlgo(IStrategy):
         
         # ===== ZONE CONDITIONS (Optional Filters) =====
         # Price in bullish OB zone
-        in_bullish_ob = (
+        dataframe['in_bullish_ob'] = (
             (dataframe['active_bullish_ob_top'] > 0) &
             (dataframe['low'] <= dataframe['active_bullish_ob_top']) &
             (dataframe['high'] >= dataframe['active_bullish_ob_bottom'])
         )
         
         # Price in bearish OB zone
-        in_bearish_ob = (
+        dataframe['in_bearish_ob'] = (
             (dataframe['active_bearish_ob_top'] > 0) &
             (dataframe['high'] >= dataframe['active_bearish_ob_bottom']) &
             (dataframe['low'] <= dataframe['active_bearish_ob_top'])
         )
         
         # Price in bullish FVG zone
-        in_bullish_fvg = (
+        dataframe['in_bullish_fvg'] = (
             (dataframe['active_bullish_fvg_top'] > 0) &
             (dataframe['low'] <= dataframe['active_bullish_fvg_top'])
         )
         
         # Price in bearish FVG zone
-        in_bearish_fvg = (
+        dataframe['in_bearish_fvg'] = (
             (dataframe['active_bearish_fvg_top'] > 0) &
             (dataframe['high'] >= dataframe['active_bearish_fvg_bottom'])
         )
+
+        # Initialize Breaker columns (defaults to False)
+        dataframe['in_bull_breaker'] = False
+        dataframe['in_bear_breaker'] = False
+        dataframe['in_bull_fvg_breaker'] = False
+        dataframe['in_bear_fvg_breaker'] = False
         
         # Zone requirements - OR logic (any enabled filter can pass)
         # If NO zone filter is enabled, all bars pass (default True)
@@ -689,8 +724,8 @@ class SMCWithMLLuxAlgo(IStrategy):
         discount_limit = dataframe['swing_low'] + (swing_range * self.premium_discount_threshold.value)
         premium_limit = dataframe['swing_high'] - (swing_range * self.premium_discount_threshold.value)
         
-        in_discount = dataframe['close'] < discount_limit
-        in_premium = dataframe['close'] > premium_limit
+        dataframe['in_discount'] = dataframe['close'] < discount_limit
+        dataframe['in_premium'] = dataframe['close'] > premium_limit
         
         if any_zone_enabled:
             # Start with False, use OR to add conditions
@@ -698,46 +733,46 @@ class SMCWithMLLuxAlgo(IStrategy):
             bearish_zone = pd.Series(False, index=dataframe.index)
             
             if self.require_ob_zone.value:
-                bullish_zone |= in_bullish_ob
-                bearish_zone |= in_bearish_ob
+                bullish_zone |= dataframe['in_bullish_ob']
+                bearish_zone |= dataframe['in_bearish_ob']
                 
                 # Add Breakers to OB logic (User description: Breaker OB is a key entry point)
                 if 'active_bullish_breaker_top' in dataframe.columns:
-                     in_bull_breaker = (
+                     dataframe['in_bull_breaker'] = (
                         (dataframe['active_bullish_breaker_top'] > 0) & 
                         # Price touching breaker (Breaker acts as Support)
                         (dataframe['low'] <= dataframe['active_bullish_breaker_top']) & 
                         (dataframe['high'] >= dataframe['active_bullish_breaker_bottom'])
                      )
-                     bullish_zone |= in_bull_breaker
+                     bullish_zone |= dataframe['in_bull_breaker']
                      
-                     in_bear_breaker = (
+                     dataframe['in_bear_breaker'] = (
                         (dataframe['active_bearish_breaker_top'] > 0) & 
                         # Price touching breaker (Breaker acts as Resistance)
                         (dataframe['high'] >= dataframe['active_bearish_breaker_bottom']) &
                         (dataframe['low'] <= dataframe['active_bearish_breaker_top'])
                      )
-                     bearish_zone |= in_bear_breaker
+                     bearish_zone |= dataframe['in_bear_breaker']
             
             if self.require_fvg_zone.value:
-                bullish_zone |= in_bullish_fvg
-                bearish_zone |= in_bearish_fvg
+                bullish_zone |= dataframe['in_bullish_fvg']
+                bearish_zone |= dataframe['in_bearish_fvg']
                 
                 # Add FVG Breakers logic
                 if 'active_bullish_fvg_breaker_top' in dataframe.columns:
-                     in_bull_fvg_breaker = (
+                     dataframe['in_bull_fvg_breaker'] = (
                         (dataframe['active_bullish_fvg_breaker_top'] > 0) & 
                         (dataframe['low'] <= dataframe['active_bullish_fvg_breaker_top']) & 
                         (dataframe['high'] >= dataframe['active_bullish_fvg_breaker_bottom'])
                      )
-                     bullish_zone |= in_bull_fvg_breaker
+                     bullish_zone |= dataframe['in_bull_fvg_breaker']
                      
-                     in_bear_fvg_breaker = (
+                     dataframe['in_bear_fvg_breaker'] = (
                         (dataframe['active_bearish_fvg_breaker_top'] > 0) & 
                         (dataframe['high'] >= dataframe['active_bearish_fvg_breaker_bottom']) &
                         (dataframe['low'] <= dataframe['active_bearish_fvg_breaker_top'])
                      )
-                     bearish_zone |= in_bear_fvg_breaker
+                     bearish_zone |= dataframe['in_bear_fvg_breaker']
 
             # --- DYNAMIC STOPLOSS CALCULATION (For DataFrame) ---
             # We calculate what the SL PRICE would be for this candle if we entered.
@@ -793,8 +828,8 @@ class SMCWithMLLuxAlgo(IStrategy):
             dataframe['sl_short_price'] = bear_sl_price * (1 + self.sl_buffer_pct.value)
             
             if self.require_premium_discount.value:
-                bullish_zone |= in_discount
-                bearish_zone |= in_premium
+                bullish_zone |= dataframe['in_discount']
+                bearish_zone |= dataframe['in_premium']
                 
         else:
             # No zone filters enabled - all pass
@@ -897,24 +932,127 @@ class SMCWithMLLuxAlgo(IStrategy):
         # Stricter: (high >= fvg_bottom) & (high <= fvg_top) (price INSIDE zone)
         #
         if self.enable_logging.value:
+            lookback = self.entry_signal_lookback.value
+            
             short_entries = dataframe[short_condition].copy()
             for idx, row in short_entries.iterrows():
-                bear_fvg = f"[{row.get('active_bearish_fvg_bottom', 0):.5f}, {row.get('active_bearish_fvg_top', 0):.5f}]" if row.get('active_bearish_fvg_top', 0) > 0 else "None"
-                bear_ob = f"[{row.get('active_bearish_ob_bottom', 0):.5f}, {row.get('active_bearish_ob_top', 0):.5f}]" if row.get('active_bearish_ob_top', 0) > 0 else "None"
+                # Find Signal Source (Bars Ago)
+                bars_ago = 0
+                signal_type = "None"
+                signal_close = 0.0
+                
+                # We need the integer index to look back
+                # dataframe index might be date, so we use get_loc if needed, 
+                # but iterrows gives index. If index is date, we need strict integer access.
+                # Safer to use the 'internal_choch_bearish' column directly on the row 
+                # BUT row is just one slice. We need context.
+                # Actually, 'short_entries' is a slice. accessing global 'dataframe' by index is better.
+                
+                # Optimization: Check current row first
+                if row.get('internal_choch_bearish', 0) == 1:
+                    signal_type = "IntCHoCH"
+                    bars_ago = 0
+                    signal_close = row['close']
+                elif row.get('swing_choch_bearish', 0) == 1:
+                    signal_type = "SwingCHoCH"
+                    bars_ago = 0
+                    signal_close = row['close']
+                else:
+                    # Look back
+                    # This is slow in a loop but fine for logging only
+                    # We need the integer position of 'idx' in 'dataframe'
+                    try:
+                        i = dataframe.index.get_loc(idx)
+                        for k in range(1, lookback + 1):
+                            if i - k >= 0:
+                                prev_row = dataframe.iloc[i - k]
+                                if prev_row['internal_choch_bearish'] == 1:
+                                    signal_type = "IntCHoCH"
+                                    bars_ago = k
+                                    signal_close = prev_row['close']
+                                    break
+                                elif prev_row['swing_choch_bearish'] == 1:
+                                    signal_type = "SwingCHoCH"
+                                    bars_ago = k
+                                    signal_close = prev_row['close']
+                                    break
+                    except Exception:
+                        pass
+
+                reasons = []
+                if row.get('in_bearish_ob', False): reasons.append("OB")
+                if row.get('in_bearish_fvg', False): reasons.append("FVG")
+                if row.get('in_bear_breaker', False): reasons.append("Breaker")
+                if row.get('in_bear_fvg_breaker', False): reasons.append("FVG-Breaker")
+                if row.get('in_premium', False): reasons.append("Premium")
+                
+                reason_str = "+".join(reasons) if reasons else "StructureOnly"
+                
+                bear_fvg = f"[{row.get('active_bearish_fvg_bottom', 0):.8f}, {row.get('active_bearish_fvg_top', 0):.8f}]" if row.get('active_bearish_fvg_top', 0) > 0 else "None"
+                bear_ob = f"[{row.get('active_bearish_ob_bottom', 0):.8f}, {row.get('active_bearish_ob_top', 0):.8f}]" if row.get('active_bearish_ob_top', 0) > 0 else "None"
+                bear_brk = f"[{row.get('active_bearish_breaker_bottom', 0):.8f}, {row.get('active_bearish_breaker_top', 0):.8f}]" if row.get('active_bearish_breaker_top', 0) > 0 else "None"
+                bear_fvg_brk = f"[{row.get('active_bearish_fvg_breaker_bottom', 0):.8f}, {row.get('active_bearish_fvg_breaker_top', 0):.8f}]" if row.get('active_bearish_fvg_breaker_top', 0) > 0 else "None"
+                
                 logger.info(
                     f"📉 SHORT ENTRY: {metadata['pair']} @ {row['date']} | "
-                    f"Close={row['close']:.5f} High={row['high']:.5f} | "
-                    f"Bearish FVG={bear_fvg} OB={bear_ob}"
+                    f"Signal={signal_type} ({bars_ago} bars ago, Close={signal_close:.8f}) | Reason={reason_str} | "
+                    f"C={row['close']:.8f} H={row['high']:.8f} | "
+                    f"FVG={bear_fvg} OB={bear_ob} BRK={bear_brk} FVG-BRK={bear_fvg_brk}"
                 )
             
             long_entries = dataframe[long_condition].copy()
             for idx, row in long_entries.iterrows():
-                bull_fvg = f"[{row.get('active_bullish_fvg_bottom', 0):.5f}, {row.get('active_bullish_fvg_top', 0):.5f}]" if row.get('active_bullish_fvg_top', 0) > 0 else "None"
-                bull_ob = f"[{row.get('active_bullish_ob_bottom', 0):.5f}, {row.get('active_bullish_ob_top', 0):.5f}]" if row.get('active_bullish_ob_top', 0) > 0 else "None"
+                # Find Signal Source (Bars Ago)
+                bars_ago = 0
+                signal_type = "None"
+                signal_close = 0.0
+                
+                if row.get('internal_choch_bullish', 0) == 1:
+                    signal_type = "IntCHoCH"
+                    bars_ago = 0
+                    signal_close = row['close']
+                elif row.get('swing_choch_bullish', 0) == 1:
+                    signal_type = "SwingCHoCH"
+                    bars_ago = 0
+                    signal_close = row['close']
+                else:
+                    try:
+                        i = dataframe.index.get_loc(idx)
+                        for k in range(1, lookback + 1):
+                            if i - k >= 0:
+                                prev_row = dataframe.iloc[i - k]
+                                if prev_row['internal_choch_bullish'] == 1:
+                                    signal_type = "IntCHoCH"
+                                    bars_ago = k
+                                    signal_close = prev_row['close']
+                                    break
+                                elif prev_row['swing_choch_bullish'] == 1:
+                                    signal_type = "SwingCHoCH"
+                                    bars_ago = k
+                                    signal_close = prev_row['close']
+                                    break
+                    except Exception:
+                        pass
+                        
+                reasons = []
+                if row.get('in_bullish_ob', False): reasons.append("OB")
+                if row.get('in_bullish_fvg', False): reasons.append("FVG")
+                if row.get('in_bull_breaker', False): reasons.append("Breaker")
+                if row.get('in_bull_fvg_breaker', False): reasons.append("FVG-Breaker")
+                if row.get('in_discount', False): reasons.append("Discount")
+                
+                reason_str = "+".join(reasons) if reasons else "StructureOnly"
+
+                bull_fvg = f"[{row.get('active_bullish_fvg_bottom', 0):.8f}, {row.get('active_bullish_fvg_top', 0):.8f}]" if row.get('active_bullish_fvg_top', 0) > 0 else "None"
+                bull_ob = f"[{row.get('active_bullish_ob_bottom', 0):.8f}, {row.get('active_bullish_ob_top', 0):.8f}]" if row.get('active_bullish_ob_top', 0) > 0 else "None"
+                bull_brk = f"[{row.get('active_bullish_breaker_bottom', 0):.8f}, {row.get('active_bullish_breaker_top', 0):.8f}]" if row.get('active_bullish_breaker_top', 0) > 0 else "None"
+                bull_fvg_brk = f"[{row.get('active_bullish_fvg_breaker_bottom', 0):.8f}, {row.get('active_bullish_fvg_breaker_top', 0):.8f}]" if row.get('active_bullish_fvg_breaker_top', 0) > 0 else "None"
+                
                 logger.info(
                     f"📈 LONG ENTRY: {metadata['pair']} @ {row['date']} | "
-                    f"Close={row['close']:.5f} Low={row['low']:.5f} | "
-                    f"Bullish FVG={bull_fvg} OB={bull_ob}"
+                    f"Signal={signal_type} ({bars_ago} bars ago, Close={signal_close:.8f}) | Reason={reason_str} | "
+                    f"C={row['close']:.8f} L={row['low']:.8f} | "
+                    f"FVG={bull_fvg} OB={bull_ob} BRK={bull_brk} FVG-BRK={bull_fvg_brk}"
                 )
         
         # Log stats
@@ -978,18 +1116,83 @@ class SMCWithMLLuxAlgo(IStrategy):
             return int(tf[:-1]) * 1440
         return 15  # Default fallback
     
+    # --------------------------------------------------------------------------
+    # Circuit Breaker & Risk Helper
+    # --------------------------------------------------------------------------
+    def _check_market_panic(self, current_time: datetime) -> bool:
+        """
+        Check if market is in panic mode (multiple recent SL hits).
+        Values cached for 1 minute to allow blocking and tight control.
+        """
+        # Cache mechanism using instance attributes
+        last_check = getattr(self, '_panic_last_check', None)
+        if last_check and (current_time - last_check).total_seconds() < 60:
+            return getattr(self, '_panic_active', False)
+            
+        # Perform check
+        self._panic_last_check = current_time
+        self._panic_active = False # Default
+        
+        if not self.dp:
+            return False
+        
+        # Check if Circuit Breaker is enabled
+        if not self.circuit_breaker_enabled.value:
+            return False
+            
+        # Use configurable parameters
+        PANIC_WINDOW_MIN = self.circuit_breaker_window.value
+        PANIC_SL_LIMIT = self.circuit_breaker_limit.value
+        
+        lookback = current_time - timedelta(minutes=PANIC_WINDOW_MIN)
+        
+        # Robust timezone handling
+        if lookback.tzinfo is None and current_time.tzinfo is not None:
+             lookback = lookback.replace(tzinfo=current_time.tzinfo)
+        
+        trades = Trade.get_trades_proxy(is_open=False)
+        
+        sl_count = 0
+        for t in trades:
+            if t.close_date:
+                c_date = t.close_date
+                # Sync timezones if needed
+                if c_date.tzinfo is None and lookback.tzinfo is not None:
+                     c_date = c_date.replace(tzinfo=lookback.tzinfo)
+                elif c_date.tzinfo is not None and lookback.tzinfo is None:
+                     c_date = c_date.replace(tzinfo=None)
+                     
+                if c_date >= lookback:
+                    # Count SL hits (Exchange SL, Strategy SL, or forced exit with loss)
+                    if (t.exit_reason in ['stop_loss', 'stoploss_on_exchange', 'force_exit', 'emergency_exit']) and (t.close_profit < 0):
+                        sl_count += 1
+                        
+        if sl_count >= PANIC_SL_LIMIT:
+             self._panic_active = True
+             if self.enable_logging.value:
+                 logger.warning(f"🚨 CIRCUIT BREAKER ACTIVE: {sl_count} Losses in last {PANIC_WINDOW_MIN}m. Market is volatile.")
+                 
+        return self._panic_active
+
     def confirm_trade_entry(self, pair: str, order_type: str, amount: float, rate: float,
                            time_in_force: str, current_time: datetime, entry_tag: str | None,
                            side: str, **kwargs) -> bool:
         """
         Prevent entry if:
-        1. Already have an open trade for this pair
-        2. Recently closed a trade for this pair (cooldown based on entry_signal_lookback)
+        1. CIRCUIT BREAKER (High Volatility/Panic) - New
+        2. Already have an open trade for this pair
+        3. Recently closed a trade for this pair (cooldown based on entry_signal_lookback)
         
         This ensures ONE TRADE PER SYMBOL at a time and prevents re-entry
         on the same signal after SL hit.
         """
-        # 1. Check for existing open trades on this pair
+        # 1. CIRCUIT BREAKER (Global Panic Switch)
+        if self._check_market_panic(current_time):
+             if self.enable_logging.value:
+                  logger.info(f"⛔ Entry blocked for {pair} due to Circuit Breaker (High Volatility/Panic).")
+             return False
+
+        # 2. Check for existing open trades on this pair
         open_trades = Trade.get_trades_proxy(pair=pair, is_open=True)
         if open_trades:
             logger.info(f"Entry blocked for {pair}: Already have an open trade")
@@ -1007,13 +1210,22 @@ class SMCWithMLLuxAlgo(IStrategy):
         
         # Filter trades that closed within the cooldown period
         for trade in recent_trades:
-            if trade.close_date and trade.close_date >= cooldown_start:
-                minutes_since_close = (current_time - trade.close_date).total_seconds() / 60
-                logger.info(
-                    f"Entry blocked for {pair}: Trade closed {minutes_since_close:.0f}m ago, "
-                    f"cooldown is {lookback_minutes}m (lookback={self.entry_signal_lookback.value})"
-                )
-                return False
+            if trade.close_date:
+                # Normalize timezones for comparison
+                c_date = trade.close_date
+                c_start = cooldown_start
+                if c_date.tzinfo is None and c_start.tzinfo is not None:
+                    c_date = c_date.replace(tzinfo=c_start.tzinfo)
+                elif c_date.tzinfo is not None and c_start.tzinfo is None:
+                    c_start = c_start.replace(tzinfo=c_date.tzinfo)
+                
+                if c_date >= c_start:
+                    minutes_since_close = (current_time - trade.close_date).total_seconds() / 60
+                    logger.info(
+                        f"Entry blocked for {pair}: Trade closed {minutes_since_close:.0f}m ago, "
+                        f"cooldown is {lookback_minutes}m (lookback={self.entry_signal_lookback.value})"
+                    )
+                    return False
         
         return True
     
@@ -1083,7 +1295,18 @@ class SMCWithMLLuxAlgo(IStrategy):
             price_movement = (current_extremum - trade.open_rate) / trade.open_rate
         
         # Activate BE if price moved past TP1 and not already activated
-        if self.move_be_at_tp1.value and not be_activated and price_movement >= self.tp1_pct.value:
+        # OR if Market Panic (Circuit Breaker active) and we have some profit
+        market_panic = self._check_market_panic(current_time)
+        should_activate_be = False
+        
+        if self.move_be_at_tp1.value and price_movement >= self.tp1_pct.value:
+            should_activate_be = True
+        elif market_panic and price_movement >= 0.005: # Panic: Force BE at 0.5% profit
+            should_activate_be = True
+            if self.enable_logging.value and not be_activated:
+                 logger.info(f"🚨 Panic Mode: Forcing BE for {pair} at {price_movement:.2%} profit.")
+
+        if not be_activated and should_activate_be:
             # Calculate and STORE the BE stop price ONCE
             fee_buffer_pct = 0.001  # 0.1% price buffer to cover fees
             
