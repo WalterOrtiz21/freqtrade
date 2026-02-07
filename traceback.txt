@@ -1,0 +1,12 @@
+Traceback (most recent call last):
+  File "D:\Scripts\freqtrade\user_data\strategies\SMC\visualize_smc.py", line 274, in main
+    df = strategy.populate_entry_trend(df, {'pair': PAIR})
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\Scripts\freqtrade\user_data\strategies\SMC\SMCWithMLLuxAlgo.py", line 894, in populate_entry_trend
+    dataframe.loc[long_condition, 'enter_long'] = 1
+    ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\walte\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\core\indexing.py", line 912, in __setitem__
+    iloc._setitem_with_indexer(indexer, value, self.name)
+  File "C:\Users\walte\AppData\Local\Programs\Python\Python312\Lib\site-packages\pandas\core\indexing.py", line 1848, in _setitem_with_indexer
+    raise ValueError(
+ValueError: cannot set a frame with no defined index and a scalar

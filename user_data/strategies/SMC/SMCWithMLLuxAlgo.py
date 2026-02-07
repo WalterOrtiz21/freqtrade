@@ -151,6 +151,10 @@ class SMCWithMLLuxAlgo(IStrategy):
     # Filter out "Micro FVGs" that are practically noise (e.g. < 0.1% width)
     fvg_min_size_pct = DecimalParameter(0.000, 0.01, default=0.001, decimals=4, space='buy', optimize=True)
     
+    # NEW: Conservative Entry Mode
+    # If False, ignores signals on the current candle (0 bars ago), forcing a wait.
+    allow_immediate_entry = BooleanParameter(default=True, space='buy', optimize=True)
+
     # Logging Control
     enable_logging = BooleanParameter(default=True, space='custom', optimize=False)
     
@@ -620,16 +624,32 @@ class SMCWithMLLuxAlgo(IStrategy):
         swing_choch_bull = dataframe['swing_choch_bullish'] == 1
         
         if lookback > 1:
-            internal_choch_bull = internal_choch_bull.rolling(lookback).max() == 1
-            swing_choch_bull = swing_choch_bull.rolling(lookback).max() == 1
+            # Bullish CHoCH
+            ic_bull_rolled = internal_choch_bull.rolling(lookback).max() == 1
+            sc_bull_rolled = swing_choch_bull.rolling(lookback).max() == 1
+            
+            if not self.allow_immediate_entry.value:
+                # Conservative: Signal must be historical (not current candle)
+                internal_choch_bull = ic_bull_rolled & (internal_choch_bull == False)
+                swing_choch_bull = sc_bull_rolled & (swing_choch_bull == False)
+            else:
+                internal_choch_bull = ic_bull_rolled
+                swing_choch_bull = sc_bull_rolled
             
         # Determine BOS signals (Continuations) - validated by require_choch=False
         internal_bos_bull = dataframe['internal_bos_bullish'] == 1
         swing_bos_bull = dataframe['swing_bos_bullish'] == 1
         
         if lookback > 1:
-            internal_bos_bull = internal_bos_bull.rolling(lookback).max() == 1
-            swing_bos_bull = swing_bos_bull.rolling(lookback).max() == 1
+            ib_bull_rolled = internal_bos_bull.rolling(lookback).max() == 1
+            sb_bull_rolled = swing_bos_bull.rolling(lookback).max() == 1
+            
+            if not self.allow_immediate_entry.value:
+                internal_bos_bull = ib_bull_rolled & (internal_bos_bull == False)
+                swing_bos_bull = sb_bull_rolled & (swing_bos_bull == False)
+            else:
+                internal_bos_bull = ib_bull_rolled
+                swing_bos_bull = sb_bull_rolled
 
         # Combine based on configuration
         bullish_structure = pd.Series(False, index=dataframe.index)
@@ -653,15 +673,29 @@ class SMCWithMLLuxAlgo(IStrategy):
         swing_choch_bear = dataframe['swing_choch_bearish'] == 1
         
         if lookback > 1:
-            internal_choch_bear = internal_choch_bear.rolling(lookback).max() == 1
-            swing_choch_bear = swing_choch_bear.rolling(lookback).max() == 1
+            ic_bear_rolled = internal_choch_bear.rolling(lookback).max() == 1
+            sc_bear_rolled = swing_choch_bear.rolling(lookback).max() == 1
+            
+            if not self.allow_immediate_entry.value:
+                internal_choch_bear = ic_bear_rolled & (internal_choch_bear == False)
+                swing_choch_bear = sc_bear_rolled & (swing_choch_bear == False)
+            else:
+                internal_choch_bear = ic_bear_rolled
+                swing_choch_bear = sc_bear_rolled
             
         internal_bos_bear = dataframe['internal_bos_bearish'] == 1
         swing_bos_bear = dataframe['swing_bos_bearish'] == 1
         
         if lookback > 1:
-            internal_bos_bear = internal_bos_bear.rolling(lookback).max() == 1
-            swing_bos_bear = swing_bos_bear.rolling(lookback).max() == 1
+            ib_bear_rolled = internal_bos_bear.rolling(lookback).max() == 1
+            sb_bear_rolled = swing_bos_bear.rolling(lookback).max() == 1
+            
+            if not self.allow_immediate_entry.value:
+                internal_bos_bear = ib_bear_rolled & (internal_bos_bear == False)
+                swing_bos_bear = sb_bear_rolled & (swing_bos_bear == False)
+            else:
+                internal_bos_bear = ib_bear_rolled
+                swing_bos_bear = sb_bear_rolled
 
         bearish_structure = pd.Series(False, index=dataframe.index)
         
