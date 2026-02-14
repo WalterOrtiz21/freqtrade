@@ -1,0 +1,206 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © AlgoAlpha (Modified by Antigravity)
+//@version=6
+strategy("HEMA Trend Levels Strategy [Antigravity]", overlay=true, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, currency=currency.USD)
+
+//Groups
+GRP_HEMA = "HEMA Settings"
+GRP_RISK = "Risk Management"
+GRP_APP = "Appearance"
+
+// Inputs - HEMA
+hemaLength1 = input.int(20, title="HEMA Length Fast", group=GRP_HEMA, tooltip="First HEMA period length (20 by default)")
+hemaLength2 = input.int(40, title="HEMA Length Slow", group=GRP_HEMA, tooltip="Second HEMA period length (40 by default)")
+
+// Inputs - Risk Management
+sl_pct = input.float(2.0, title="Stop Loss (%)", minval=0.0, step=0.1, group=GRP_RISK) / 100
+tp1_pct = input.float(1.5, title="Take Profit 1 (%)", minval=0.0, step=0.1, group=GRP_RISK) / 100
+tp1_qty_pct = input.float(50.0, title="TP1 Quantity (%)", minval=1.0, maxval=100.0, step=5.0, group=GRP_RISK)
+be_trigger_pct = input.float(1.0, title="Break Even Trigger (%)", minval=0.0, step=0.1, group=GRP_RISK) / 100
+be_offset_pct = input.float(0.1, title="Break Even Offset (%)", minval=0.0, step=0.05, group=GRP_RISK) / 100 // Offset to cover fees
+
+// Inputs - Appearance
+bullColor = input.color(#00ffbb, title="Bullish Color", group=GRP_APP)
+bearColor = input.color(#ff1100, title="Bearish Color", group=GRP_APP)
+
+// -------------------------------------------------------------------------
+// HEMA CALCULATION
+// -------------------------------------------------------------------------
+f_hema(_src, _length) =>
+    halfLength = math.max(1, math.round(_length / 2))
+    sqrtLength = math.max(1, math.round(math.sqrt(_length)))
+    ema_half = ta.ema(_src, halfLength)
+    ema_full = ta.ema(_src, _length)
+    diff = 2 * ema_half - ema_full
+    ta.ema(diff, sqrtLength)
+
+hema1 = f_hema(close, hemaLength1) // Fast
+hema2 = f_hema(close, hemaLength2) // Slow
+
+// -------------------------------------------------------------------------
+// VISUALIZATION & TREND LOGIC
+// -------------------------------------------------------------------------
+// Gradient Fill
+hemaTop = plot(hema1 > hema2 ? hema1 : hema2, "Top HEMA", display=display.none)
+hemaBottom = plot(hema1 > hema2 ? hema2 : hema1, "Bottom HEMA", display=display.none)
+fillColor = hema1 > hema2 ? bullColor : bearColor
+fill(hemaTop, hemaBottom, hema1, hema2, color.new(chart.bg_color, 100), color.new(fillColor, 70), "HEMA Gradient")
+
+plot(hema1, title="HEMA 20", color=color.new(fillColor, 70))
+plot(hema2, title="HEMA 40", color=color.new(fillColor, 70))
+
+// -------------------------------------------------------------------------
+// BOX LOGIC (RETEST ZONES)
+// -------------------------------------------------------------------------
+vola = ta.atr(14) / 2
+
+// Keep track of the active box levels for entry judgment
+var float active_bull_top = na
+var float active_bull_bottom = na
+var float active_bear_top = na
+var float active_bear_bottom = na
+
+// Arrays/Boxes for visualization
+var bull_box = array.new_box()
+var bear_box = array.new_box()
+
+// Trend Changes
+is_bullish_change = ta.crossover(hema1, hema2)
+is_bearish_change = ta.crossunder(hema1, hema2)
+
+if is_bullish_change
+    // Create new Bullish Support Box
+    float top = low + vola
+    float bot = low
+    bull_box.unshift(box.new(bar_index, top, bar_index+5, bot, bgcolor = color.new(bullColor, 70), border_color = color.new(color.black, 100)))
+    
+    // Update active levels
+    active_bull_top := top
+    active_bull_bottom := bot
+    
+    // Invalidate opposite levels
+    active_bear_top := na
+    active_bear_bottom := na
+
+else if is_bearish_change
+    // Create new Bearish Resistance Box
+    float top = high
+    float bot = high - vola
+    bear_box.unshift(box.new(bar_index, top, bar_index+5, bot, bgcolor = color.new(bearColor, 70), border_color = color.new(color.black, 100)))
+    
+    // Update active levels
+    active_bear_top := top
+    active_bear_bottom := bot
+    
+    // Invalidate opposite levels
+    active_bull_top := na
+    active_bull_bottom := na
+
+// Extend boxes visualization (visual only)
+if bull_box.size() > 0
+    Q = bull_box.first()
+    Q.set_right(bar_index)
+if bear_box.size() > 0
+    Q = bear_box.first()
+    Q.set_right(bar_index)
+
+// -------------------------------------------------------------------------
+// ENTRY LOGIC (RETESTS)
+// -------------------------------------------------------------------------
+// Bullish Retest: Price wicks into the box but closes above it
+// Ensure we are in a bullish trend (hema1 > hema2)
+long_retest = false
+if not na(active_bull_top) and hema1 > hema2
+    // Logic: Low dipped below top of box, but Close is above top of box
+    // This confirms support held.
+    if low < active_bull_top and close > active_bull_top and open > active_bull_top
+        long_retest := true
+
+// Bearish Retest: Price wicks into the box but closes below it
+// Ensure we are in a bearish trend (hema1 < hema2)
+short_retest = false
+if not na(active_bear_bottom) and hema1 < hema2
+    // Logic: High went above bottom of box, but Close is below bottom of box
+    // This confirms resistance held.
+    if high > active_bear_bottom and close < active_bear_bottom and open < active_bear_bottom
+        short_retest := true
+
+// Plot signals
+plotshape(long_retest, "Bullish Retest", shape.labelup, location.belowbar, color.new(bullColor, 0), text="TEST", textcolor=color.white, size=size.small)
+plotshape(short_retest, "Bearish Retest", shape.labeldown, location.abovebar, color.new(bearColor, 0), text="TEST", textcolor=color.white, size=size.small)
+
+// -------------------------------------------------------------------------
+// STRATEGY EXECUTION
+// -------------------------------------------------------------------------
+
+// --- EXIT ON TREND CHANGE (OPPOSITE SIGNAL) ---
+// If trend flips, close opposite positions immediately
+if is_bearish_change
+    strategy.close("Long", comment="Trend Change")
+if is_bullish_change
+    strategy.close("Short", comment="Trend Change")
+
+// --- ENTRIES ---
+if long_retest
+    strategy.entry("Long", strategy.long)
+
+if short_retest
+    strategy.entry("Short", strategy.short)
+
+// --- RISK MANAGEMENT (SL, TP, BE) ---
+// Get current position info
+avg_price = strategy.position_avg_price
+
+// LONG MANAGEMENT
+if strategy.position_size > 0
+    // Calculate Levels
+    float long_sl_price = avg_price * (1 - sl_pct)
+    float long_tp1_price = avg_price * (1 + tp1_pct)
+    float long_be_trigger_price = avg_price * (1 + be_trigger_pct)
+    
+    // Break Even Logic
+    // If high reached trigger, SL moves to Entry + Offset
+    // Pine Script's built-in behavior doesn't support "trailing" the SL simply without a distinct order.
+    // We use a variable to track if BE was triggered? 
+    // No, strategy.exit with stop argument handles this if we update it dynamically, 
+    // but easier is to check if high > trigger, then set SL to BE.
+    
+    // We can use a simplified approach:
+    // If current high > BE Trigger, we modify the exit order relative to avg_price.
+    // However, Pine Script re-calculates every bar.
+    
+    float dynamic_sl = long_sl_price
+    if high > long_be_trigger_price
+        dynamic_sl := math.max(long_sl_price, avg_price * (1 + be_offset_pct))
+    
+    // Execute Exit
+    // TP1: Close qty_percent at tp1_price
+    strategy.exit("Exit Long", "Long", qty_percent = tp1_qty_pct, limit = long_tp1_price, stop = dynamic_sl, comment_loss = "SL", comment_profit = "TP1")
+    
+    // Remaining position needs a way to close?
+    // strategy.exit allows multiple exits. The above triggers for the partial. 
+    // The "stop" applies to the whole position effectively if we don't specify an id for the remainder.
+    // Actually, if TP1 is hit, the remaining qty still needs an SL.
+    // We can issue a second exit command for the remaining usage, or let the single exit command handle it (limit is hit for partial, stop remains for rest).
+    // In Pine 5/6, if you specify qty_percent, the limit only applies to that %. The STOP applies to... usually the whole position unless specified.
+    // To be safe for the "Remaining" position to ride the trend until trend change:
+    // We don't set a final TP (TP2/TP3), we let the Trend Change ("Opposite Signal") close the rest.
+    // But we MUST ensure the SL persists for the remainder.
+    
+    strategy.exit("Exit Long Remainder", "Long", stop = dynamic_sl, comment_loss = "SL")
+
+
+// SHORT MANAGEMENT
+if strategy.position_size < 0
+    // Calculate Levels
+    float short_sl_price = avg_price * (1 + sl_pct)
+    float short_tp1_price = avg_price * (1 - tp1_pct)
+    float short_be_trigger_price = avg_price * (1 - be_trigger_pct)
+    
+    float dynamic_sl_short = short_sl_price
+    if low < short_be_trigger_price
+        dynamic_sl_short := math.min(short_sl_price, avg_price * (1 - be_offset_pct))
+        
+    strategy.exit("Exit Short", "Short", qty_percent = tp1_qty_pct, limit = short_tp1_price, stop = dynamic_sl_short, comment_loss = "SL", comment_profit = "TP1")
+    strategy.exit("Exit Short Remainder", "Short", stop = dynamic_sl_short, comment_loss = "SL")
+

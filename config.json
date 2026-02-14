@@ -4,7 +4,7 @@
     "stake_amount": 50,
     "tradable_balance_ratio": 0.99,
     "fiat_display_currency": "USD",
-    "timeframe": "15m",
+    "timeframe": "1h",
     "dry_run": true,
     "dry_run_wallet": 1000,
     "cancel_open_orders_on_exit": false,
@@ -76,7 +76,8 @@
             "STX/USDT:USDT"
         ],
         "pair_whitelist": [
-            "1000CAT/USDT:USDT"
+            "BTC/USDT:USDT",
+            "ETH/USDT:USDT"
         ],
         "pair_blacklist": []
     },

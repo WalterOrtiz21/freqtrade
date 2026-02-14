@@ -22,16 +22,20 @@
             "fvg_min_size_pct": 0.001,
             "require_fvg_zone": true,
             "trade_with_trend": true,
+            "use_sweep_bypass": true,
+            "sweep_lookback": 10,
             "require_premium_discount": false,
             "premium_discount_threshold": 0.05,
             "allow_immediate_entry": true,
             "entry_signal_lookback": 5,
-            "use_ml_filter": true,
+            "use_ml_filter": false,
             "use_per_symbol_models": false,
             "ml_threshold": 0.25,
             "use_htf_filter": true,
             "htf_1": "1h",
-            "htf_2": "4h"
+            "htf_1_use_internal": false,
+            "htf_2": "4h",
+            "htf_2_use_internal": true
         },
         "sell": {
             "use_dynamic_stoploss": true,

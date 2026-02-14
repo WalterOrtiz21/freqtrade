@@ -143,17 +143,26 @@ class SMCWithMLLuxAlgo(IStrategy):
     # NEW: Toggle for HTF (4h) Filter
     use_htf_filter = BooleanParameter(default=True, space='buy', optimize=True)
     
+    # Per-HTF: Use internal_trend (faster, reacts to CHoCH) vs swing_trend (slower, more reliable)
+    htf_1_use_internal = BooleanParameter(default=False, space='buy', optimize=True)
+    htf_2_use_internal = BooleanParameter(default=True, space='buy', optimize=True)
+    
     # NEW: Dynamic Stoploss Toggle & Offset
     use_dynamic_stoploss = BooleanParameter(default=True, space='sell', optimize=True)
     sl_buffer_pct = DecimalParameter(0.001, 0.01, default=0.002, decimals=3, space='sell', optimize=True)
     
-    # NEW: FVG Min Size Filter
-    # Filter out "Micro FVGs" that are practically noise (e.g. < 0.1% width)
-    fvg_min_size_pct = DecimalParameter(0.000, 0.01, default=0.001, decimals=4, space='buy', optimize=True)
+    # NEW: FVG ATR Filter (BigBeluga Style)
+    # Filter out based on volatility (ATR) rather than percentage.
+    # Threshold = ATR(200) * fvg_atr_threshold.
+    fvg_atr_threshold = DecimalParameter(0.05, 0.50, default=0.1, decimals=2, space='buy', optimize=True)
     
     # NEW: Conservative Entry Mode
     # If False, ignores signals on the current candle (0 bars ago), forcing a wait.
     allow_immediate_entry = BooleanParameter(default=True, space='buy', optimize=True)
+
+    # Liquidity Sweep: If detected + CHoCH, bypass zone requirement
+    use_sweep_bypass = BooleanParameter(default=True, space='buy', optimize=True)
+    sweep_lookback = IntParameter(1, 10, default=3, space='buy', optimize=True)
 
     # Logging Control
     enable_logging = BooleanParameter(default=True, space='custom', optimize=False)
@@ -394,24 +403,25 @@ class SMCWithMLLuxAlgo(IStrategy):
         for col in signals.columns:
             dataframe[col] = signals[col].values
             
-        # --- FVG MIN SIZE FILTER ---
-        # Zero out FVGs that are too small (noise)
-        # Bullish FVGs
-        if self.fvg_min_size_pct.value > 0:
-            bull_range = dataframe['active_bullish_fvg_top'] - dataframe['active_bullish_fvg_bottom']
-            # Avoid division by zero
-            bull_denom = dataframe['active_bullish_fvg_bottom'].replace(0, 1)
-            bull_pct = bull_range / bull_denom
+        # --- FVG ATR FILTER (BigBeluga Style) ---
+        # Zero out FVGs that are smaller than Threshold * ATR
+        # Using ATR(200) to match BigBeluga's volatility reference for "noise".
+        if self.fvg_atr_threshold.value > 0:
+            # Calculate ATR(200) locally for this filter
+            atr_200 = ta.ATR(dataframe, timeperiod=200)
+            # Handle potential NaNs at start of data
+            atr_200 = atr_200.bfill().ffill()
             
-            mask_small_bull = (dataframe['active_bullish_fvg_top'] > 0) & (bull_pct < self.fvg_min_size_pct.value)
+            fvg_threshold = atr_200 * self.fvg_atr_threshold.value
+            
+            # Bullish FVGs
+            bull_range = dataframe['active_bullish_fvg_top'] - dataframe['active_bullish_fvg_bottom']
+            mask_small_bull = (dataframe['active_bullish_fvg_top'] > 0) & (bull_range < fvg_threshold)
             dataframe.loc[mask_small_bull, ['active_bullish_fvg_top', 'active_bullish_fvg_bottom']] = 0
             
             # Bearish FVGs
             bear_range = dataframe['active_bearish_fvg_top'] - dataframe['active_bearish_fvg_bottom']
-            bear_denom = dataframe['active_bearish_fvg_bottom'].replace(0, 1)
-            bear_pct = bear_range / bear_denom
-            
-            mask_small_bear = (dataframe['active_bearish_fvg_top'] > 0) & (bear_pct < self.fvg_min_size_pct.value)
+            mask_small_bear = (dataframe['active_bearish_fvg_top'] > 0) & (bear_range < fvg_threshold)
             dataframe.loc[mask_small_bear, ['active_bearish_fvg_top', 'active_bearish_fvg_bottom']] = 0
         
         # --- LOOKAHEAD BIAS FIX ---
@@ -553,6 +563,14 @@ class SMCWithMLLuxAlgo(IStrategy):
         # Zone Interaction
         df['ml_in_bull_ob'] = ((df['active_bullish_ob_top'] > 0) & (df['low'] <= df['active_bullish_ob_top'])).astype(int)
         df['ml_in_bear_ob'] = ((df['active_bearish_ob_top'] > 0) & (df['high'] >= df['active_bearish_ob_bottom'])).astype(int)
+
+        # Liquidity Sweeps (Rolling window for ML context)
+        if 'internal_sweep_bullish' in df.columns:
+            df['ml_recent_bull_sweep'] = df['internal_sweep_bullish'].rolling(3, min_periods=1).max().fillna(0)
+            df['ml_recent_bear_sweep'] = df['internal_sweep_bearish'].rolling(3, min_periods=1).max().fillna(0)
+        else:
+            df['ml_recent_bull_sweep'] = 0
+            df['ml_recent_bear_sweep'] = 0
        
         # Fill NaNs created by indicators
         feature_cols = [c for c in df.columns if c.startswith('ml_')]
@@ -714,30 +732,34 @@ class SMCWithMLLuxAlgo(IStrategy):
                 bearish_structure |= (swing_choch_bear | swing_bos_bear)
         
         # ===== ZONE CONDITIONS (Optional Filters) =====
-        # Price in bullish OB zone
+        # Price in bullish OB zone (Must close ABOVE bottom)
         dataframe['in_bullish_ob'] = (
             (dataframe['active_bullish_ob_top'] > 0) &
             (dataframe['low'] <= dataframe['active_bullish_ob_top']) &
-            (dataframe['high'] >= dataframe['active_bullish_ob_bottom'])
+            (dataframe['high'] >= dataframe['active_bullish_ob_bottom']) &
+            (dataframe['close'] >= dataframe['active_bullish_ob_bottom'])
         )
         
-        # Price in bearish OB zone
+        # Price in bearish OB zone (Must close BELOW top)
         dataframe['in_bearish_ob'] = (
             (dataframe['active_bearish_ob_top'] > 0) &
             (dataframe['high'] >= dataframe['active_bearish_ob_bottom']) &
-            (dataframe['low'] <= dataframe['active_bearish_ob_top'])
+            (dataframe['low'] <= dataframe['active_bearish_ob_top']) &
+            (dataframe['close'] <= dataframe['active_bearish_ob_top'])
         )
         
-        # Price in bullish FVG zone
+        # Price in bullish FVG zone (Must close ABOVE bottom to be valid)
         dataframe['in_bullish_fvg'] = (
             (dataframe['active_bullish_fvg_top'] > 0) &
-            (dataframe['low'] <= dataframe['active_bullish_fvg_top'])
+            (dataframe['low'] <= dataframe['active_bullish_fvg_top']) &
+            (dataframe['close'] >= dataframe['active_bullish_fvg_bottom'])
         )
         
-        # Price in bearish FVG zone
+        # Price in bearish FVG zone (Must close BELOW top to be valid)
         dataframe['in_bearish_fvg'] = (
             (dataframe['active_bearish_fvg_top'] > 0) &
-            (dataframe['high'] >= dataframe['active_bearish_fvg_bottom'])
+            (dataframe['high'] >= dataframe['active_bearish_fvg_bottom']) &
+            (dataframe['close'] <= dataframe['active_bearish_fvg_top'])
         )
 
         # Initialize Breaker columns (defaults to False)
@@ -776,7 +798,8 @@ class SMCWithMLLuxAlgo(IStrategy):
                         (dataframe['active_bullish_breaker_top'] > 0) & 
                         # Price touching breaker (Breaker acts as Support)
                         (dataframe['low'] <= dataframe['active_bullish_breaker_top']) & 
-                        (dataframe['high'] >= dataframe['active_bullish_breaker_bottom'])
+                        (dataframe['high'] >= dataframe['active_bullish_breaker_bottom']) &
+                        (dataframe['close'] >= dataframe['active_bullish_breaker_bottom'])
                      )
                      bullish_zone |= dataframe['in_bull_breaker']
                      
@@ -784,7 +807,8 @@ class SMCWithMLLuxAlgo(IStrategy):
                         (dataframe['active_bearish_breaker_top'] > 0) & 
                         # Price touching breaker (Breaker acts as Resistance)
                         (dataframe['high'] >= dataframe['active_bearish_breaker_bottom']) &
-                        (dataframe['low'] <= dataframe['active_bearish_breaker_top'])
+                        (dataframe['low'] <= dataframe['active_bearish_breaker_top']) &
+                        (dataframe['close'] <= dataframe['active_bearish_breaker_top'])
                      )
                      bearish_zone |= dataframe['in_bear_breaker']
             
@@ -797,14 +821,16 @@ class SMCWithMLLuxAlgo(IStrategy):
                      dataframe['in_bull_fvg_breaker'] = (
                         (dataframe['active_bullish_fvg_breaker_top'] > 0) & 
                         (dataframe['low'] <= dataframe['active_bullish_fvg_breaker_top']) & 
-                        (dataframe['high'] >= dataframe['active_bullish_fvg_breaker_bottom'])
+                        (dataframe['high'] >= dataframe['active_bullish_fvg_breaker_bottom']) &
+                        (dataframe['close'] >= dataframe['active_bullish_fvg_breaker_bottom'])
                      )
                      bullish_zone |= dataframe['in_bull_fvg_breaker']
                      
                      dataframe['in_bear_fvg_breaker'] = (
                         (dataframe['active_bearish_fvg_breaker_top'] > 0) & 
                         (dataframe['high'] >= dataframe['active_bearish_fvg_breaker_bottom']) &
-                        (dataframe['low'] <= dataframe['active_bearish_fvg_breaker_top'])
+                        (dataframe['low'] <= dataframe['active_bearish_fvg_breaker_top']) &
+                        (dataframe['close'] <= dataframe['active_bearish_fvg_breaker_top'])
                      )
                      bearish_zone |= dataframe['in_bear_fvg_breaker']
 
@@ -864,6 +890,28 @@ class SMCWithMLLuxAlgo(IStrategy):
             if self.require_premium_discount.value:
                 bullish_zone |= dataframe['in_discount']
                 bearish_zone |= dataframe['in_premium']
+            
+            # ===== LIQUIDITY SWEEP BYPASS =====
+            # If a recent sweep is detected, bypass zone requirement
+            # Sweep + CHoCH = high confidence entry without needing OB/FVG retest
+            if self.use_sweep_bypass.value:
+                sweep_lb = self.sweep_lookback.value
+                
+                # Recent bullish sweep (wick took sellside liquidity below pivot low)
+                recent_bull_sweep = (
+                    (dataframe['internal_sweep_bullish'].rolling(sweep_lb, min_periods=1).max() == 1) |
+                    (dataframe['swing_sweep_bullish'].rolling(sweep_lb, min_periods=1).max() == 1)
+                )
+                
+                # Recent bearish sweep (wick took buyside liquidity above pivot high)
+                recent_bear_sweep = (
+                    (dataframe['internal_sweep_bearish'].rolling(sweep_lb, min_periods=1).max() == 1) |
+                    (dataframe['swing_sweep_bearish'].rolling(sweep_lb, min_periods=1).max() == 1)
+                )
+                
+                # Sweep bypasses zone requirement
+                bullish_zone |= recent_bull_sweep
+                bearish_zone |= recent_bear_sweep
                 
         else:
             # No zone filters enabled - all pass
@@ -882,16 +930,7 @@ class SMCWithMLLuxAlgo(IStrategy):
                 logger.warning(f"   Active Bull OB Candles: {(dataframe['active_bullish_ob_top'] > 0).sum()}")
                 logger.warning(f"   Active Bull FVG Candles: {(dataframe['active_bullish_fvg_top'] > 0).sum()}")
         
-        # ===== TREND FILTER (Neptune Logic: HTF Alignment) =====
-        # HTF (4h) Filter:
-        # Long only if 4h is Bullish (1) or Neutral/Internal-Bullish
-        # Strict mode: 4h Swing Trend must be 1.
-        
-        # ===== TREND FILTER (Neptune Logic: HTF Alignment) =====
-        # HTF (4h) Filter:
-        # Long only if 4h is Bullish (1) or Neutral/Internal-Bullish
-        # Strict mode: 4h Swing Trend must be 1.
-        
+        # ===== HTF TREND FILTER =====
         if self.trade_with_trend.value:
             # Local Trend Filter (MTF)
             bullish_trend_ok = dataframe['swing_trend'] == 1
@@ -900,11 +939,19 @@ class SMCWithMLLuxAlgo(IStrategy):
             # HTF Filter - Check ALL configured timeframes
             if self.use_htf_filter.value:
                 htf_list = self._get_active_htf_list()
-                for htf in htf_list:
-                    swing_col = f'{htf}_swing_trend'
-                    if swing_col in dataframe.columns:
-                        htf_bull = dataframe[swing_col] == 1
-                        htf_bear = dataframe[swing_col] == -1
+                # Per-HTF internal trend toggle mapping
+                htf_internal_map = {
+                    0: self.htf_1_use_internal.value,
+                    1: self.htf_2_use_internal.value,
+                }
+                for idx, htf in enumerate(htf_list):
+                    use_internal = htf_internal_map.get(idx, False)
+                    trend_type = 'internal_trend' if use_internal else 'swing_trend'
+                    trend_col = f'{htf}_{trend_type}'
+                    
+                    if trend_col in dataframe.columns:
+                        htf_bull = dataframe[trend_col] == 1
+                        htf_bear = dataframe[trend_col] == -1
                         
                         # AND logic: ALL HTFs must align
                         bullish_trend_ok &= htf_bull

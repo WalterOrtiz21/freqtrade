@@ -1,0 +1,1455 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © fluxchart
+
+//@version=5
+const bool DEBUG = false
+const bool DEBUGOBFVG = false
+const int maxBoxesCount = 500
+const int maxDistanceToLastBar = 3000 // Affects Running Time
+const int maxOrderBlocks = 40
+const int showLastXFVGs = 20
+const int extendLastXFVGsCount = 20
+const int minimumFVGSize = 2
+const int minimumIFVGSize = 2
+const float overlapThresholdPercentage = 0
+const int atrLen = 10
+
+indicator("ICT Unicorn | Flux Charts", overlay = true, max_boxes_count = maxBoxesCount, max_labels_count = maxBoxesCount, max_lines_count = maxBoxesCount)
+
+//#region Settings
+fvgSensitivityText = input.string("Normal", "FVG Detection Sensitivity", options = ["Extreme", "High", "Normal", "Low"], group = "General Configuration")
+swingLength = input.int(10, 'Swing Length', minval = 3, tooltip = "Swing length is used when finding order block formations. Smaller values will result in finding smaller order blocks.", group = "General Configuration", display = display.none)
+dbgRequireRetracement = input.bool(false, "Require Retracement", tooltip = "A retracement to the FVG will be required for entry confirmation if enabled.", group = "General Configuration")
+showBB = input.bool(true, "Show Breaker Blocks", inline = "bb", group = "General Configuration")
+showFVG = input.bool(true, "FVGs", inline = "bb", group = "General Configuration")
+
+entryWaitBars = DEBUG ? input.int(1, "[DBG] Entry Wait Bars", group = "General Configuration") : 1
+dbgLabelSize = DEBUG ? input.string("Normal", "[DBG] Label Size", ["Normal", "Small", "Tiny"], group = "General Configuration") : "Normal"
+lblSize = (dbgLabelSize == "Small" ? size.small : dbgLabelSize == "Normal" ? size.normal : size.tiny)
+unicornTPSLLength = DEBUG ? input.int(100, "[DBG] Unicorn TP / SL Length", group = "General Configuration") : 100
+dbgShowBBFVG = DEBUG ? input.bool(false, "[DBG] Show All BB and FVGs", group = "General Configuration") : false
+
+showTPSL = input.bool(true, "Enabled", group = "TP / SL")
+tpslMethod = input.string("Unicorn", "TP / SL Method", options = ["Unicorn", "Dynamic", "Fixed"], group = "TP / SL")
+riskAmount = input.string("Normal", "Dynamic Risk", options = ["Highest", "High", "Normal", "Low", "Lowest"], group = "TP / SL", tooltip = "The risk amount when Dynamic TP / SL method is selected.\n\nDifferent assets may have different volatility so changing this setting may result in change of performance of the indicator.")
+customSLATRMult = DEBUG ? input.float(6.5, "[DBG] Dynamic Custom Risk Mult", group = "TP / SL") : 6.5
+dbgUnicornSLOffset = DEBUG ? input.float(4.75, "[DBG] Unicorn SL Offset", group = "TP / SL") : 4.75
+
+slATRMult = riskAmount == "Highest" ? 9.5 : riskAmount == "High" ? 6 : riskAmount == "Normal" ? 5 : riskAmount == "Low" ? 4 : riskAmount == "Lowest" ? 1.5 : customSLATRMult
+tpPercent = input.float(0.3, "Fixed Take Profit %", group = "TP / SL")
+slPercent = input.float(0.4, "Fixed Stop Loss %", group = "TP / SL")
+
+backtestDisplayEnabled = input.bool(true, "Enabled", group = "Backtesting Dashboard", display = display.none)
+backtestingLocation = input.string("Top Center", "Position", options = ["Top Right", "Right Center", "Top Center"], group = "Backtesting Dashboard", display = display.none)
+fillBackgrounds = input.bool(true, "Fill Backgrounds", group = "Backtesting Dashboard", display = display.none)
+screenerColor = input.color(#1B1F2B, 'Background', inline = "1", group = 'Backtesting Dashboard', display = display.none)
+
+UnicornRR = DEBUG ? input.float(0.57, "Unicorn Risk:Reward Ratio", group = "Debug") : 0.57
+DynamicRR = DEBUG ? input.float(0.86, "Dynamic Risk:Reward Ratio", group = "Debug") : 0.86
+
+buyAlertEnabled = input.bool(true, "Buy Signal", inline = "BS", group = "Alerts")
+sellAlertEnabled = input.bool(true, "Sell Signal", inline = "BS", group = "Alerts")
+tpAlertEnabled = input.bool(true, "Take-Profit Signal", inline = "TS", group = "Alerts")
+slAlertEnabled = input.bool(true, "Stop-Loss Signal ", inline = "TS", group = "Alerts")
+
+dbgTPSLVersion = input.string("Default", "TP / SL Layout", options = ["Default", "Alternative"], group = "Visuals")
+
+bullishBreakerBlockColor = input(color.new(#2962ff, 75), "Bullish Breaker", inline = 'breakerColor', group = 'Visuals', display = display.none)
+bearishBreakerBlockColor = input(color.new(#ffeb3b, 75), "Bearish Breaker", inline = 'breakerColor', group = 'Visuals', display = display.none)
+
+highColor = input.color(#08998180, "Buy", inline = "colors", group = "Visuals")
+lowColor = input.color(#f2364680, "Sell", inline = "colors", group = "Visuals")
+textColor = input.color(#ffffff, "Text", inline = "colors", group = "Visuals")
+
+showInvalidated = DEBUGOBFVG ? input.bool(true, "Show Historic Zones", group = "General Configuration", display = display.none) : true
+
+//#region FVG Settings
+fvgEnabled = DEBUGOBFVG ? input.bool(true, "Enabled", group = "Fair Value Gaps", inline="EV", display = display.none) : true
+fvgVolumetricInfo = DEBUGOBFVG ? input.bool(false, "Volumetric Info", group = "Fair Value Gaps", inline="EV", display = display.none) : false
+fvgEndMethod = DEBUGOBFVG ? input.string("Close", "Zone Invalidation", options = ["Wick", "Close"],  group = "Fair Value Gaps") : "Close"
+fvgFilterMethod = DEBUGOBFVG ? input.string("Average Range", "Zone Filtering", options = ["Average Range", "Volume Threshold"],  group = "Fair Value Gaps") : "Average Range"
+volumeThresholdPercent = DEBUGOBFVG ? input.int(50, "Volume Threshold %", group = "Fair Value Gaps", tooltip = "Only taken into calculation when filter method is Volume Threshold.", minval = 1, maxval = 200) : 50
+fvgBars = DEBUGOBFVG ? input.string("Same Type", "FVG Detection", options = ["Same Type", "All"], tooltip = "Same Type -> All 3 bars that formed the FVG should be the same type. (Bullish / Bearish) \n\nAll -> Bar types may vary between bullish / bearish.", group = "Fair Value Gaps") : "Same Type"
+fvgSensEnabled = DEBUGOBFVG ? input.bool(true, "", "", "sens", "Fair Value Gaps") : true
+//fvgSensitivityText = DEBUGOBFVG ? input.string("Extreme", "Detection Sensitivity", inline = "sens", options = ["Extreme", "High", "Normal", "Low"], group = "Fair Value Gaps") : "Extreme"
+fvgBullColor = DEBUGOBFVG ? input(#08998180, 'Bullish', inline = 'fvgColor', group = 'Fair Value Gaps', display = display.none) : #08998180
+fvgBearColor = DEBUGOBFVG ? input(#f2364680, 'Bearish', inline = 'fvgColor', group = 'Fair Value Gaps', display = display.none) : #f2364680
+combineFVGs = DEBUGOBFVG ? input.bool(false, "Combine Zones", group = "Fair Value Gaps") : false
+allowGaps = DEBUGOBFVG ? input.bool(false, "Allow Gaps Between Bars", group = "Fair Value Gaps", tooltip = "On tickers that can have a different opening price than the previous bar's closing price, the indicator will not analyze those bars for FVGs if disabled.\n\nFor Example, if the today's opening price is different from the yesterday's closing price in a stock ticker.") : false
+deleteUntouched = DEBUGOBFVG ? input.bool(true, "", group = "Fair Value Gaps", inline = "deleteUntouched") : true
+deleteUntouchedAfterXBars = DEBUGOBFVG ? input.int(200, "Delete Untouched Zones After", group = "Fair Value Gaps", minval = 5, maxval = 200, inline = "deleteUntouched") : 200
+
+ifvgEnabled = DEBUGOBFVG ? input.bool(false, "Enabled", inline="EV", group = "Inversion Fair Value Gaps") : false
+ifvgVolumetricInfo = DEBUGOBFVG ? input.bool(false, "Volumetric Info", group = "Inversion Fair Value Gaps", inline="EV", display = display.none) : false
+ifvgEndMethod = DEBUGOBFVG ? input.string("Wick", "IFVG Zone Invalidation", options = ["Wick", "Close"],  group = "Inversion Fair Value Gaps") : "Wick"
+ifvgFull = DEBUGOBFVG ? input.bool(true, "IFVG Full", group = "Inversion Fair Value Gaps", display = display.none) : true
+bullishInverseColor = DEBUGOBFVG ? input(#08998180, "Bullish", inline = 'breakerColor', group = 'Inversion Fair Value Gaps', display = display.none) : #08998180
+bearishInverseColor = DEBUGOBFVG ? input(#f2364580, "Bearish", inline = 'breakerColor', group = 'Inversion Fair Value Gaps', display = display.none) : #f2364580
+//#endregion
+
+//#region OB Settings
+OBsEnabled = DEBUGOBFVG ? input.bool(false, "Enabled", group = "Order Blocks", inline="EV", display = display.none) : false
+orderBlockVolumetricInfo = DEBUGOBFVG ? input.bool(true, "Volumetric Info", group = "Order Blocks", inline="EV", display = display.none) : true
+obEndMethod = DEBUGOBFVG ? input.string("Close", "Zone Invalidation", options = ["Wick", "Close"],  group = "Order Blocks", display = display.none) : "Close"
+combineOBs = DEBUGOBFVG ? input.bool(false, "Combine Zones", group = "Order Blocks", display = display.none) : false
+//swingLength = DEBUGOBFVG ? input.int(10, 'Swing Length', minval = 3, tooltip="Swing length is used when finding order block formations. Smaller values will result in finding smaller order blocks.",group = "Order Blocks", display = display.none) : 10
+zoneCountOB = DEBUGOBFVG ? input.string("High", 'Zone Count', options = ["High", "Medium", "Low"], tooltip = "Number of Order & Breaker Block Zones to be rendered. Higher options will result in older Order & Breaker Blocks shown.",  group = "Order Blocks", display = display.none) : "High"
+bullOrderBlockColor = DEBUGOBFVG ? input(#08998180, 'Bullish', inline = 'obColor', group = 'Order Blocks', display = display.none) : #08998180
+bearOrderBlockColor = DEBUGOBFVG ? input(#f2364680, 'Bearish', inline = 'obColor', group = 'Order Blocks', display = display.none) : #f2364680
+
+BBsEnabled = DEBUGOBFVG ? input.bool(true, "Enabled", group = "Breaker Blocks", inline="EV", display = display.none) : true
+breakBlockVolumetricInfo = DEBUGOBFVG ? input.bool(false, "Volumetric Info", group = "Breaker Blocks", inline="EV", display = display.none) : false
+bbEndMethod = DEBUGOBFVG ? input.string("Close", "Zone Invalidation", options = ["Wick", "Close"],  group = "Breaker Blocks", display = display.none) : "Close"
+breakersFull = DEBUGOBFVG ? input.bool(true, "Breakers Full", group = "Breaker Blocks", display = display.none) : true
+//#endregion
+
+//#region DEBUG Settings
+maxATRMult = (DEBUG and DEBUGOBFVG) ? input.float(3.5,"Max ATR Multiplier", group = "General Configuration", display = display.none) : 3.5
+extendZonesBy = (DEBUG and DEBUGOBFVG) ? input.int(15, "Extend Zones", group = "Style", minval = 1, maxval = 30, inline = "ExtendZones") : 15
+extendZonesDynamic = (DEBUG and DEBUGOBFVG) ? input.bool(true, "Dynamic", group = "Style", inline = "ExtendZones") : true
+extendLastFVGs = (DEBUG and DEBUGOBFVG) ? input.bool(true, "Extend Last Zones", group = "Style") : true
+changeCombinedFVGsColor = (DEBUG and DEBUGOBFVG) ? input.bool(false, "Change Combined Zones Color", group = "Style", inline = "CombinedColor") : false
+combinedText = (DEBUG and DEBUGOBFVG) ? input.bool(false, "Combined Text", group = "Style", inline = "CombinedColor") : false
+combinedColor = (DEBUG and DEBUGOBFVG) ? input.color(#fff70080, DEBUG ? "" : "Combined Zone Color", group = "Style", inline = "CombinedColor") : #fff70080
+startZoneFrom = (DEBUG and DEBUGOBFVG) ? input.string("Last Bar", "Start FVG Zones From", options = ["First Bar", "Last Bar"], group = "Style"): "Last Bar"
+volumeBarsPlace = (DEBUG and DEBUGOBFVG) ? input.string("Left", "Show Volume Bars At", options = ["Left", "Right"], group = "Style", inline = "volumebars") : "Left"
+mirrorVolumeBars = (DEBUG and DEBUGOBFVG) ? input.bool(true, "Mirror Volume Bars", group = "Style", inline = "volumebars") : true
+//#endregion
+//#endregion
+
+//#region UDTs
+type FVGInfo
+    float max = na
+    float min = na
+    bool isBull = na
+    int t = na
+    float totalVolume = na
+    int startBarIndex = na
+    int endBarIndex = na
+    int startTime = na
+    int endTime = na
+    bool extendInfinite = false
+    bool combined = false
+    string combinedTimeframesStr = na
+    bool disabled = false
+    string timeframeStr = na
+
+    float lowVolume = na
+    float highVolume = na
+    bool isInverse = false
+    int lastTouched = na
+    int lastTouchedIFVG = na
+    int inverseEndIndex = na
+    int inverseEndTime = na
+    float inverseVolume
+
+createFVGInfo (h,l,bull,t,tv) =>
+    FVGInfo newFVGInfo = FVGInfo.new(h, l, bull, t, tv)
+    newFVGInfo
+
+type FVG
+    FVGInfo info = na
+    
+    bool isRendered = false
+
+    box fvgBox = na
+    box ifvgBox = na
+    box fvgBoxText = na
+    box fvgBoxPositive = na
+    box fvgBoxNegative = na
+
+    line fvgSeperator = na
+    line fvgTextSeperator = na
+
+createFVG (FVGInfo FVGInfoF) =>
+    FVG newFVG = FVG.new(FVGInfoF)
+    newFVG
+
+safeDeleteFVG (FVG fvg) =>
+    fvg.isRendered := false
+
+    box.delete(fvg.fvgBox)
+    box.delete(fvg.ifvgBox)
+    box.delete(fvg.fvgBoxText)
+    box.delete(fvg.fvgBoxPositive)
+    box.delete(fvg.fvgBoxNegative)
+
+    line.delete(fvg.fvgSeperator)
+    line.delete(fvg.fvgTextSeperator)
+
+type orderBlockInfo
+    float top
+    float bottom
+    float obVolume
+    string obType
+    int startTime
+    float bbVolume
+    float obLowVolume
+    float obHighVolume
+    bool breaker = false
+    int breakTime
+    string timeframeStr
+    bool disabled = false
+    string combinedTimeframesStr = na
+    bool combined = false
+
+type orderBlock
+    orderBlockInfo info
+    bool isRendered = false
+
+    box orderBox = na
+    box breakerBox = na
+
+    line orderBoxLineTop = na
+    line orderBoxLineBottom = na
+    line breakerBoxLineTop = na
+    line breakerBoxLineBottom = na
+    //
+    box orderBoxText = na
+    box orderBoxPositive = na
+    box orderBoxNegative = na
+
+    line orderSeperator = na
+    line orderTextSeperator = na
+
+createOrderBlock (orderBlockInfo orderBlockInfoF) =>
+    orderBlock newOrderBlock = orderBlock.new(orderBlockInfoF)
+    newOrderBlock
+
+safeDeleteOrderBlock (orderBlock orderBlockF) =>
+    orderBlockF.isRendered := false
+
+    box.delete(orderBlockF.orderBox)
+    box.delete(orderBlockF.breakerBox)
+    box.delete(orderBlockF.orderBoxText)
+    box.delete(orderBlockF.orderBoxPositive)
+    box.delete(orderBlockF.orderBoxNegative)
+
+    line.delete(orderBlockF.orderBoxLineTop)
+    line.delete(orderBlockF.orderBoxLineBottom)
+    line.delete(orderBlockF.breakerBoxLineTop)
+    line.delete(orderBlockF.breakerBoxLineBottom)
+    line.delete(orderBlockF.orderSeperator)
+    line.delete(orderBlockF.orderTextSeperator)
+
+type timeframeInfo
+    int index = na
+    string timeframeStr = na
+    bool isEnabled = false
+
+    FVGInfo[] FVGInfoList = na
+    orderBlockInfo[] bullishOrderBlocksList = na
+    orderBlockInfo[] bearishOrderBlocksList = na
+
+newTimeframeInfo (index, timeframeStr, isEnabled) =>
+    newTFInfo = timeframeInfo.new()
+    newTFInfo.index := index
+    newTFInfo.isEnabled := isEnabled
+    newTFInfo.timeframeStr := timeframeStr
+
+    newTFInfo.FVGInfoList := array.new<FVGInfo>(0)
+    newTFInfo.bullishOrderBlocksList := array.new<orderBlockInfo>(0)
+    newTFInfo.bearishOrderBlocksList := array.new<orderBlockInfo>(0)
+
+    newTFInfo
+
+type obSwing
+    int x = na    
+    float y = na
+    float swingVolume = na
+    bool crossed = false
+//#endregion
+
+//#region Definitions
+
+volumeBarsLeftSide = (volumeBarsPlace == "Left")
+fvgSensitivity = fvgSensitivityText == "Extreme" ? 6 : fvgSensitivityText == "High" ? 2 : fvgSensitivityText == "Normal" ? 1.5 : 1
+extendZonesByTime = extendZonesBy * timeframe.in_seconds(timeframe.period) * 1000
+
+bullishOrderBlocks = zoneCountOB == "Low" ? 3 : zoneCountOB == "Medium" ? 5 : 20
+bearishOrderBlocks = zoneCountOB == "Low" ? 3 : zoneCountOB == "Medium" ? 5 : 20
+
+atr = ta.atr(atrLen)
+volCheck = (ta.cum(volume) > 0)
+
+moveLine(_line, _x, _y, _x2) =>
+    line.set_xy1(_line, _x,  _y)
+    line.set_xy2(_line, _x2, _y)
+
+moveBox (_box, _topLeftX, _topLeftY, _bottomRightX, _bottomRightY) =>
+    box.set_lefttop(_box, _topLeftX, _topLeftY)
+    box.set_rightbottom(_box, _bottomRightX, _bottomRightY)
+
+isTimeframeLower (timeframe1F, timeframe2F) =>
+    timeframe.in_seconds(timeframe1F) < timeframe.in_seconds(timeframe2F)
+
+getMinTimeframe (timeframe1F, timeframe2F) =>
+    if isTimeframeLower(timeframe1F, timeframe2F)
+        timeframe1F
+    else
+        timeframe2F
+
+getMaxTimeframe (timeframe1F, timeframe2F) =>
+    if isTimeframeLower(timeframe1F, timeframe2F)
+        timeframe2F
+    else
+        timeframe1F
+
+formatTimeframeString (formatTimeframe) =>
+    timeframeF = formatTimeframe == "" ? timeframe.period : formatTimeframe
+    
+    if str.contains(timeframeF, "D") or str.contains(timeframeF, "W") or str.contains(timeframeF, "S") or str.contains(timeframeF, "M")
+        timeframeF
+    else
+        seconds = timeframe.in_seconds(timeframeF)
+        if seconds >= 3600
+            hourCount = int(seconds / 3600)
+            str.tostring(hourCount) + " Hour" + (hourCount > 1 ? "s" : "")
+        else
+            timeframeF + " Min"
+
+betterCross(s1, s2) =>
+    string ret = na
+    if s1 >= s2 and s1[1] < s2
+        ret := "Bull"
+    if s1 < s2 and s1[1] >= s2
+        ret := "Bear"
+    ret
+
+colorWithTransparency (colorF, transparencyX) =>
+    color.new(colorF, color.t(colorF) * transparencyX)
+
+createFVGBox (boxColor, transparencyX = 1.0, xlocType = xloc.bar_time) =>
+    box.new(na, na, na, na, text_size = size.normal, xloc = xlocType, extend = extend.none, bgcolor = colorWithTransparency(boxColor, transparencyX), text_color = textColor, text_halign = text.align_center, border_color = #00000000)
+
+var FVGInfo[] FVGInfoList = array.new<FVGInfo>(0)
+var bullishOrderBlocksList = array.new<orderBlockInfo>(0)
+var bearishOrderBlocksList = array.new<orderBlockInfo>(0)
+
+var allOrderBlocksList = array.new<orderBlock>(0)
+var FVG[] allFVGList = array.new<FVG>(0)
+//#endregion
+
+//#region Order Blocks
+renderOrderBlock (orderBlock ob, int customEndTime) =>
+    orderBlockInfo info = ob.info
+    ob.isRendered := true
+    orderColor = ob.info.obType == "Bull" ? bullOrderBlockColor : bearOrderBlockColor
+    breakerBlockColor = ob.info.obType == "Bull" ? bearishBreakerBlockColor : bullishBreakerBlockColor
+    if OBsEnabled and (not breakersFull or not (BBsEnabled and info.breaker)) and not (not showInvalidated and info.breaker)
+        ob.orderBox := createFVGBox(orderColor, 1.5)
+        if ob.info.combined and not changeCombinedFVGsColor
+            ob.orderBox.set_bgcolor(colorWithTransparency(orderColor, 1.1))
+        ob.orderBoxText := createFVGBox(color.new(color.white, 100))
+        if orderBlockVolumetricInfo
+            ob.orderBoxPositive := createFVGBox(bullOrderBlockColor)
+            ob.orderBoxNegative := createFVGBox(bearOrderBlockColor)
+            ob.orderSeperator := line.new(na,na,na,na,xloc.bar_time,extend.none,textColor,line.style_dashed,1)
+            ob.orderTextSeperator := line.new(na,na,na,na,xloc.bar_time,extend.none,textColor,line.style_solid,1)
+
+        zoneSize = extendZonesDynamic ? na(info.breakTime) ? extendZonesByTime : (info.breakTime - info.startTime) : extendZonesByTime
+        if na(info.breakTime)
+            zoneSize := (time + 1) - info.startTime
+
+        startX = volumeBarsLeftSide ? info.startTime : info.startTime + zoneSize - zoneSize / 3
+        maxEndX = volumeBarsLeftSide ? info.startTime + zoneSize / 3 : info.startTime + zoneSize
+
+        moveBox(ob.orderBox, info.startTime, info.top, info.startTime + zoneSize, info.bottom)
+        moveBox(ob.orderBoxText, volumeBarsLeftSide ? maxEndX : info.startTime, info.top, volumeBarsLeftSide ? info.startTime + zoneSize : startX, info.bottom)
+
+        percentage = int((math.min(info.obHighVolume, info.obLowVolume) / math.max(info.obHighVolume, info.obLowVolume)) * 100.0)
+        //OBText = (na(ob.info.combinedTimeframesStr) ? formatTimeframeString(ob.info.timeframeStr) : ob.info.combinedTimeframesStr) + " OB"
+        OBText = ""
+        box.set_text(ob.orderBoxText, (orderBlockVolumetricInfo ? str.tostring(ob.info.obVolume, format.volume) + " (" + str.tostring(percentage) + "%)\n" : "") + (combinedText and ob.info.combined ? "[Combined]\n" : "") + OBText)
+
+        if orderBlockVolumetricInfo
+            showHighLowBoxText = false
+
+            curEndXHigh = int(math.ceil((info.obHighVolume / info.obVolume) * (maxEndX - startX) + startX))
+            curEndXLow = int(math.ceil((info.obLowVolume / info.obVolume) * (maxEndX - startX) + startX))
+
+            moveBox(ob.orderBoxPositive, mirrorVolumeBars ? startX : curEndXLow, info.top, mirrorVolumeBars ? curEndXHigh : maxEndX, (info.bottom + info.top) / 2)
+            box.set_text(ob.orderBoxPositive, showHighLowBoxText ? str.tostring(info.obHighVolume, format.volume) : "")
+
+            moveBox(ob.orderBoxNegative, mirrorVolumeBars ? startX : curEndXHigh, info.bottom, mirrorVolumeBars ? curEndXLow : maxEndX, (info.bottom + info.top) / 2)
+            box.set_text(ob.orderBoxNegative, showHighLowBoxText ? str.tostring(info.obLowVolume, format.volume) : "")
+
+            moveLine(ob.orderSeperator, volumeBarsLeftSide ? startX : maxEndX, (info.bottom + info.top) / 2, volumeBarsLeftSide ? maxEndX : startX)
+
+            line.set_xy1(ob.orderTextSeperator, volumeBarsLeftSide ? maxEndX : startX, info.top)
+            line.set_xy2(ob.orderTextSeperator, volumeBarsLeftSide ? maxEndX : startX, info.bottom)
+
+    if info.breaker and BBsEnabled
+        startTime = (OBsEnabled and not breakersFull) ? info.breakTime : info.startTime
+        endTime = time + 1
+        if not na(customEndTime)
+            endTime := customEndTime
+        
+        ob.breakerBox := box.new(startTime, info.top, endTime, info.bottom, na, bgcolor = breakerBlockColor, extend = extend.none, xloc = xloc.bar_time, text_color = textColor, text_size = size.normal)
+        //BBText = (na(ob.info.combinedTimeframesStr) ? formatTimeframeString(ob.info.timeframeStr) : ob.info.combinedTimeframesStr) + " BB"
+        BBText = ""
+        box.set_text(ob.breakerBox, (breakBlockVolumetricInfo ? str.tostring(ob.info.bbVolume, format.volume) + "\n" : "") + (combinedText and ob.info.combined ? "[Combined]\n" : "") + BBText)
+        ob.breakerBoxLineTop := line.new(startTime, info.top, endTime, info.top, xloc.bar_time, extend.none, colorWithTransparency(breakerBlockColor, 0), line.style_dashed)
+        ob.breakerBoxLineBottom := line.new(startTime, info.bottom, endTime, info.bottom, xloc.bar_time, extend.none, colorWithTransparency(breakerBlockColor, 0), line.style_dashed)
+
+
+findOBSwings(len) =>
+    var swingType = 0
+    var obSwing top = obSwing.new(na, na)
+    var obSwing bottom = obSwing.new(na, na)
+    
+    upper = ta.highest(len)
+    lower = ta.lowest(len)
+
+    swingType := high[len] > upper ? 0 : low[len] < lower ? 1 : swingType
+
+    if swingType == 0 and swingType[1] != 0
+        top := obSwing.new(bar_index[len], high[len], volume[len])
+    
+    if swingType == 1 and swingType[1] != 1
+        bottom := obSwing.new(bar_index[len], low[len], volume[len])
+
+    [top, bottom]
+
+areaOfOB (orderBlockInfo OBInfoF) =>
+    float XA1 = OBInfoF.startTime
+    float XA2 = na(OBInfoF.breakTime) ? time + 1 : OBInfoF.breakTime
+    float YA1 = OBInfoF.top
+    float YA2 = OBInfoF.bottom
+    float edge1 = math.sqrt((XA2 - XA1) * (XA2 - XA1) + (YA2 - YA2) * (YA2 - YA2))
+    float edge2 = math.sqrt((XA2 - XA2) * (XA2 - XA2) + (YA2 - YA1) * (YA2 - YA1))
+    float totalArea = edge1 * edge2
+    totalArea
+
+areaOfBB (orderBlockInfo OBInfoF) =>
+    float XA1 = OBInfoF.breakTime
+    float XA2 = time + 1
+    float YA1 = OBInfoF.top
+    float YA2 = OBInfoF.bottom
+    float edge1 = math.sqrt((XA2 - XA1) * (XA2 - XA1) + (YA2 - YA2) * (YA2 - YA2))
+    float edge2 = math.sqrt((XA2 - XA2) * (XA2 - XA2) + (YA2 - YA1) * (YA2 - YA1))
+    float totalArea = edge1 * edge2
+    totalArea
+
+doOBsTouch (orderBlockInfo OBInfo1, orderBlockInfo OBInfo2) =>
+    float XA1 = OBInfo1.startTime
+    float XA2 = na(OBInfo1.breakTime) ? time + 1 : OBInfo1.breakTime
+    float YA1 = OBInfo1.top
+    float YA2 = OBInfo1.bottom
+
+    float XB1 = OBInfo2.startTime
+    float XB2 = na(OBInfo2.breakTime) ? time + 1 : OBInfo2.breakTime
+    float YB1 = OBInfo2.top
+    float YB2 = OBInfo2.bottom
+    float intersectionArea = math.max(0, math.min(XA2, XB2) - math.max(XA1, XB1)) * math.max(0, math.min(YA1, YB1) - math.max(YA2, YB2))
+    float unionArea = areaOfOB(OBInfo1) + areaOfOB(OBInfo2) - intersectionArea
+    
+    float overlapPercentage = (intersectionArea / unionArea) * 100.0
+
+    if overlapPercentage > overlapThresholdPercentage
+        true
+    else
+        false
+
+isOBValid (orderBlockInfo OBInfo) =>
+    valid = true
+    if OBInfo.disabled
+        valid := false
+    valid
+
+arrHasOB (orderBlock[] arr, orderBlock obF) =>
+    hasOB = false
+    if arr.size() > 0
+        for i = 0 to arr.size() - 1
+            orderBlock ob1 = arr.get(i)
+            if doOBsTouch(ob1.info, obF.info)
+                hasOB := true
+                break
+    hasOB
+
+combineOBsFunc () =>
+    if allOrderBlocksList.size() > 0
+        lastCombinations = 999
+        while lastCombinations > 0
+            lastCombinations := 0
+            for i = 0 to allOrderBlocksList.size() - 1
+                curOB1 = allOrderBlocksList.get(i)
+                for j = 0 to allOrderBlocksList.size() - 1
+                    curOB2 = allOrderBlocksList.get(j)
+                    if i == j
+                        continue
+                    if not isOBValid(curOB1.info) or not isOBValid(curOB2.info)
+                        continue
+                    if curOB1.info.obType != curOB2.info.obType
+                        continue
+                    if doOBsTouch(curOB1.info, curOB2.info)
+                        curOB1.info.disabled := true
+                        curOB2.info.disabled := true
+                        orderBlock newOB = createOrderBlock(orderBlockInfo.new(math.max(curOB1.info.top, curOB2.info.top), math.min(curOB1.info.bottom, curOB2.info.bottom), curOB1.info.obVolume + curOB2.info.obVolume, curOB1.info.obType))
+                        newOB.info.startTime := math.min(curOB1.info.startTime, curOB2.info.startTime)
+                        newOB.info.breakTime := math.max(nz(curOB1.info.breakTime), nz(curOB2.info.breakTime))
+                        newOB.info.breakTime := newOB.info.breakTime == 0 ? na : newOB.info.breakTime
+                        newOB.info.timeframeStr := curOB1.info.timeframeStr
+
+                        newOB.info.obVolume := curOB1.info.obVolume + curOB2.info.obVolume
+                        newOB.info.obLowVolume := curOB1.info.obLowVolume + curOB2.info.obLowVolume
+                        newOB.info.obHighVolume := curOB1.info.obHighVolume + curOB2.info.obHighVolume
+                        newOB.info.bbVolume := nz(curOB1.info.bbVolume, 0) + nz(curOB2.info.bbVolume, 0)
+                        newOB.info.breaker := curOB1.info.breaker or curOB2.info.breaker
+                        
+                        newOB.info.combined := true
+                        if timeframe.in_seconds(curOB1.info.timeframeStr) != timeframe.in_seconds(curOB2.info.timeframeStr)
+                            newOB.info.combinedTimeframesStr := (na(curOB1.info.combinedTimeframesStr) ? formatTimeframeString(curOB1.info.timeframeStr) : curOB1.info.combinedTimeframesStr) + " & " + (na(curOB2.info.combinedTimeframesStr) ? formatTimeframeString(curOB2.info.timeframeStr) : curOB2.info.combinedTimeframesStr)
+                        allOrderBlocksList.unshift(newOB)
+                        lastCombinations += 1
+    true
+
+handleOrderBlocksFinal () =>
+    if DEBUG
+        log.info("Bullish OB Count " + str.tostring(bullishOrderBlocksList.size()))
+        log.info("Bearish OB Count " + str.tostring(bearishOrderBlocksList.size()))
+
+    newBullishOBAlert = false
+    newBearishOBAlert = false
+
+    newBullishBBAlert = false
+    newBearishBBAlert = false
+    
+    alertTimeOB = ""
+    alertTimeBB = ""
+
+    orderBlock[] orderBlocksToAdd = array.new<orderBlock>(0)
+
+    if not na(bullishOrderBlocksList)
+        if bullishOrderBlocksList.size() > 0
+            for j = 0 to math.min(bullishOrderBlocksList.size() - 1, bullishOrderBlocks - 1)
+                orderBlockInfoF = bullishOrderBlocksList.get(j)
+                orderBlockInfoF.timeframeStr := timeframe.period
+                orderBlocksToAdd.unshift(createOrderBlock(orderBlockInfo.copy(orderBlockInfoF)))
+
+    if not na(bearishOrderBlocksList)
+        if bearishOrderBlocksList.size() > 0
+            for j = 0 to math.min(bearishOrderBlocksList.size() - 1, bearishOrderBlocks - 1)
+                orderBlockInfoF = bearishOrderBlocksList.get(j)
+                orderBlockInfoF.timeframeStr := timeframe.period
+                orderBlocksToAdd.unshift(createOrderBlock(orderBlockInfo.copy(orderBlockInfoF)))
+
+    // Check New Order & Breaker Blocks
+    if orderBlocksToAdd.size () > 0
+        for i = 0 to orderBlocksToAdd.size() - 1
+            obToTest = orderBlocksToAdd.get(i)
+            if obToTest.info.breaker == false
+                if not arrHasOB(allOrderBlocksList, obToTest)
+                    alertTimeOB := obToTest.info.timeframeStr
+                    if obToTest.info.obType == "Bull"
+                        newBullishOBAlert := true
+                    else
+                        newBearishOBAlert := true
+            else
+                if not arrHasOB(allOrderBlocksList, obToTest)
+                    alertTimeBB := obToTest.info.timeframeStr
+                    if obToTest.info.obType == "Bull"
+                        newBearishBBAlert := true
+                    else
+                        newBullishBBAlert := true
+    
+    // Delete Old Order Blocks
+    if allOrderBlocksList.size () > 0
+        for i = 0 to allOrderBlocksList.size() - 1
+            safeDeleteOrderBlock(allOrderBlocksList.get(i))
+    allOrderBlocksList.clear()
+
+    // Add New Order Blocks
+    if orderBlocksToAdd.size () > 0
+        for i = 0 to orderBlocksToAdd.size() - 1
+            allOrderBlocksList.unshift(orderBlocksToAdd.get(i))
+
+    if combineOBs
+        combineOBsFunc()
+
+    if allOrderBlocksList.size() > 0
+        for i = 0 to allOrderBlocksList.size() - 1
+            curOB = allOrderBlocksList.get(i)
+            if isOBValid(curOB.info) and dbgShowBBFVG
+                renderOrderBlock(curOB, na)
+    
+    [alertTimeOB, alertTimeBB, newBullishOBAlert, newBearishOBAlert, newBullishBBAlert, newBearishBBAlert]
+
+//#region Find Order Blocks
+
+[top, btm] = findOBSwings(swingLength)
+useBody = false
+max = useBody ? math.max(close, open) : high
+min = useBody ? math.min(close, open) : low
+
+boxBtmBull = max[1]
+boxTopBull = min[1]
+boxLocBull = time[1]
+
+for i = 1 to (bar_index - top.x) - 1
+    boxBtmBull := math.min(min[i], boxBtmBull)
+    boxTopBull := boxBtmBull == min[i] ? max[i] : boxTopBull
+    boxLocBull := boxBtmBull == min[i] ? time[i] : boxLocBull
+
+boxBtmBear = min[1]
+boxTopBear = max[1]
+boxLocBear = time[1]
+
+for i = 1 to (bar_index - btm.x) - 1
+    boxTopBear := math.max(max[i], boxTopBear)
+    boxBtmBear := boxTopBear == max[i] ? min[i] : boxBtmBear
+    boxLocBear := boxTopBear == max[i] ? time[i] : boxLocBear
+
+if bar_index > last_bar_index - maxDistanceToLastBar
+    // Bullish Order Block
+    bullishBreaked = 0
+
+    if bullishOrderBlocksList.size() > 0
+        for i = bullishOrderBlocksList.size() - 1 to 0
+            currentOB = bullishOrderBlocksList.get(i)
+        
+            if not currentOB.breaker 
+                if (obEndMethod == "Wick" ? low : math.min(open, close)) < currentOB.bottom
+                    currentOB.breaker := true
+                    currentOB.breakTime := time
+                    currentOB.bbVolume := volume
+            else
+                if (bbEndMethod == "Wick" ? high : close) > currentOB.top
+                    bullishOrderBlocksList.remove(i)
+                else if i < bullishOrderBlocks and top.y < currentOB.top and top.y > currentOB.bottom 
+                    bullishBreaked := 1
+
+    if close > top.y and not top.crossed
+        top.crossed := true
+
+        newOrderBlockInfo = orderBlockInfo.new(boxTopBull, boxBtmBull, volume + volume[1] + volume[2], "Bull", boxLocBull)
+        newOrderBlockInfo.obLowVolume := volume[2]
+        newOrderBlockInfo.obHighVolume := volume + volume[1]
+
+        obSize = math.abs(newOrderBlockInfo.top - newOrderBlockInfo.bottom)
+        if obSize <= atr * maxATRMult
+            bullishOrderBlocksList.unshift(newOrderBlockInfo)
+            if bullishOrderBlocksList.size() > maxOrderBlocks
+                bullishOrderBlocksList.pop()
+
+    // Bearish Order Block
+
+    bearishBreaked = 0
+
+    if bearishOrderBlocksList.size() > 0
+        for i = bearishOrderBlocksList.size() - 1 to 0
+            currentOB = bearishOrderBlocksList.get(i)
+
+            if not currentOB.breaker 
+                if (obEndMethod == "Wick" ? high : math.max(open, close)) > currentOB.top
+                    currentOB.breaker := true
+                    currentOB.breakTime := time
+                    currentOB.bbVolume := volume
+            else
+                if (bbEndMethod == "Wick" ? low : close) < currentOB.bottom
+                    bearishOrderBlocksList.remove(i)
+                else if i < bearishOrderBlocks and btm.y > currentOB.bottom and btm.y < currentOB.top 
+                    bearishBreaked := 1
+
+    if close < btm.y and not btm.crossed
+        btm.crossed := true
+
+        newOrderBlockInfo = orderBlockInfo.new(boxTopBear, boxBtmBear, volume + volume[1] + volume[2], "Bear", boxLocBear)
+        newOrderBlockInfo.obLowVolume := volume + volume[1]
+        newOrderBlockInfo.obHighVolume := volume[2]
+        obSize = math.abs(newOrderBlockInfo.top - newOrderBlockInfo.bottom)
+        if obSize <= atr * maxATRMult
+            bearishOrderBlocksList.unshift(newOrderBlockInfo)
+            if bearishOrderBlocksList.size() > maxOrderBlocks
+                bearishOrderBlocksList.pop()
+//#endregion
+//#endregion
+
+//#region FVGs
+arrHasFVG (FVG[] arr, FVG fvgF) =>
+    hasFVG = false
+    if arr.size() > 0
+        for i = 0 to arr.size() - 1
+            FVG fvg1 = arr.get(i)
+            if fvg1.info.startTime == fvgF.info.startTime
+                hasFVG := true
+                break
+    hasFVG
+
+arrHasIFVG (FVG[] arr, FVG fvgF) =>
+    hasIFVG = false
+    if arr.size() > 0
+        for i = 0 to arr.size() - 1
+            FVG fvg1 = arr.get(i)
+            if fvg1.info.isInverse
+                if fvg1.info.startTime == fvgF.info.startTime
+                    hasIFVG := true
+                    break
+    hasIFVG
+
+renderFVG (FVG fvg, int customEndTime) =>
+    fvg.isRendered := true
+    if fvgEnabled and ((not ifvgEnabled) or (not fvg.info.isInverse)) and (showInvalidated or na(fvg.info.endTime))
+        fvg.fvgBox := createFVGBox((fvg.info.combined and changeCombinedFVGsColor) ? combinedColor : fvg.info.isBull ? highColor : lowColor, 1.5)
+        fvg.fvgBoxText := createFVGBox(color.new(color.white, 100))
+        if fvgVolumetricInfo
+            fvg.fvgBoxPositive := createFVGBox(highColor)
+            fvg.fvgBoxNegative := createFVGBox(lowColor)
+            fvg.fvgSeperator := line.new(na,na,na,na,xloc.bar_time,extend.none,textColor,line.style_dashed,1)
+            fvg.fvgTextSeperator := line.new(na,na,na,na,xloc.bar_time,extend.none,textColor,line.style_solid,1)
+
+        zoneSize = extendZonesDynamic ? na(fvg.info.endTime) ? extendZonesByTime : (fvg.info.endTime - fvg.info.startTime) : extendZonesByTime
+        if na(fvg.info.endTime) and fvg.info.extendInfinite
+            zoneSize := (time + 1) - fvg.info.startTime
+        
+        if not na(customEndTime)
+            zoneSize := customEndTime - fvg.info.startTime
+
+        startX = volumeBarsLeftSide ? fvg.info.startTime : fvg.info.startTime + zoneSize - zoneSize / 3
+        maxEndX = volumeBarsLeftSide ? fvg.info.startTime + zoneSize / 3 : fvg.info.startTime + zoneSize
+
+        moveBox(fvg.fvgBox, fvg.info.startTime, fvg.info.max, fvg.info.startTime + zoneSize, fvg.info.min)
+        moveBox(fvg.fvgBoxText, volumeBarsLeftSide ? maxEndX : fvg.info.startTime, fvg.info.max, volumeBarsLeftSide ? fvg.info.startTime + zoneSize : startX, fvg.info.min)
+
+        percentage = int((math.min(fvg.info.highVolume, fvg.info.lowVolume) / math.max(fvg.info.highVolume, fvg.info.lowVolume)) * 100.0)
+        //FVGText = (na(fvg.info.combinedTimeframesStr) ? formatTimeframeString(fvg.info.timeframeStr) : fvg.info.combinedTimeframesStr) + " FVG"
+        FVGText = ""
+        box.set_text(fvg.fvgBoxText, (fvgVolumetricInfo ? str.tostring(fvg.info.totalVolume, format.volume) + " (" + str.tostring(percentage) + "%)\n" : "") + (combinedText and fvg.info.combined ? "[Combined]\n" : "") + FVGText)
+        
+        if fvg.info.combined and not changeCombinedFVGsColor
+            fvg.fvgBox.set_bgcolor(colorWithTransparency(fvg.info.isBull ? highColor : lowColor, 1.1))
+
+        if fvgVolumetricInfo
+            showHighLowBoxText = false
+
+            curEndXHigh = int(math.ceil((fvg.info.highVolume / fvg.info.totalVolume) * (maxEndX - startX) + startX))
+            curEndXLow = int(math.ceil((fvg.info.lowVolume / fvg.info.totalVolume) * (maxEndX - startX) + startX))
+
+            moveBox(fvg.fvgBoxPositive, mirrorVolumeBars ? startX : curEndXLow, fvg.info.max, mirrorVolumeBars ? curEndXHigh : maxEndX, (fvg.info.min + fvg.info.max) / 2)
+            box.set_text(fvg.fvgBoxPositive, showHighLowBoxText ? str.tostring(fvg.info.highVolume, format.volume) : "")
+
+            moveBox(fvg.fvgBoxNegative, mirrorVolumeBars ? startX : curEndXHigh, fvg.info.min, mirrorVolumeBars ? curEndXLow : maxEndX, (fvg.info.min + fvg.info.max) / 2)
+            box.set_text(fvg.fvgBoxNegative, showHighLowBoxText ? str.tostring(fvg.info.lowVolume, format.volume) : "")
+
+            moveLine(fvg.fvgSeperator, volumeBarsLeftSide ? startX : maxEndX, (fvg.info.min + fvg.info.max) / 2, volumeBarsLeftSide ? maxEndX : startX)
+
+            line.set_xy1(fvg.fvgTextSeperator, volumeBarsLeftSide ? maxEndX : startX, fvg.info.max)
+            line.set_xy2(fvg.fvgTextSeperator, volumeBarsLeftSide ? maxEndX : startX, fvg.info.min)
+    
+    // IFVG
+    if fvg.info.isInverse and ifvgEnabled
+        inverseColor = fvg.info.isBull ? bearishInverseColor : bullishInverseColor
+        fvg.ifvgBox := createFVGBox(inverseColor)
+        startTimeIFVG = ifvgFull ? fvg.info.startTime : fvg.info.endTime
+        inverseZoneSize = na(fvg.info.inverseEndTime) ? ((time + 1) - startTimeIFVG) : (fvg.info.inverseEndTime - startTimeIFVG)
+        moveBox(fvg.ifvgBox, startTimeIFVG, fvg.info.max, startTimeIFVG + inverseZoneSize, fvg.info.min)
+        IFVGText = (na(fvg.info.combinedTimeframesStr) ? formatTimeframeString(fvg.info.timeframeStr) : fvg.info.combinedTimeframesStr) + " IFVG"
+        box.set_text(fvg.ifvgBox, (ifvgVolumetricInfo ? str.tostring(fvg.info.inverseVolume, format.volume) + "\n" : "") + (combinedText and fvg.info.combined ? "[Combined]\n" : "") + IFVGText)
+
+
+areaOfFVG (FVGInfo FVGInfoF) =>
+    float XA1 = FVGInfoF.startTime
+    float XA2 = na(FVGInfoF.endTime) ? time + 1 : FVGInfoF.endTime
+    float YA1 = FVGInfoF.max
+    float YA2 = FVGInfoF.min
+    float edge1 = math.sqrt((XA2 - XA1) * (XA2 - XA1) + (YA2 - YA2) * (YA2 - YA2))
+    float edge2 = math.sqrt((XA2 - XA2) * (XA2 - XA2) + (YA2 - YA1) * (YA2 - YA1))
+    float totalArea = edge1 * edge2
+    totalArea
+
+doFVGsTouch (FVGInfo FVGInfo1, FVGInfo FVGInfo2) =>
+    float XA1 = FVGInfo1.startTime
+    float XA2 = na(FVGInfo1.endTime) ? time + 1 : FVGInfo1.endTime
+    float YA1 = FVGInfo1.max
+    float YA2 = FVGInfo1.min
+
+    float XB1 = FVGInfo2.startTime
+    float XB2 = na(FVGInfo2.endTime) ? time + 1 : FVGInfo2.endTime
+    float YB1 = FVGInfo2.max
+    float YB2 = FVGInfo2.min
+    float intersectionArea = math.max(0, math.min(XA2, XB2) - math.max(XA1, XB1)) * math.max(0, math.min(YA1, YB1) - math.max(YA2, YB2))
+    float unionArea = areaOfFVG(FVGInfo1) + areaOfFVG(FVGInfo2) - intersectionArea
+    
+    float overlapPercentage = (intersectionArea / unionArea) * 100.0
+
+    //if FVGInfo1.isBull and str.contains(str.tostring(FVGInfo1.totalVolume, format.volume),"137M") and str.contains(str.tostring(FVGInfo2.totalVolume, format.volume),"221M")
+    //    log.info(str.tostring(XA2) + " | " + str.tostring(XB2))
+
+    if overlapPercentage > overlapThresholdPercentage
+        true
+    else
+        false
+
+isFVGValid (FVGInfo FVGInfoF) =>
+    valid = true
+    if (not showInvalidated) and (not na(FVGInfoF.endTime))
+        valid := false
+    else if FVGInfoF.disabled
+        valid := false
+    valid
+
+isIFVGValid (FVGInfo FVGInfoF) =>
+    valid = true
+    if not ifvgEnabled
+        valid := false
+    else if (not showInvalidated) and (not na(FVGInfoF.inverseEndTime))
+        valid := false
+    else if FVGInfoF.disabled
+        valid := false
+    valid
+
+isFVGValidInTimeframe (FVGInfo FVGInfoF) =>
+    valid = true
+    if (not showInvalidated) and (not na(FVGInfoF.endTime))
+        valid := false
+    else if FVGInfoF.disabled
+        valid := false
+    else if not na(FVGInfoF.endBarIndex) and (FVGInfoF.endBarIndex - FVGInfoF.startBarIndex) < minimumFVGSize
+        valid := false
+    else if na(FVGInfoF.endBarIndex) and deleteUntouched and (bar_index - FVGInfoF.lastTouched) > deleteUntouchedAfterXBars
+        valid := false
+    valid
+
+isIFVGValidInTimeframe (FVGInfo FVGInfoF) =>
+    valid = true
+    if not ifvgEnabled
+        valid := false
+    else if (not showInvalidated) and (not na(FVGInfoF.inverseEndIndex))
+        valid := false
+    else if not na(FVGInfoF.inverseEndIndex) and (FVGInfoF.inverseEndIndex - FVGInfoF.endBarIndex) < minimumIFVGSize
+        valid := false
+    else if na(FVGInfoF.inverseEndIndex) and deleteUntouched and (bar_index - FVGInfoF.lastTouchedIFVG) > deleteUntouchedAfterXBars
+        valid := false
+    valid
+
+combineFVGsFunc () =>
+    if allFVGList.size() > 0
+        lastCombinations = 999
+        while lastCombinations > 0
+            lastCombinations := 0
+            for i = 0 to allFVGList.size() - 1
+                curFVG1 = allFVGList.get(i)
+                for j = 0 to allFVGList.size() - 1
+                    curFVG2 = allFVGList.get(j)
+                    if i == j
+                        continue
+                    if not isFVGValid(curFVG1.info) or not isFVGValid(curFVG2.info)
+                        continue
+                    if curFVG1.info.isBull != curFVG2.info.isBull
+                        continue
+                    if doFVGsTouch(curFVG1.info, curFVG2.info)
+                        curFVG1.info.disabled := true
+                        curFVG2.info.disabled := true
+                        FVG newFVG = createFVG(createFVGInfo(math.max(curFVG1.info.max, curFVG2.info.max), math.min(curFVG1.info.min, curFVG2.info.min), curFVG1.info.isBull, math.min(curFVG1.info.t, curFVG2.info.t), 0))
+                        newFVG.info.startTime := math.min(curFVG1.info.startTime, curFVG2.info.startTime)
+                        newFVG.info.startBarIndex := math.min(curFVG1.info.startBarIndex, curFVG2.info.startBarIndex)
+                        newFVG.info.endTime := math.max(nz(curFVG1.info.endTime), nz(curFVG2.info.endTime))
+                        newFVG.info.endTime := newFVG.info.endTime == 0 ? na : newFVG.info.endTime
+                        newFVG.info.endBarIndex := math.max(nz(curFVG1.info.endBarIndex), nz(curFVG2.info.endBarIndex))
+                        newFVG.info.endBarIndex := newFVG.info.endBarIndex == 0 ? na : newFVG.info.endBarIndex
+                        newFVG.info.timeframeStr := curFVG1.info.timeframeStr
+                        newFVG.info.extendInfinite := curFVG1.info.extendInfinite or curFVG2.info.extendInfinite
+
+                        newFVG.info.totalVolume := curFVG1.info.totalVolume + curFVG2.info.totalVolume
+                        newFVG.info.lowVolume := curFVG1.info.lowVolume + curFVG2.info.lowVolume
+                        newFVG.info.highVolume := curFVG1.info.highVolume + curFVG2.info.highVolume
+                        newFVG.info.lastTouched := math.max(curFVG1.info.lastTouched, curFVG2.info.lastTouched)
+                        newFVG.info.lastTouchedIFVG := math.max(curFVG1.info.lastTouchedIFVG, curFVG2.info.lastTouchedIFVG)
+                        // Combine IFVG
+                        newFVG.info.inverseEndIndex := math.max(nz(curFVG1.info.inverseEndIndex), nz(curFVG2.info.inverseEndIndex))
+                        newFVG.info.inverseEndIndex := newFVG.info.inverseEndIndex == 0 ? na : newFVG.info.inverseEndIndex
+
+                        newFVG.info.inverseEndTime := math.max(nz(curFVG1.info.inverseEndTime), nz(curFVG2.info.inverseEndTime))
+                        newFVG.info.inverseEndTime := newFVG.info.inverseEndTime == 0 ? na : newFVG.info.inverseEndTime
+                        if curFVG1.info.isInverse or curFVG2.info.isInverse
+                            newFVG.info.inverseVolume := nz(curFVG1.info.inverseVolume) + nz(curFVG2.info.inverseVolume)
+                            newFVG.info.isInverse := true
+
+                        newFVG.info.combined := true
+                        if timeframe.in_seconds(curFVG1.info.timeframeStr) != timeframe.in_seconds(curFVG2.info.timeframeStr)
+                            newFVG.info.combinedTimeframesStr := (na(curFVG1.info.combinedTimeframesStr) ? formatTimeframeString(curFVG1.info.timeframeStr) : curFVG1.info.combinedTimeframesStr) + " & " + (na(curFVG2.info.combinedTimeframesStr) ? formatTimeframeString(curFVG2.info.timeframeStr) : curFVG2.info.combinedTimeframesStr)
+                        allFVGList.unshift(newFVG)
+                        lastCombinations += 1
+
+handleFVGsFinal () => 
+    FVG[] newFVGsToAdd = array.new<FVG>(0)
+
+    alertTimeFVG = ""
+    newBullishFVGAlert = false
+    newBearishFVGAlert = false
+
+    alertTimeIFVG = ""
+    newBullishIFVGAlert = false
+    newBearishIFVGAlert = false
+
+    // Add Timeframe FVGs
+    if not na(FVGInfoList)
+        if FVGInfoList.size() > 0
+            for j = 0 to FVGInfoList.size() - 1
+                newFVG = createFVG(FVGInfo.copy(FVGInfoList.get(j)))
+                newFVG.info.timeframeStr := timeframe.period
+                newFVGsToAdd.unshift(newFVG)
+
+    // Check New FVGs
+    if newFVGsToAdd.size () > 0
+        for i = 0 to newFVGsToAdd.size() - 1
+            curFVG = newFVGsToAdd.get(i)
+            if not arrHasFVG(allFVGList, curFVG)
+                alertTimeFVG := curFVG.info.timeframeStr
+                if curFVG.info.isBull
+                    newBullishFVGAlert := true
+                else
+                    newBearishFVGAlert := true
+            if curFVG.info.isInverse
+                if not arrHasIFVG(allFVGList, curFVG)
+                    alertTimeIFVG := curFVG.info.timeframeStr
+                    if curFVG.info.isBull
+                        newBullishIFVGAlert := true
+                    else
+                        newBearishIFVGAlert := true
+    
+    // Delete Old FVGs
+    if allFVGList.size () > 0
+        for i = 0 to allFVGList.size() - 1
+            safeDeleteFVG(allFVGList.get(i))
+    allFVGList.clear()
+
+    // Add New FVGs
+    if newFVGsToAdd.size () > 0
+        for i = 0 to newFVGsToAdd.size() - 1
+            allFVGList.unshift(newFVGsToAdd.get(i))
+
+    totalFoundFVGs = allFVGList.size()
+    
+    // Combine FVGs
+    if combineFVGs
+        combineFVGsFunc()
+
+    // Render FVGs
+    renderedFVGCount = 0
+    extendedLastXFVGsCount = 0
+    if allFVGList.size() > 0
+        for i = 0 to allFVGList.size() - 1
+            curFVG = allFVGList.get(i)
+            if not isFVGValid(curFVG.info) and (not isIFVGValid(curFVG.info))
+                continue
+            if extendLastFVGs and na(curFVG.info.endTime) and extendedLastXFVGsCount < extendLastXFVGsCount
+                extendedLastXFVGsCount += 1
+                curFVG.info.extendInfinite := true
+            
+            if dbgShowBBFVG
+                if curFVG.isRendered
+                    safeDeleteFVG(curFVG)
+                renderedFVGCount += 1
+                renderFVG(curFVG, na)
+    
+    if DEBUG
+        log.info("Rendered " + str.tostring(renderedFVGCount) + " / " + str.tostring(totalFoundFVGs) + " FVGs.")
+    
+    [alertTimeFVG, newBullishFVGAlert, newBearishFVGAlert, alertTimeIFVG, newBullishIFVGAlert, newBearishIFVGAlert]
+
+shortVol = ta.sma(volume, 5)
+longVol = ta.sma(volume, 15)
+if (bar_index > last_bar_index - maxDistanceToLastBar) and barstate.isconfirmed
+    // Add Found FVG
+    bearCondition = false
+    bullCondition = false
+
+    shortTerm = volCheck ? shortVol : 1
+    longTerm = volCheck ? longVol : 0
+
+    firstBarSize = math.max(open, close) - math.min(open, close)
+    secondBarSize = math.max(open[1], close[1]) - math.min(open[1], close[1])
+    thirdBarSize = math.max(open[2], close[2]) - math.min(open[2], close[2])
+    barSizeSum = firstBarSize + secondBarSize + thirdBarSize
+
+    barSizeCheck = true
+    //if (secondBarSize < math.max(firstBarSize, thirdBarSize))
+        //barSizeCheck := false
+
+    fvgBarsCheck = false
+    if fvgBars == "Same Type"
+        if (open > close and open[1] > close[1] and open[2] > close[2]) or (open <= close and open[1] <= close[1] and open[2] <= close[2])
+            fvgBarsCheck := true
+    else
+        fvgBarsCheck := true
+
+    if fvgBarsCheck and barSizeCheck
+        maxCODiff = math.max(math.abs(close[2] - open[1]), math.abs(close[1] - open))
+        if fvgFilterMethod == "Average Range"
+            bearCondition := ((not fvgSensEnabled) or (barSizeSum * fvgSensitivity > atr / 1.5)) and (allowGaps or (maxCODiff <= atr))
+            bullCondition := ((not fvgSensEnabled) or (barSizeSum * fvgSensitivity > atr / 1.5)) and (allowGaps or (maxCODiff <= atr))
+        else if fvgFilterMethod == "Volume Threshold"
+            thresholdMultiplier = (volumeThresholdPercent / 100.0)
+            bearCondition := shortTerm > longTerm * thresholdMultiplier and (allowGaps or (maxCODiff <= atr))
+            bullCondition := shortTerm > longTerm * thresholdMultiplier and (allowGaps or (maxCODiff <= atr))
+
+    bearFVG = high < low[2] and close[1] < low[2] and bearCondition
+    bullFVG = low > high[2] and close[1] > high[2] and bullCondition
+
+    volSum3 = math.sum(volume, 3)
+    float totalVolume = volCheck ? volSum3 : 0
+    FVGInfo newFVGInfo = bearFVG ? createFVGInfo(low[2], high, false, time, totalVolume) : bullFVG ? createFVGInfo(low, high[2], true, time, totalVolume) : na
+    FVGSize = bearFVG ? math.abs(low[2] - high) : bullFVG ? math.abs(low - high[2]) : 0
+
+    FVGSizeEnough = (FVGSize * fvgSensitivity > atr)
+    if FVGSizeEnough
+        if not na(newFVGInfo)
+            newFVGInfo.startTime := (startZoneFrom == "First Bar" ? time[2] : time)
+            newFVGInfo.startBarIndex := bar_index - (startZoneFrom == "First Bar" ? 2 : 0)
+            newFVGInfo.lastTouched := bar_index
+            if bearFVG
+                newFVGInfo.lowVolume := volCheck ? (volume + volume[1]) : 0
+                newFVGInfo.highVolume := volCheck ? volume[2] : 0
+            else
+                newFVGInfo.lowVolume := volCheck ? volume[2] : 0
+                newFVGInfo.highVolume := volCheck ? (volume + volume[1]) : 0
+
+        if not na(newFVGInfo)
+            FVGInfoList.unshift(newFVGInfo)
+            while FVGInfoList.size() > showLastXFVGs
+                FVGInfoList.pop()
+
+    // Find Closed FVGs
+    if FVGInfoList.size () > 0
+        for i = 0 to FVGInfoList.size() - 1
+            curFVG = FVGInfoList.get(i)
+            // Is Touched FVG
+            if ((curFVG.isBull) and low <= curFVG.max) or ((not curFVG.isBull) and high >= curFVG.min)
+                curFVG.lastTouched := bar_index
+            
+            if ((not curFVG.isBull) and low <= curFVG.max) or ((curFVG.isBull) and high >= curFVG.min)
+                curFVG.lastTouchedIFVG := bar_index  
+
+            // IFVG Close
+            if curFVG.isInverse and na(curFVG.inverseEndIndex)
+                if (not curFVG.isBull) and (ifvgEndMethod == "Wick" ? low < curFVG.min : close < curFVG.min)
+                    curFVG.inverseEndIndex := bar_index
+                    curFVG.inverseEndTime := time
+                if curFVG.isBull and (ifvgEndMethod == "Wick" ? high > curFVG.max : close > curFVG.max)
+                    curFVG.inverseEndIndex := bar_index
+                    curFVG.inverseEndTime := time
+            
+            if na(curFVG.endBarIndex)                
+                // FVG End
+                if curFVG.isBull and (fvgEndMethod == "Wick" ? (low < curFVG.min) : (close < curFVG.min))
+                    curFVG.endBarIndex := bar_index
+                    curFVG.endTime := time
+                    curFVG.isInverse := true
+                    curFVG.inverseVolume := nz(volume)
+                    curFVG.lastTouchedIFVG := bar_index
+                    //newIFVGTick := true
+                if (not curFVG.isBull) and (fvgEndMethod == "Wick" ? (high > curFVG.max) : (close > curFVG.max))
+                    curFVG.endBarIndex := bar_index
+                    curFVG.endTime := time
+                    curFVG.isInverse := true
+                    curFVG.inverseVolume := nz(volume)
+                    curFVG.lastTouchedIFVG := bar_index
+                    //newIFVGTick := true
+
+    // Remove Old FVGs
+    FVGInfostoRemove = array.new<int>(0)
+
+    if FVGInfoList.size() > 0
+        for i = 0 to FVGInfoList.size() - 1
+            curIndex = FVGInfoList.size() - 1 - i
+            curFVGInfo = FVGInfoList.get(curIndex)
+            if (not curFVGInfo.isInverse) and not isFVGValidInTimeframe(curFVGInfo)
+                FVGInfostoRemove.push(curIndex)
+            if curFVGInfo.isInverse and not isIFVGValidInTimeframe(curFVGInfo)
+                FVGInfostoRemove.push(curIndex)
+
+    if FVGInfostoRemove.size () > 0
+        for i = 0 to FVGInfostoRemove.size() - 1
+            deleteIndex = FVGInfostoRemove.get(i)
+            FVGInfoList.remove(deleteIndex)
+//#endregion
+
+//#region Setup
+if barstate.isconfirmed and (bar_index > last_bar_index - maxDistanceToLastBar)
+    [alertTimeFVG, newBullishFVGAlert, newBearishFVGAlert, alertTimeIFVG, newBullishIFVGAlert, newBearishIFVGAlert] = handleFVGsFinal()
+
+    if OBsEnabled or BBsEnabled
+        [alertTimeOB, alertTimeBB, newBullishOBAlert, newBearishOBAlert, newBullishBBAlert, newBearishBBAlert] = handleOrderBlocksFinal()
+//#endregion
+
+//#region ICT Unicorn
+doBBFVGTouch (orderBlockInfo OBInfoX, FVGInfo FVGInfoX) =>
+    if OBInfoX.breaker
+        float XA1 = OBInfoX.breakTime
+        float XA2 = time + 1
+        float YA1 = OBInfoX.top
+        float YA2 = OBInfoX.bottom
+
+        float XB1 = FVGInfoX.startTime
+        float XB2 = na(FVGInfoX.endTime) ? time + 1 : FVGInfoX.endTime
+        float YB1 = FVGInfoX.max
+        float YB2 = FVGInfoX.min
+        float intersectionArea = math.max(0, math.min(XA2, XB2) - math.max(XA1, XB1)) * math.max(0, math.min(YA1, YB1) - math.max(YA2, YB2))
+        float unionArea = areaOfBB(OBInfoX) + areaOfFVG(FVGInfoX) - intersectionArea
+        
+        float overlapPercentage = (intersectionArea / unionArea) * 100.0
+
+        if overlapPercentage > overlapThresholdPercentage
+            true
+        else
+            false
+    else
+        false
+
+const int maxUnicorn = 75
+const int atrLenUnicorn = 50
+var initRun = true
+
+buyAlertTick = false
+sellAlertTick = false
+tpAlertTick = false
+slAlertTick = false
+
+getPosition (positionText) =>
+    if positionText == "Top Right"
+        position.top_right
+    else if positionText == "Top Center"
+        position.top_center
+    else if positionText == "Right Center"
+        position.middle_right
+    else if positionText == "Left Center"
+        position.middle_left
+    else if positionText == "Bottom Center"
+        position.bottom_center
+    else if positionText == "Middle Center"
+        position.middle_center
+
+type Unicorn
+    string state
+    int startTime
+
+    string overlapDirection
+    float retraceTo
+    int enterPositionBar
+
+    FVG fvg
+    orderBlock OB
+
+    float slTarget
+    float tpTarget
+    string entryType
+    int entryTime
+    int exitTime
+    float entryPrice
+    float exitPrice
+    int dayEndedBeforeExit
+
+var lineX = array.new<line>()
+var boxX = array.new<box>()
+var labelX = array.new<label>()
+
+var Unicorn[] unicornList = array.new<Unicorn>(0)
+var Unicorn lastUnicorn = na
+
+atrUnicorn = ta.atr(atrLenUnicorn)
+
+diffPercent (float val1, float val2) =>
+    (math.abs(val1 - val2) / val2) * 100.0
+
+highUnicornTPSL = ta.highest(unicornTPSLLength)
+lowUnicornTPSL = ta.lowest(unicornTPSLLength)
+
+//#region Unicorn
+if bar_index > last_bar_index - maxDistanceToLastBar and barstate.isconfirmed
+    if true
+        // Find Session Start
+        createNewUnicorn = true
+        if not na(lastUnicorn)
+            if na(lastUnicorn.exitPrice)
+                createNewUnicorn := false // Don't enter if a trade is already entered
+                
+        if createNewUnicorn
+            newUnicorn = Unicorn.new("Waiting For FVG-BB Overlap", time)
+            unicornList.unshift(newUnicorn)
+            lastUnicorn := newUnicorn
+            log.info("New Unicorn")
+
+        if not na(lastUnicorn)
+            // Waiting For FVG-BB Overlap
+            if lastUnicorn.state == "Waiting For FVG-BB Overlap"
+                if allFVGList.size() > 0
+                    for i = 0 to allFVGList.size() - 1
+                        curFVG = allFVGList.get(i)
+                        if allOrderBlocksList.size() > 0
+                            for j = 0 to allOrderBlocksList.size() - 1
+                                curOB = allOrderBlocksList.get(j)
+                                if curOB.info.breaker
+                                    if (curOB.info.obType == "Bear" and curFVG.info.isBull) or (curOB.info.obType == "Bull" and not curFVG.info.isBull)
+                                        if doBBFVGTouch(curOB.info, curFVG.info) and (time == curFVG.info.startTime or time == curOB.info.breakTime)
+                                            lastUnicorn.state := "FVG-BB Overlap"
+                                            lastUnicorn.overlapDirection := (curFVG.info.isBull ? "Bull" : "Bear")
+                                            lastUnicorn.retraceTo := curFVG.info.isBull ? curFVG.info.max : curFVG.info.min
+                                            lastUnicorn.fvg := curFVG
+                                            lastUnicorn.OB := curOB
+            
+            // FVG-BB Overlap
+            if lastUnicorn.state == "FVG-BB Overlap"
+                if not dbgRequireRetracement
+                    lastUnicorn.state := "Enter Position"
+                    lastUnicorn.enterPositionBar := bar_index
+                else
+                    lastUnicorn.state := "Require Retracement"
+    // Require Retracement
+    if not na(lastUnicorn)
+        if lastUnicorn.state == "Require Retracement"
+            if lastUnicorn.overlapDirection == "Bull" and low < lastUnicorn.retraceTo
+                lastUnicorn.state := "Enter Position"
+                lastUnicorn.enterPositionBar := bar_index
+            if lastUnicorn.overlapDirection == "Bear" and high > lastUnicorn.retraceTo
+                lastUnicorn.state := "Enter Position"
+                lastUnicorn.enterPositionBar := bar_index
+
+    // Enter Position
+    if not na(lastUnicorn)
+        if lastUnicorn.state == "Enter Position" and bar_index >= lastUnicorn.enterPositionBar + entryWaitBars
+            lastUnicorn.state := "Entry Taken"
+            lastUnicorn.entryTime := time
+            lastUnicorn.entryPrice := close
+            if lastUnicorn.overlapDirection == "Bull"
+                lastUnicorn.entryType := "Long"
+                buyAlertTick := true
+                if tpslMethod == "Fixed"
+                    lastUnicorn.slTarget := lastUnicorn.entryPrice * (1 - slPercent / 100.0)
+                    lastUnicorn.tpTarget := lastUnicorn.entryPrice * (1 + tpPercent / 100.0)
+                else if tpslMethod == "Dynamic"
+                    lastUnicorn.slTarget := lastUnicorn.entryPrice - atrUnicorn * slATRMult
+                    lastUnicorn.tpTarget := lastUnicorn.entryPrice + (math.abs(lastUnicorn.entryPrice - lastUnicorn.slTarget) * DynamicRR)
+                else
+                    lastUnicorn.slTarget := lowUnicornTPSL - atrUnicorn * dbgUnicornSLOffset
+                    lastUnicorn.tpTarget := lastUnicorn.entryPrice + (math.abs(lastUnicorn.entryPrice - lastUnicorn.slTarget) * UnicornRR)
+            else
+                lastUnicorn.entryType := "Short"
+                sellAlertTick := true
+                if tpslMethod == "Fixed"
+                    lastUnicorn.slTarget := lastUnicorn.entryPrice * (1 + slPercent / 100.0)
+                    lastUnicorn.tpTarget := lastUnicorn.entryPrice * (1 - tpPercent / 100.0)
+                else if tpslMethod == "Dynamic"
+                    lastUnicorn.slTarget := lastUnicorn.entryPrice + atrUnicorn * slATRMult
+                    lastUnicorn.tpTarget := lastUnicorn.entryPrice - (math.abs(lastUnicorn.entryPrice - lastUnicorn.slTarget) * DynamicRR)
+                else
+                    lastUnicorn.slTarget := highUnicornTPSL + atrUnicorn * dbgUnicornSLOffset
+                    lastUnicorn.tpTarget := lastUnicorn.entryPrice - (math.abs(lastUnicorn.entryPrice - lastUnicorn.slTarget) * UnicornRR)
+    // Entry Taken
+    if not na(lastUnicorn)
+        if lastUnicorn.state == "Entry Taken" and time > lastUnicorn.entryTime
+            log.info("Entry Taken")
+            if tpslMethod == "Fixed"
+                // Take Profit
+                if lastUnicorn.entryType == "Long" and ((high / lastUnicorn.entryPrice) - 1) * 100 >= tpPercent
+                    tpAlertTick := true
+                    lastUnicorn.exitPrice := lastUnicorn.entryPrice * (1 + tpPercent / 100.0)
+                    lastUnicorn.exitTime := time
+                    lastUnicorn.state := "Take Profit"
+                if lastUnicorn.entryType == "Short" and ((low / lastUnicorn.entryPrice) - 1) * 100 <= -tpPercent
+                    tpAlertTick := true
+                    lastUnicorn.exitPrice := lastUnicorn.entryPrice * (1 - tpPercent / 100.0)
+                    lastUnicorn.exitTime := time
+                    lastUnicorn.state := "Take Profit"
+                
+                // Stop Loss
+                if lastUnicorn.entryType == "Long" and ((low / lastUnicorn.entryPrice) - 1) * 100 <= -slPercent
+                    slAlertTick := true
+                    lastUnicorn.exitPrice := lastUnicorn.entryPrice * (1 - slPercent / 100.0)
+                    lastUnicorn.exitTime := time
+                    lastUnicorn.state := "Stop Loss"
+                if lastUnicorn.entryType == "Short" and ((high / lastUnicorn.entryPrice) - 1) * 100 >= slPercent
+                    slAlertTick := true
+                    lastUnicorn.exitPrice := lastUnicorn.entryPrice * (1 + slPercent / 100.0)
+                    lastUnicorn.exitTime := time
+                    lastUnicorn.state := "Stop Loss"
+            else
+                // Take Profit
+                if lastUnicorn.entryType == "Long" and high >= lastUnicorn.tpTarget
+                    tpAlertTick := true
+                    lastUnicorn.exitPrice := lastUnicorn.tpTarget
+                    lastUnicorn.exitTime := time
+                    lastUnicorn.state := "Take Profit"
+                if lastUnicorn.entryType == "Short" and low <= lastUnicorn.tpTarget
+                    tpAlertTick := true
+                    lastUnicorn.exitPrice := lastUnicorn.tpTarget
+                    lastUnicorn.exitTime := time
+                    lastUnicorn.state := "Take Profit"
+                
+                // Stop Loss
+                if lastUnicorn.entryType == "Long" and low <= lastUnicorn.slTarget
+                    slAlertTick := true
+                    lastUnicorn.exitPrice := lastUnicorn.slTarget
+                    lastUnicorn.exitTime := time
+                    lastUnicorn.state := "Stop Loss"
+                if lastUnicorn.entryType == "Short" and high >= lastUnicorn.slTarget
+                    slAlertTick := true
+                    lastUnicorn.exitPrice := lastUnicorn.slTarget
+                    lastUnicorn.exitTime := time
+                    lastUnicorn.state := "Stop Loss"
+//#endregion
+
+//#region Render Unicorn
+
+renderTopSL = false
+renderBottomSL = false
+renderTopTP = false
+renderBottomTP = false
+
+if not na(lastUnicorn)
+    if lastUnicorn.state == "Stop Loss" and time >= lastUnicorn.exitTime
+        if lastUnicorn.entryType == "Long"
+            renderBottomSL := true
+        else
+            renderTopSL := true
+        lastUnicorn.state := "Done"
+    if lastUnicorn.state == "Take Profit"
+        if lastUnicorn.entryType == "Long"
+            renderTopTP := true
+        else
+            renderBottomTP := true
+        lastUnicorn.state := "Done"
+
+plotshape(renderTopSL, "", shape.circle, location.abovebar, color.red, textcolor = textColor, text = "SL", size = size.tiny)
+plotshape(renderBottomSL, "", shape.circle, location.belowbar, color.red, textcolor = textColor, text = "SL", size = size.tiny)
+plotshape(renderTopTP, "", shape.xcross, location.abovebar, color.blue, textcolor = textColor, text = "TP", size = size.tiny)
+plotshape(renderBottomTP, "", shape.xcross, location.belowbar, color.blue, textcolor = textColor, text = "TP", size = size.tiny)
+
+//#endregion
+
+//#region Alerts
+if barstate.islastconfirmedhistory
+    initRun := false
+
+alertcondition(buyAlertTick and not initRun, "Buy Signal", "")
+alertcondition(sellAlertTick and not initRun, "Sell Signal", "")
+alertcondition(tpAlertTick and not initRun, "Take-Profit Signal", "")
+alertcondition(slAlertTick and not initRun, "Stop-Loss Signal", "")
+
+if not initRun
+    if buyAlertTick and buyAlertEnabled
+        alert("Buy Signal")
+    if sellAlertTick and sellAlertEnabled
+        alert("Sell Signal")
+    
+    if tpAlertTick and tpAlertEnabled
+        alert("Take-Profit Signal")
+    if slAlertTick and slAlertEnabled
+        alert("Stop-Loss Signal")
+
+//#endregion
+
+//#region Backtesting Dashboard
+
+if barstate.islast and backtestDisplayEnabled
+    var table backtestDisplay = table.new(getPosition(backtestingLocation), 2, 10, bgcolor = screenerColor, frame_width = 2, frame_color = color.black, border_width = 1, border_color = color.black)
+    
+    float totalTSProfitPercent = 0
+    int successfulTrades = 0
+    int unsuccessfulTrades = 0
+
+    if unicornList.size() > 0
+        for i = 0 to unicornList.size() - 1
+            curUnicorn = unicornList.get(i)
+            if not na(curUnicorn.entryPrice)
+                isSuccess = false
+                if not na(curUnicorn.exitPrice)
+                    if (curUnicorn.entryType == "Long" and curUnicorn.exitPrice > curUnicorn.entryPrice) or (curUnicorn.entryType == "Short" and curUnicorn.exitPrice < curUnicorn.entryPrice)
+                        totalTSProfitPercent += math.abs(diffPercent(curUnicorn.entryPrice, curUnicorn.exitPrice))
+                        isSuccess := true
+                    else
+                        totalTSProfitPercent -= math.abs(diffPercent(curUnicorn.entryPrice, curUnicorn.exitPrice))
+                        isSuccess := false
+
+                if isSuccess
+                    successfulTrades += 1
+                else
+                    unsuccessfulTrades += 1
+    
+    // Header
+    table.merge_cells(backtestDisplay, 0, 0, 1, 0)
+    table.cell(backtestDisplay, 0, 0, "Unicorn Backtesting", text_color = color.white, bgcolor = screenerColor)
+
+    // Total ORBs
+    table.cell(backtestDisplay, 0, 1, "Total Entries", text_color = color.white, bgcolor = screenerColor)
+    table.cell(backtestDisplay, 1, 1, str.tostring(successfulTrades + unsuccessfulTrades), text_color = color.white, bgcolor = screenerColor)
+
+    // Wins
+    table.cell(backtestDisplay, 0, 2, "Wins", text_color = color.white, bgcolor = screenerColor)
+    table.cell(backtestDisplay, 1, 2, str.tostring(successfulTrades), text_color = color.white, bgcolor = screenerColor)
+
+    // Losses
+    table.cell(backtestDisplay, 0, 3, "Losses", text_color = color.white, bgcolor = screenerColor)
+    table.cell(backtestDisplay, 1, 3, str.tostring(unsuccessfulTrades), text_color = color.white, bgcolor = screenerColor)
+
+    // Winrate
+    table.cell(backtestDisplay, 0, 4, "Winrate", text_color = color.white, bgcolor = screenerColor)
+    table.cell(backtestDisplay, 1, 4, str.tostring(100.0 * (successfulTrades / (successfulTrades + unsuccessfulTrades)), "#.##") + "%", text_color = color.white, bgcolor = screenerColor)
+
+    // Average Profit %
+    table.cell(backtestDisplay, 0, 5, "Average Profit", text_color = color.white, bgcolor = screenerColor)
+    table.cell(backtestDisplay, 1, 5, str.tostring(totalTSProfitPercent / (successfulTrades + unsuccessfulTrades), "#.##") + "%", text_color = color.white, bgcolor = screenerColor)
+
+    // Total Profit %
+    table.cell(backtestDisplay, 0, 6, "Total Profit", text_color = color.white, bgcolor = screenerColor)
+    table.cell(backtestDisplay, 1, 6, str.tostring(totalTSProfitPercent, "#.##") + "%", text_color = color.white, bgcolor = screenerColor)
+
+//#endregion
+
+if barstate.isconfirmed
+    if lineX.size() > 0
+        for i = 0 to lineX.size() - 1
+            line.delete(lineX.get(i))
+
+    if boxX.size() > 0
+        for i = 0 to boxX.size() - 1
+            box.delete(boxX.get(i))
+    
+    if labelX.size() > 0
+        for i = 0 to labelX.size() - 1
+            label.delete(labelX.get(i))
+
+    lineX.clear()
+    boxX.clear()
+    labelX.clear()
+    
+    if unicornList.size() > 0
+        for i = 0 to math.min(maxUnicorn, unicornList.size() - 1)
+            curTS = unicornList.get(i)
+
+            // TP / SL
+            if not na(curTS.entryTime)
+                // FVG & OB
+                if showBB
+                    safeDeleteOrderBlock(curTS.OB)
+                    renderOrderBlock(curTS.OB, curTS.entryTime)
+                if showFVG
+                    safeDeleteFVG(curTS.fvg)
+                    renderFVG(curTS.fvg, curTS.entryTime)
+
+                // Entry Label
+                if curTS.entryType == "Long"
+                    labelX.push(label.new(curTS.entryTime, close, "Buy", xloc = xloc.bar_time, yloc = yloc.belowbar, textcolor = color.new(textColor, 0) , color = highColor, style = label.style_label_up, size = lblSize))
+                else
+                    labelX.push(label.new(curTS.entryTime, close, "Sell", xloc = xloc.bar_time, yloc = yloc.abovebar, textcolor = color.new(textColor, 0), color = lowColor, style = label.style_label_down, size = lblSize))
+                
+                if showTPSL
+                    if dbgTPSLVersion == "Alternative"
+                        offset = atrUnicorn / 3.0
+                        endTime = nz(curTS.exitTime, time("", -15))
+                        boxX.push(box.new(curTS.entryTime, curTS.tpTarget + offset, endTime, curTS.tpTarget - offset, text = "TAKE PROFIT (" + str.tostring(curTS.tpTarget, format.mintick) + ")", text_color = textColor, xloc = xloc.bar_time, border_width = 0, bgcolor = color.new(highColor, 50), text_size = size.small))
+                        boxX.push(box.new(curTS.entryTime, curTS.slTarget + offset, endTime, curTS.slTarget - offset, text = "STOP LOSS (" + str.tostring(curTS.slTarget, format.mintick) + ")", text_color = textColor, xloc = xloc.bar_time, border_width = 0, bgcolor = color.new(lowColor, 50) , text_size = size.small))
+                    else if dbgTPSLVersion == "Default"
+                        endTime = nz(curTS.exitTime, time("", -15))
+                        lineX.push(line.new(curTS.entryTime, curTS.entryPrice, curTS.entryTime, curTS.tpTarget, xloc = xloc.bar_time, color = highColor, style = line.style_dashed))
+                        lineX.push(line.new(curTS.entryTime, curTS.tpTarget, endTime, curTS.tpTarget, xloc = xloc.bar_time, color = highColor, style = line.style_dashed))
+                        labelX.push(label.new(endTime, curTS.tpTarget, "TP", xloc = xloc.bar_time, yloc = yloc.price, textcolor = color.new(textColor, 0), color = color.new(highColor, 50), style = label.style_label_left, size = lblSize))
+                        //
+                        lineX.push(line.new(curTS.entryTime, curTS.entryPrice, curTS.entryTime, curTS.slTarget, xloc = xloc.bar_time, color = lowColor, style = line.style_dashed))
+                        lineX.push(line.new(curTS.entryTime, curTS.slTarget, endTime, curTS.slTarget, xloc = xloc.bar_time, color = lowColor, style = line.style_dashed))
+                        labelX.push(label.new(endTime, curTS.slTarget, "SL", xloc = xloc.bar_time, yloc = yloc.price, textcolor = color.new(textColor, 0), color = color.new(lowColor, 50), style = label.style_label_left, size = lblSize))
+
+            if not na(curTS.dayEndedBeforeExit)
+                labelX.push(label.new(curTS.dayEndedBeforeExit, close, "Exit", xloc = xloc.bar_time, yloc = yloc.belowbar, textcolor = textColor, color = color.yellow, style = label.style_circle, size = size.tiny))
+
+//#endregion

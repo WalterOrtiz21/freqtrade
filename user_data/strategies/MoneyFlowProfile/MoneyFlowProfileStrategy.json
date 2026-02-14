@@ -1,0 +1,24 @@
+{
+    "strategy": "MoneyFlowProfileStrategy",
+    "timeframe": "1h",
+    "stoploss": -0.025,
+    "leverage": 5,
+    
+    "lookback_period": 200,
+    "num_rows": 25,
+    "hvn_threshold": 0.53,
+    "lvn_threshold": 0.37,
+    "use_money_flow": false,
+    "sentiment_method": "polarity",
+    
+    "require_lvn": true,
+    "require_sentiment_align": true,
+    "require_poc_direction": true,
+    
+    "tp1_enabled": true,
+    "tp1_pct": 0.01,
+    "tp1_amount": 40,
+    "tp2_pct": 0.025,
+    
+    "enable_logging": true
+}

@@ -44,7 +44,8 @@ def _smc_signals_kernel(
     np.ndarray, np.ndarray, # Internal/Swing Trend
     np.ndarray, np.ndarray, np.ndarray, np.ndarray, # OB Top/Bottom
     np.ndarray, np.ndarray, np.ndarray, np.ndarray, # FVG Top/Bottom
-    np.ndarray, np.ndarray # NEW: Swing High, Swing Low (Current Range)
+    np.ndarray, np.ndarray, # Swing High, Swing Low (Current Range)
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray  # Liquidity Sweeps (Int/Sw Bull/Bear)
 ]:
     # Output Arrays
     int_bos_bull = np.zeros(n, dtype=int8)
@@ -72,9 +73,15 @@ def _smc_signals_kernel(
     fvg_bear_top = np.full(n, np.nan)
     fvg_bear_btm = np.full(n, np.nan)
 
-    # NEW: Swing Levels Storage
+    # Swing Levels Storage
     out_sw_high = np.full(n, np.nan)
     out_sw_low = np.full(n, np.nan)
+
+    # Liquidity Sweep Storage
+    int_sweep_bull = np.zeros(n, dtype=int8)
+    int_sweep_bear = np.zeros(n, dtype=int8)
+    sw_sweep_bull = np.zeros(n, dtype=int8)
+    sw_sweep_bear = np.zeros(n, dtype=int8)
 
     # State Variables
     # Internal Pivot
@@ -193,7 +200,6 @@ def _smc_signals_kernel(
                 if ip_high_idx < i:
                     ob_idx = _find_lowest_low(low, ip_high_idx, i)
                     if ob_idx != -1:
-                        # FIX: Write at confirmation index i, not geometry index
                         ob_bull_top[i] = high[ob_idx]
                         ob_bull_btm[i] = low[ob_idx]
 
@@ -211,10 +217,21 @@ def _smc_signals_kernel(
                 if ip_low_idx < i:
                     ob_idx = _find_highest_high(high, ip_low_idx, i)
                     if ob_idx != -1:
-                        # FIX: Write at confirmation index i, not geometry index
                         ob_bear_top[i] = high[ob_idx]
                         ob_bear_btm[i] = low[ob_idx]
         
+        # --- INTERNAL LIQUIDITY SWEEPS ---
+        # Bullish Sweep: Wick below internal pivot low, close above (took sellside liquidity)
+        # Only if this candle did NOT break the level (mutually exclusive with BOS/CHoCH)
+        if not ip_low_crossed and not np.isnan(ip_low_level):
+            if curr_low <= ip_low_level and curr_close >= ip_low_level:
+                int_sweep_bull[i] = 1
+        
+        # Bearish Sweep: Wick above internal pivot high, close below (took buyside liquidity)
+        if not ip_high_crossed and not np.isnan(ip_high_level):
+            if curr_high >= ip_high_level and curr_close <= ip_high_level:
+                int_sweep_bear[i] = 1
+
         int_trend[i] = curr_int_trend
 
         # --- 3. SWING STRUCTURE ---
@@ -253,6 +270,17 @@ def _smc_signals_kernel(
                         ob_bear_top[i] = high[ob_idx]
                         ob_bear_btm[i] = low[ob_idx]
         
+        # --- SWING LIQUIDITY SWEEPS ---
+        # Bullish Sweep: Wick below swing pivot low, close above
+        if not sp_low_crossed and not np.isnan(sp_low_level):
+            if curr_low <= sp_low_level and curr_close >= sp_low_level:
+                sw_sweep_bull[i] = 1
+        
+        # Bearish Sweep: Wick above swing pivot high, close below
+        if not sp_high_crossed and not np.isnan(sp_high_level):
+            if curr_high >= sp_high_level and curr_close <= sp_high_level:
+                sw_sweep_bear[i] = 1
+
         sw_trend[i] = curr_sw_trend
         
         # --- 4. FVG DETECTION ---
@@ -270,7 +298,8 @@ def _smc_signals_kernel(
         int_trend, sw_trend,
         ob_bull_top, ob_bull_btm, ob_bear_top, ob_bear_btm,
         fvg_bull_top, fvg_bull_btm, fvg_bear_top, fvg_bear_btm,
-        out_sw_high, out_sw_low
+        out_sw_high, out_sw_low,
+        int_sweep_bull, int_sweep_bear, sw_sweep_bull, sw_sweep_bear
     )
 
 @jit(nopython=True, cache=True)
@@ -578,7 +607,8 @@ class SMCLuxAlgoNumba:
             i_trend, s_trend,
             ob_bt_raw, ob_bb_raw, ob_bet_raw, ob_beb_raw,
             fvg_bt_raw, fvg_bb_raw, fvg_bet_raw, fvg_beb_raw,
-            sw_high, sw_low
+            sw_high, sw_low,
+            int_sweep_bull, int_sweep_bear, sw_sweep_bull, sw_sweep_bear
         ) = _smc_signals_kernel(
             self.high, self.low, self.close, self.n,
             self.internal_length, self.swing_length
@@ -639,11 +669,17 @@ class SMCLuxAlgoNumba:
         df['active_bearish_breaker_top'] = act_brk_bear_t
         df['active_bearish_breaker_bottom'] = act_brk_bear_b
 
-        # Active Zones (Breakers - FVG) - NEW
+        # Active Zones (Breakers - FVG)
         df['active_bullish_fvg_breaker_top'] = act_fvg_brk_bull_t
         df['active_bullish_fvg_breaker_bottom'] = act_fvg_brk_bull_b
         df['active_bearish_fvg_breaker_top'] = act_fvg_brk_bear_t
         df['active_bearish_fvg_breaker_bottom'] = act_fvg_brk_bear_b
+
+        # Liquidity Sweeps
+        df['internal_sweep_bullish'] = int_sweep_bull
+        df['internal_sweep_bearish'] = int_sweep_bear
+        df['swing_sweep_bullish'] = sw_sweep_bull
+        df['swing_sweep_bearish'] = sw_sweep_bear
         
         return df
 

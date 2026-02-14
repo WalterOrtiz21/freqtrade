@@ -48,7 +48,7 @@
       "st_atr_period": 9,
       "st_factor": 2.5,
       "use_htf_filter": true,
-      "htf_1": "1d",
+      "htf_1": "none",
       "htf_2": "4h"
     },
     "sell": {
@@ -56,7 +56,7 @@
       "use_exit_manager": false,
       "use_dynamic_exits": true,
       "close_with_supertrend": true,
-      "close_only_tp": true,
+      "close_only_tp": false,
       "__note_exits": "close_only_tp=true desactiva salidas por señal opuesta/SuperTrend (solo TP/SL)"
     },
     "protection": {
@@ -71,12 +71,12 @@
       "__comment_risk_management": "=== RISK MANAGEMENT (R:R Ratios) ===",
       "__note_breakeven": "Mueve SL a breakeven cuando alcanza be_rr * sl_distance",
       "use_breakeven": true,
-      "be_rr_long": 2.5,
-      "be_rr_short": 2.4,
+      "be_rr_long": 2.0,
+      "be_rr_short": 2.0,
       "__note_takeprofit": "Take profit parcial (tp_percent%) a tp_rr * sl_distance",
       "use_takeprofit": true,
-      "tp_rr_long": 4.1,
-      "tp_rr_short": 1.1,
+      "tp_rr_long": 2.0,
+      "tp_rr_short": 2.0,
       "tp_percent": 50.0
     },
     "roi": {

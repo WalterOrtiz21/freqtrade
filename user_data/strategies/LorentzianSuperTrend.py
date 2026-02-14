@@ -25,7 +25,7 @@ except ImportError:
 # DEPENDENCIAS
 # =============================================================================
 try:
-    from numba import njit, prange
+    from numba import njit
     _HAS_NUMBA = True
 except ImportError:
     raise ImportError("Esta estrategia requiere numba. Ejecuta: pip install numba")
@@ -58,7 +58,7 @@ trade_logger.propagate = False  # No propagar a root logger
 # 1. MOTOR MATEMÁTICO (NUMBA OPTIMIZED - FIEL A PINE SCRIPT)
 # =============================================================================
 
-@njit(parallel=True, fastmath=True)
+@njit(fastmath=True)
 def numba_lorentzian_distance_prediction(features_norm, labels, max_bars_back, neighbors_count, prediction_horizon=4):
     """
     Replica EXACTA de la lógica de Pine Script:
@@ -74,7 +74,7 @@ def numba_lorentzian_distance_prediction(features_norm, labels, max_bars_back, n
     if start_calculation >= n_rows:
         return predictions
 
-    for i in prange(start_calculation, n_rows):
+    for i in range(start_calculation, n_rows):
         current_features = features_norm[i]
         
         last_distance = -1.0

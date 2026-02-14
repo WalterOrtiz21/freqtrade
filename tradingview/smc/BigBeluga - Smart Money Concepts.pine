@@ -91,6 +91,17 @@ fvgextend    = input.bool(false, "Extend FVG", group="FAIR VALUE GAP")
 dispraid     = input.bool(false, "Display Raids", inline="raid", group="FAIR VALUE GAP")
 
 
+// -----------------------------------------------------------------------------
+// BUY & SELLSIDE LIQUIDITY
+// -----------------------------------------------------------------------------
+show_liq     = input.bool(true, "Show Buy/Sellside", group="LIQUIDITY")
+liq_style    = input.string("Area", "Style", options=["Area", "Line"], group="LIQUIDITY")
+liq_buy_css  = input.color(color.new(#089981, 80), "Buyside Color", group="LIQUIDITY")
+liq_sell_css = input.color(color.new(#f23645, 80), "Sellside Color", group="LIQUIDITY")
+liq_txt_size = input.string("Small", "Text Size", options=["Tiny", "Small", "Normal"], group="LIQUIDITY")
+
+
+
 
 
 //}
@@ -986,17 +997,57 @@ structure(color upcss, color dncss, bool draw, bool internal, int limit) =>
     var float[] php   = array.new<float>(1, na)
     var float[] plp   = array.new<float>(1, na)
 
+    // Optimization: Skip calculation if outside window
+    if windowsis and (bar_index < last_bar_index - mswindow)
+        ms
+
     if internal
+
         blob.clear()
         brob.clear()
 
     if ph
         phn.unshift(bar_index[mslen])
         php.unshift(high[mslen])
+        
+        // Sellside Liquidity (Resistance) Logic
+        if show_liq
+            float p_vol   = volume[mslen]
+            float avg_vol = ta.sma(volume, 50)[mslen]
+            float str_val = math.min(99, math.max(10, (p_vol / (avg_vol > 0 ? avg_vol : 1)) * 50))
+            
+            sellside.unshift(
+                 sellbuyside.new(
+                       high[mslen]
+                     , liq_style == "Area" ? math.max(high[mslen] - atr[mslen] * 0.5, low[mslen]) : high[mslen] // Area uses approximate range
+                     , bar_index[mslen]
+                     , liq_sell_css
+                     , "Sellside - " + str.tostring(math.round(str_val)) + "%"
+                     , str_val
+                      )
+                     )
 
     if pl
         pln.unshift(bar_index[mslen])
         plp.unshift(low[mslen])
+
+        // Buyside Liquidity (Support) Logic
+        if show_liq
+            float p_vol   = volume[mslen]
+            float avg_vol = ta.sma(volume, 50)[mslen]
+            float str_val = math.min(99, math.max(10, (p_vol / (avg_vol > 0 ? avg_vol : 1)) * 50))
+
+            buyside.unshift(
+                 sellbuyside.new(
+                       liq_style == "Area" ? math.min(low[mslen] + atr[mslen] * 0.5, high[mslen]) : low[mslen]
+                     , low[mslen]
+                     , bar_index[mslen]
+                     , liq_buy_css
+                     , "Buyside - " + str.tostring(math.round(str_val)) + "%"
+                     , str_val
+                      )
+                     )
+
 
     if php.size() > 0
         if high > php.get(0)
@@ -1514,6 +1565,66 @@ structure(color upcss, color dncss, bool draw, bool internal, int limit) =>
                     obs = brob.get(i)
                     display(obs, brob, i)
 
+    // -------------------------------------------------------------------------
+    // DRAW BUY & SELLSIDE LIQUIDITY
+    // -------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // LIQUIDITY MANAGEMENT (Maintenance on every bar)
+    // -------------------------------------------------------------------------
+    if show_liq
+        // Maintain Buyside
+        if buyside.size() > 0
+            for i = buyside.size() - 1 to 0
+                b = buyside.get(i)
+                if close < b.btm         // Invalidation (broken support)
+                    buyside.remove(i)
+            
+            // Limit Loop to prevent memory issues
+            if buyside.size() > 50
+                buyside.pop()
+
+        // Maintain Sellside
+        if sellside.size() > 0
+            for i = sellside.size() - 1 to 0
+                s = sellside.get(i)
+                if close > s.top         // Invalidation (broken resistance)
+                    sellside.remove(i)
+            
+            if sellside.size() > 50
+                sellside.pop()
+
+    // -------------------------------------------------------------------------
+    // DRAW BUY & SELLSIDE LIQUIDITY (Last Bar Only)
+    // -------------------------------------------------------------------------
+    if show_liq and barstate.islast
+        // Draw Buyside
+        if buyside.size() > 0
+            for i = 0 to math.min(10, buyside.size() - 1)
+                b = buyside.get(i)
+                
+                if liq_style == "Area"
+                    bin.bx.unshift(box.new(top = b.top, bottom = b.btm, left = b.loc, right = bar_index + 10, xloc = xloc.bar_index, border_color = na, bgcolor = b.css))
+                else
+                    bin.ln.unshift(line.new(x1 = b.loc, y1 = b.btm, x2 = bar_index + 10, y2 = b.btm, xloc = xloc.bar_index, color = b.css))
+                
+                // Label
+                bin.lb.unshift(label.new(x = bar_index + 10, y = b.btm, text = b.txt, xloc = xloc.bar_index, style = label.style_none, textcolor = b.css, size = liq_txt_size.txSz(), textalign = text.align_left))
+
+        // Draw Sellside
+        if sellside.size() > 0
+            for i = 0 to math.min(10, sellside.size() - 1)
+                s = sellside.get(i)
+                
+                if liq_style == "Area"
+                    bin.bx.unshift(box.new(top = s.top, bottom = s.btm, left = s.loc, right = bar_index + 10, xloc = xloc.bar_index, border_color = na, bgcolor = s.css))
+                else
+                    bin.ln.unshift(line.new(x1 = s.loc, y1 = s.top, x2 = bar_index + 10, y2 = s.top, xloc = xloc.bar_index, color = s.css))
+                                    
+                // Label
+                bin.lb.unshift(label.new(x = bar_index + 10, y = s.top, text = s.txt, xloc = xloc.bar_index, style = label.style_none, textcolor = s.css, size = liq_txt_size.txSz(), textalign = text.align_left))
+
+
+
     if barstate.islast and draw and bldw.size() > 0 and brdw.size() > 0
         for i = 0 to bldw.size() - 1
             obj = bldw.get(i)
@@ -1601,13 +1712,8 @@ _                                                                               
                            ––––––––––––––––––––––––––  EXECUTION ––––––––––––––––––––––––––– 
                                                      ------------                                                                                                                                                                        '//{                                                         
 
-structure      ms = na
+structure      ms = structure(swingcssup , swingcssdn , showSwing   , false, swingLimit)
 
-if windowsis
-    if (bar_index > last_bar_index - mswindow)
-        ms := structure(swingcssup , swingcssdn , showSwing   , false, swingLimit)
-if windowsis == false
-    ms := structure(swingcssup , swingcssdn , showSwing   , false, swingLimit)
 
 // if showInternal and inZone
 //     structure ims = structure(interncssup, interncssdn, showInternal, true , swingLimit)
