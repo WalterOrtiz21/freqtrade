@@ -1,0 +1,55 @@
+{
+    "strategy_name": "LowCapVolumePressure",
+    "params": {
+        "roi": {
+            "0": 1.0
+        },
+        "stoploss": {
+            "stoploss": -0.03
+        },
+        "max_open_trades": {
+            "max_open_trades": 3
+        },
+        "buy": {
+            "gauss_length": 20,
+            "gauss_distance": 1.0,
+            "min_score_margin": 0.1,
+            "use_trendline_filter": true,
+            "rvol_period": 20,
+            "vpi_smooth_period": 5,
+            "vpi_signal_period": 13,
+            "min_rvol": 2.0,
+            "cumulative_window": 5,
+            "min_cumulative_vpi": 2.0,
+            "min_vol_persistence": 2,
+            "cooldown_candles": 5
+        },
+        "sell": {
+            "tp1_enabled": true,
+            "tp1_pct": 0.03,
+            "tp1_amount": 60.0,
+            "use_gaussian_tp": true,
+            "be_enabled": true,
+            "be_trigger_pct": 0.02
+        },
+        "protection": {},
+        "trailing": {
+            "trailing_stop": false
+        },
+        "custom": {
+            "enable_logging": false
+        }
+    },
+    "ft_stratparam_v": 1,
+    "export_time": "2026-02-16 21:20:00.000000+00:00",
+    "notes": {
+        "v3": "Gaussian Bands (BigBeluga) + VPI hybrid",
+        "gauss_length": "Base Gaussian filter period (Pine default: 20)",
+        "gauss_distance": "Band width multiplier (1.0 = normal volatility bands)",
+        "min_score_margin": "0.1 = score must be < 0.4 for bulls, > 0.6 for bears",
+        "use_gaussian_tp": "Exit when price touches opposite Gaussian band",
+        "min_rvol": "2x normal volume required for entry",
+        "min_cumulative_vpi": "Rolling 5-candle VPI sum must exceed 2.0",
+        "min_vol_persistence": "2 consecutive elevated RVOL candles required"
+    }
+}

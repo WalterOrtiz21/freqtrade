@@ -1,0 +1,195 @@
+// This work is licensed under Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International  https://creativecommons.org/licenses/by-nc-sa/4.0/
+//@version=5
+indicator("Volatility Gaussian Bands [BigBeluga]", overlay = true, max_labels_count = 500)
+
+
+// ＩＮＰＵＴＳ ========================================================================================================{
+
+//@variable len Length of the Gaussian filter for smoothing (minimum value: 5)
+int    len         = input.int(20, "Length", minval = 5)
+//@variable mode Select the mode of aggregation to be used: AVG (average), MEADIAN (median), or MODE (mode)
+string mode        = input.string("AVG", "Type", ["AVG", "MEADIAN", "MODE"])
+//@variable distance Multiplier for calculating the distance between the Gaussian filter and the volatility bands
+float  distance    = input.float(1, step = 0.1)
+//@variable show_retest Boolean input to determine if retest signals should be displayed
+bool   show_retest = input.bool(false, "Retest Signals")
+
+//@variable up Color for upward trends and visual signals, represented in RGB
+color  up          = input.color(color.rgb(40, 218, 150), group = "Color")
+//@variable dn Color for downward trends and visual signals, represented in hex code
+color  dn          = input.color(#287bda, group = "Color")
+
+// }
+
+
+
+// ＣＡＬＣＵＬＡＴＩＯＮＳ ============================================================================================={
+
+//@function Calculates a Gaussian filter for smoothing the data
+//@param src (series float) Source price series
+//@param length (int) Length of the filter
+//@param sigma (float) Standard deviation for the Gaussian function
+//@returns (float) Smoothed value for the current bar
+gaussian_filter(src, length, sigma) =>
+    var float[] weights = array.new_float(100)  // Create an array to store weights for Gaussian filter
+    float total = 0.0                           // Sum of all weights, used for normalization
+    float pi = math.pi                          // Define Pi constant
+
+    // Calculate weights for Gaussian filter
+    for i = 0 to length - 1
+        float weight = math.exp(-0.5 * math.pow((i - length / 2) / sigma, 2.0)) / math.sqrt(sigma * 2.0 * pi)
+        weights.set(i, weight)
+        total := total + weight
+
+    // Normalize weights
+    for i = 0 to length - 1
+        weights.set(i, weights.get(i) / total)
+
+    // Apply Gaussian filter to the source series
+    float sum = 0.0
+    for i = 0 to length - 1
+        sum := sum + src[i] * weights.get(i)
+    sum
+
+//@function Multi-trend calculation using Gaussian filter
+//@param src (series float) Source price series
+//@param period (int) Lookback period for trend calculation
+//@returns (float[]) Returns score, value, color, trend line, and trend status
+multi_trend(src, period) =>
+    array<float> g_value     = array.new<float>()       // Array to store Gaussian filtered values
+    float        volatility  = ta.sma(high - low, 100) // Calculate the average true range (ATR) volatility
+
+    var float lower_band = 0.0     // Lower band for trend analysis
+    var float upper_band = 0.0    // Upper band for trend analysis
+    var float trend_line = 0.0   // Trend line value
+    var bool trend = na         // Trend direction status
+
+    // Apply Gaussian filter with a step adjustment to calculate multiple trend lines
+    for step = 0 to 20 by 1
+        float gaussian_filter = gaussian_filter(src, (period + step), 10)
+        g_value.push(gaussian_filter)
+
+    float coeff = 0.05
+    float score = 0.0
+
+    // Calculate score based on trend analysis
+    for i = 0 to g_value.size() - 1
+        float g_f = g_value.get(i)
+        if g_f > g_value.first()
+            score += coeff
+
+    // Determine color based on score
+    color color = score > 0.5 
+             ? color.from_gradient(score, 0.5, 1, na, dn) 
+             : color.from_gradient(score, 0, 0.5, up, na)
+
+    // Determine value based on user-selected mode (AVG, MEDIAN, MODE)
+    float value = switch mode 
+        "AVG"     => g_value.avg()
+        "MEADIAN" => g_value.median()
+        "MODE"    => g_value.mode()
+
+    lower_band := value - volatility * distance   // Calculate lower band based on value and volatility
+    upper_band := value + volatility * distance  // Calculate upper band based on value and volatility
+
+    // Check crossover and crossunder of price with bands to determine trend
+    if ta.crossover(close, upper_band)
+        trend := true
+    if ta.crossunder(close, lower_band)
+        trend := false
+
+    // Set trend line based on trend direction
+    trend_line :=
+         trend ? lower_band 
+         : not trend ? upper_band : na
+
+    // Return values: score, value, color, trend line, and trend status
+    [score, value, color, trend_line, trend]
+
+// Get the result from the multi-trend function
+[score, avg, color, trend_line, trend] = multi_trend(close, len)
+// }
+
+
+// ＰＬＯＴ ============================================================================================================={
+
+// Plot the average line returned from multi_trend function
+p2 = plot(avg, color = color, linewidth=1)
+
+// Plot the trend line based on trend status
+p1 = plot(ta.change(trend) ? na : trend_line,
+             color      = close > trend_line ? up : dn, 
+             linewidth  = 2, 
+             style      = plot.style_linebr)
+
+// Plot the trend line again with styling
+plot(trend_line, color  = close > trend_line ? up : dn, linewidth=1, style = plot.style_linebr)
+
+// Add labels for cross under and crossover events
+if ta.crossunder(close, trend_line)
+    label.new(bar_index, trend_line, score < 0.5 ? "▼+" : "▼", 
+             color      = dn, 
+             textcolor  = chart.fg_color,
+             style      = label.style_label_lower_right, 
+             size       = score < 0.5 ? size.small : size.tiny)
+
+if ta.crossover(close, trend_line)
+    label.new(bar_index, trend_line, score > 0.5 ? "▲+" : "▲", 
+             color      = up, 
+             textcolor  = chart.bg_color, 
+             style      = label.style_label_upper_right, 
+             size       = score > 0.5 ? size.small : size.tiny)
+
+// Determine trend color based on trend direction
+color trend_color = trend ? color.new(up, 80) : color.new(dn, 80)
+
+// Fill between trend line and average line to show areas of trend
+fill(p1, p2, trend_line, avg, trend_color, na)
+fill(p1, p2, trend_line, avg, trend_color, na)
+
+// Add retest labels if the option is enabled
+if show_retest
+    if ta.crossunder(high, avg) and not trend
+        label.new(bar_index[1], high[1],  "▼",
+                 color      = color(na), 
+                 style      = label.style_label_down, 
+                 textcolor  = chart.fg_color, 
+                 size       = size.small)
+
+    if ta.crossover(close, avg) and trend
+        label.new(bar_index[1], low[1], "▲", 
+                 color      = color(na), 
+                 style      = label.style_label_up, 
+                 textcolor  = chart.fg_color, 
+                 size       = size.small)
+
+// Calculate score-up and score-down for trend strength representation
+float score_up = (score - 1) * -1
+float score_dn = 1 - score_up
+
+// Display trend strength as a table if on the last bar
+if barstate.islast
+    table trend_strength_up = table.new(position.bottom_center, 100, 100)
+    table trend_strength_dn = table.new(position.top_center, 100, 100)
+
+    // Create cells to represent trend strength up
+    for i = 0 to score_up * 20
+        trend_strength_up.cell(0 + i, 0, bgcolor = color.new(up, 100 - i * 5), text = i == 0 ? "|" : "", text_color = color.gray)
+
+        if i == score_up * 20
+            trend_strength_up.cell(0 + i, 0,
+                                  text       = str.tostring(score_up * 100, format.percent) + " ▲",
+                                  text_color = chart.fg_color, 
+                                  height     = 2)
+
+    // Create cells to represent trend strength down
+    for i = 0 to score_dn * 20
+        trend_strength_dn.cell(0 + i, 0, bgcolor = color.new(dn, 100 - i * 5), text = i == 0 ? "|" : "", text_color = color.gray)
+
+        if i == score_dn * 20
+            trend_strength_dn.cell(0 + i, 0, 
+                                  text       = str.tostring(score_dn * 100, format.percent) + " ▼",
+                                  text_color = chart.fg_color, 
+                                  height     = 2)
+
+// }

@@ -1301,7 +1301,13 @@ class SMCWithMLLuxAlgo(IStrategy):
                     c_start = c_start.replace(tzinfo=c_date.tzinfo)
                 
                 if c_date >= c_start:
-                    minutes_since_close = (current_time - trade.close_date).total_seconds() / 60
+                    # Use c_date (normalized) to avoid timezone mismatch with current_time
+                    c_time = current_time
+                    if c_time.tzinfo is None and c_date.tzinfo is not None:
+                        c_time = c_time.replace(tzinfo=c_date.tzinfo)
+                    elif c_time.tzinfo is not None and c_date.tzinfo is None:
+                        c_date = c_date.replace(tzinfo=c_time.tzinfo)
+                    minutes_since_close = (c_time - c_date).total_seconds() / 60
                     logger.info(
                         f"Entry blocked for {pair}: Trade closed {minutes_since_close:.0f}m ago, "
                         f"cooldown is {lookback_minutes}m (lookback={self.entry_signal_lookback.value})"

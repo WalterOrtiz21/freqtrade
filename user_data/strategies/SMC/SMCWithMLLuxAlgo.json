@@ -23,6 +23,7 @@
             "require_fvg_zone": true,
             "trade_with_trend": true,
             "use_sweep_bypass": true,
+            "_comment": "Analizar estrategia ICT, entradas OTE",
             "sweep_lookback": 10,
             "require_premium_discount": false,
             "premium_discount_threshold": 0.05,
