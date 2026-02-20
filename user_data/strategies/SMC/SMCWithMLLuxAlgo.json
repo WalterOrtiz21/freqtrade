@@ -40,10 +40,11 @@
         },
         "sell": {
             "use_dynamic_stoploss": true,
-            "tp1_enabled": true,
+            "tp1_enabled": false,
             "tp1_pct": 0.025,
             "tp1_amount": 50.0,
             "move_be_at_tp1": true,
+            "be_trigger_pct": 0.025,
             "tp2_pct": 99.60,
             "exit_on_internal_choch": true,
             "exit_on_swing_choch": true

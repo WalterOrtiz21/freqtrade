@@ -211,6 +211,10 @@ class SMCWithMLLuxAlgo(IStrategy):
     # Pine Default: False
     move_be_at_tp1 = BooleanParameter(default=False, space='sell', optimize=True)
     
+    # Custom Break Even Target (Optional)
+    # If > 0, BE is activated cuando el precio se mueve este %, ignorando el tp1_pct.
+    be_trigger_pct = DecimalParameter(0.0, 0.50, default=0.0, decimals=3, space='sell', optimize=True)
+    
     # Final Exit (Reversal)
     # Granular control over which CHoCH triggers an exit
     exit_on_internal_choch = BooleanParameter(default=True, space='sell', optimize=True)
@@ -1386,7 +1390,10 @@ class SMCWithMLLuxAlgo(IStrategy):
         market_panic = self._check_market_panic(current_time)
         should_activate_be = False
         
-        if self.move_be_at_tp1.value and price_movement >= self.tp1_pct.value:
+        # Determine the target percentage to trigger Break Even
+        be_trigger = self.be_trigger_pct.value if self.be_trigger_pct.value > 0 else self.tp1_pct.value
+        
+        if self.move_be_at_tp1.value and price_movement >= be_trigger:
             should_activate_be = True
         elif market_panic and price_movement >= 0.005: # Panic: Force BE at 0.5% profit
             should_activate_be = True
