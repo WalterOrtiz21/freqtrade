@@ -128,8 +128,6 @@ class SMCWithMLLuxAlgo(IStrategy):
     # Zone Filters
     require_ob_zone = BooleanParameter(default=True, space='buy', optimize=True)
     require_fvg_zone = BooleanParameter(default=True, space='buy', optimize=True)
-    require_premium_discount = BooleanParameter(default=False, space='buy', optimize=True)
-    premium_discount_threshold = DecimalParameter(0.05, 0.5, default=0.5, space='buy', optimize=True)
     
     # Trend filter - disabled by default to match Pine Strategy execution logic
     # (Pine indicator shows trend color, but strategy entry block does not enforce it)
@@ -545,15 +543,6 @@ class SMCWithMLLuxAlgo(IStrategy):
         
         # --- 2. SMC Context ---
         
-        # Premium/Discount Factor - NEW
-        if 'swing_high' in df.columns and 'swing_low' in df.columns:
-            swing_range = df['swing_high'] - df['swing_low']
-            swing_range = swing_range.replace(0, np.nan)
-            df['ml_pd_factor'] = (df['close'] - df['swing_low']) / swing_range
-            df['ml_pd_factor'] = df['ml_pd_factor'].fillna(0.5).clip(0, 1)
-        else:
-             df['ml_pd_factor'] = 0.5
-
         # Bars Since Signals
         def bars_since(series):
             return series.cumsum().groupby(series.cumsum()).cumcount()
@@ -774,18 +763,7 @@ class SMCWithMLLuxAlgo(IStrategy):
         
         # Zone requirements - OR logic (any enabled filter can pass)
         # If NO zone filter is enabled, all bars pass (default True)
-        any_zone_enabled = self.require_ob_zone.value or self.require_fvg_zone.value or self.require_premium_discount.value
-        
-        # P/D Logic with Threshold:
-        # Discount: Price in bottom X% of range (e.g., < 0.05 or < 0.5)
-        # Premium: Price in top X% of range
-        
-        swing_range = dataframe['swing_high'] - dataframe['swing_low']
-        discount_limit = dataframe['swing_low'] + (swing_range * self.premium_discount_threshold.value)
-        premium_limit = dataframe['swing_high'] - (swing_range * self.premium_discount_threshold.value)
-        
-        dataframe['in_discount'] = dataframe['close'] < discount_limit
-        dataframe['in_premium'] = dataframe['close'] > premium_limit
+        any_zone_enabled = self.require_ob_zone.value or self.require_fvg_zone.value
         
         if any_zone_enabled:
             # Start with False, use OR to add conditions
@@ -891,10 +869,6 @@ class SMCWithMLLuxAlgo(IStrategy):
             
             dataframe['sl_short_price'] = bear_sl_price * (1 + self.sl_buffer_pct.value)
             
-            if self.require_premium_discount.value:
-                bullish_zone |= dataframe['in_discount']
-                bearish_zone |= dataframe['in_premium']
-            
             # ===== LIQUIDITY SWEEP BYPASS =====
             # If a recent sweep is detected, bypass zone requirement
             # Sweep + CHoCH = high confidence entry without needing OB/FVG retest
@@ -926,10 +900,10 @@ class SMCWithMLLuxAlgo(IStrategy):
         if self.dp: 
             n_bull_zones = bullish_zone.sum()
             n_bear_zones = bearish_zone.sum()
-            if (n_bull_zones == 0 or n_bear_zones == 0) and (self.require_ob_zone.value or self.require_fvg_zone.value or self.require_premium_discount.value):
+            if (n_bull_zones == 0 or n_bear_zones == 0) and (self.require_ob_zone.value or self.require_fvg_zone.value):
                 logger.warning(
                     f"⚠️ ZONES EMPTY! Bull: {n_bull_zones}, Bear: {n_bear_zones}. "
-                    f"OB Req: {self.require_ob_zone.value}, FVG Req: {self.require_fvg_zone.value}, PD Req: {self.require_premium_discount.value}"
+                    f"OB Req: {self.require_ob_zone.value}, FVG Req: {self.require_fvg_zone.value}"
                 )
                 logger.warning(f"   Active Bull OB Candles: {(dataframe['active_bullish_ob_top'] > 0).sum()}")
                 logger.warning(f"   Active Bull FVG Candles: {(dataframe['active_bullish_fvg_top'] > 0).sum()}")
@@ -1069,7 +1043,6 @@ class SMCWithMLLuxAlgo(IStrategy):
                 if row.get('in_bearish_fvg', False): reasons.append("FVG")
                 if row.get('in_bear_breaker', False): reasons.append("Breaker")
                 if row.get('in_bear_fvg_breaker', False): reasons.append("FVG-Breaker")
-                if row.get('in_premium', False): reasons.append("Premium")
                 
                 reason_str = "+".join(reasons) if reasons else "StructureOnly"
                 
@@ -1124,7 +1097,6 @@ class SMCWithMLLuxAlgo(IStrategy):
                 if row.get('in_bullish_fvg', False): reasons.append("FVG")
                 if row.get('in_bull_breaker', False): reasons.append("Breaker")
                 if row.get('in_bull_fvg_breaker', False): reasons.append("FVG-Breaker")
-                if row.get('in_discount', False): reasons.append("Discount")
                 
                 reason_str = "+".join(reasons) if reasons else "StructureOnly"
 

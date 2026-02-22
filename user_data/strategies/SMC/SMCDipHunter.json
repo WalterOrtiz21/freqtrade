@@ -1,0 +1,48 @@
+{
+    "strategy_name": "SMCDipHunter",
+    "params": {
+        "roi": {
+            "0": 1.0
+        },
+        "stoploss": {
+            "stoploss": -0.01
+        },
+        "max_open_trades": {
+            "max_open_trades": 5
+        },
+        "buy": {
+            "internal_length": 5,
+            "swing_length": 50,
+            "vol_sma_period": 20,
+            "ob_rvol_threshold": 1.8,
+            "rsi_oversold": 35,
+            "rsi_overbought": 65,
+            "use_htf_filter": true,
+            "htf_1": "4h",
+            "htf_2": "none"
+        },
+        "sell": {
+            "strict_ob_invalidation": true,
+            "exit_on_internal_choch": true,
+            "sl_buffer_pct": 0.002,
+            "enable_tp1": true,
+            "tp1_pct": 0.02,
+            "tp1_amount": 50.0,
+            "enable_be": true,
+            "be_activation_pct": 0.03,
+            "be_buffer_pct": 0.002
+        },
+        "protection": {},
+        "trailing": {
+            "trailing_stop": false
+        },
+        "custom": {}
+    },
+    "ft_stratparam_v": 1,
+    "export_time": "2026-02-21 23:54:00.000000+00:00",
+    "notes": {
+        "stoploss": "Default -2% price movement (leverage applied separately)",
+        "ob_rvol_threshold": "Only OBs that have at least 1.8x the average volume are valid for limit entries.",
+        "limit_hunting": "Strategy enters without requiring CHoCH/BOS immediately upon contact with the P/D Array"
+    }
+}

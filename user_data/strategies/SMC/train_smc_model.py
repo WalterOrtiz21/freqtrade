@@ -214,17 +214,6 @@ def calculate_ml_features(dataframe: pd.DataFrame) -> pd.DataFrame:
     
     # --- 2. SMC Context ---
     
-    # Premium/Discount Factor
-    # Need to handle division by zero if High == Low
-    if 'swing_high' in df.columns and 'swing_low' in df.columns:
-        swing_range = df['swing_high'] - df['swing_low']
-        swing_range = swing_range.replace(0, np.nan)
-        df['ml_pd_factor'] = (df['close'] - df['swing_low']) / swing_range
-        df['ml_pd_factor'] = df['ml_pd_factor'].fillna(0.5).clip(0, 1)
-    else:
-         # Fallback if columns not present (Should check smc_luxalgo_numba output)
-         df['ml_pd_factor'] = 0.5
-
     # Time since last signal (Vectorized)
     def bars_since(series):
         # cumcount starts at 0 for each group.
@@ -240,6 +229,14 @@ def calculate_ml_features(dataframe: pd.DataFrame) -> pd.DataFrame:
     # Zone Interaction
     df['ml_in_bull_ob'] = ((df['active_bullish_ob_top'] > 0) & (df['low'] <= df['active_bullish_ob_top'])).astype(int)
     df['ml_in_bear_ob'] = ((df['active_bearish_ob_top'] > 0) & (df['high'] >= df['active_bearish_ob_bottom'])).astype(int)
+
+    # Liquidity Sweeps (Rolling window for ML context)
+    if 'internal_sweep_bullish' in df.columns:
+        df['ml_recent_bull_sweep'] = df['internal_sweep_bullish'].rolling(3, min_periods=1).max().fillna(0)
+        df['ml_recent_bear_sweep'] = df['internal_sweep_bearish'].rolling(3, min_periods=1).max().fillna(0)
+    else:
+        df['ml_recent_bull_sweep'] = 0
+        df['ml_recent_bear_sweep'] = 0
     
     # Fill NaNs
     feature_cols = [c for c in df.columns if c.startswith('ml_')]

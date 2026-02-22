@@ -35,6 +35,7 @@ def _smc_signals_kernel(
     high: np.ndarray,
     low: np.ndarray,
     close: np.ndarray,
+    volume: np.ndarray,
     n: int,
     internal_length: int,
     swing_length: int
@@ -42,7 +43,7 @@ def _smc_signals_kernel(
     np.ndarray, np.ndarray, np.ndarray, np.ndarray, # Internal BOS/CHoCH Bull/Bear
     np.ndarray, np.ndarray, np.ndarray, np.ndarray, # Swing BOS/CHoCH Bull/Bear
     np.ndarray, np.ndarray, # Internal/Swing Trend
-    np.ndarray, np.ndarray, np.ndarray, np.ndarray, # OB Top/Bottom
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, # OB Top/Bottom/Vol
     np.ndarray, np.ndarray, np.ndarray, np.ndarray, # FVG Top/Bottom
     np.ndarray, np.ndarray, # Swing High, Swing Low (Current Range)
     np.ndarray, np.ndarray, np.ndarray, np.ndarray  # Liquidity Sweeps (Int/Sw Bull/Bear)
@@ -64,8 +65,10 @@ def _smc_signals_kernel(
     # OB Storage
     ob_bull_top = np.full(n, np.nan)
     ob_bull_btm = np.full(n, np.nan)
+    ob_bull_vol = np.zeros(n)
     ob_bear_top = np.full(n, np.nan)
     ob_bear_btm = np.full(n, np.nan)
+    ob_bear_vol = np.zeros(n)
     
     # FVG Storage
     fvg_bull_top = np.full(n, np.nan)
@@ -202,6 +205,7 @@ def _smc_signals_kernel(
                     if ob_idx != -1:
                         ob_bull_top[i] = high[ob_idx]
                         ob_bull_btm[i] = low[ob_idx]
+                        ob_bull_vol[i] = volume[ob_idx]
 
         # Bearish Break
         if not ip_low_crossed and not np.isnan(ip_low_level):
@@ -219,6 +223,7 @@ def _smc_signals_kernel(
                     if ob_idx != -1:
                         ob_bear_top[i] = high[ob_idx]
                         ob_bear_btm[i] = low[ob_idx]
+                        ob_bear_vol[i] = volume[ob_idx]
         
         # --- INTERNAL LIQUIDITY SWEEPS ---
         # Bullish Sweep: Wick below internal pivot low, close above (took sellside liquidity)
@@ -252,6 +257,7 @@ def _smc_signals_kernel(
                         # FIX: Write at confirmation index i, not geometry index
                         ob_bull_top[i] = high[ob_idx]
                         ob_bull_btm[i] = low[ob_idx]
+                        ob_bull_vol[i] = volume[ob_idx]
 
         if not sp_low_crossed and not np.isnan(sp_low_level):
             if prev_close >= sp_low_level and curr_close < sp_low_level:
@@ -269,6 +275,7 @@ def _smc_signals_kernel(
                         # FIX: Write at confirmation index i, not geometry index
                         ob_bear_top[i] = high[ob_idx]
                         ob_bear_btm[i] = low[ob_idx]
+                        ob_bear_vol[i] = volume[ob_idx]
         
         # --- SWING LIQUIDITY SWEEPS ---
         # Bullish Sweep: Wick below swing pivot low, close above
@@ -296,7 +303,7 @@ def _smc_signals_kernel(
         int_bos_bull, int_bos_bear, int_choch_bull, int_choch_bear,
         sw_bos_bull, sw_bos_bear, sw_choch_bull, sw_choch_bear,
         int_trend, sw_trend,
-        ob_bull_top, ob_bull_btm, ob_bear_top, ob_bear_btm,
+        ob_bull_top, ob_bull_btm, ob_bear_top, ob_bear_btm, ob_bull_vol, ob_bear_vol,
         fvg_bull_top, fvg_bull_btm, fvg_bear_top, fvg_bear_btm,
         out_sw_high, out_sw_low,
         int_sweep_bull, int_sweep_bear, sw_sweep_bull, sw_sweep_bear
@@ -307,14 +314,14 @@ def _smc_zones_kernel(
     high: np.ndarray,
     low: np.ndarray,
     close: np.ndarray,
-    ob_bull_top: np.ndarray, ob_bull_btm: np.ndarray,
-    ob_bear_top: np.ndarray, ob_bear_btm: np.ndarray,
+    ob_bull_top: np.ndarray, ob_bull_btm: np.ndarray, ob_bull_vol: np.ndarray,
+    ob_bear_top: np.ndarray, ob_bear_btm: np.ndarray, ob_bear_vol: np.ndarray,
     fvg_bull_top: np.ndarray, fvg_bull_btm: np.ndarray,
     fvg_bear_top: np.ndarray, fvg_bear_btm: np.ndarray,
     n: int
 ) -> Tuple[
     np.ndarray, np.ndarray, np.ndarray, np.ndarray,
-    np.ndarray, np.ndarray, np.ndarray, np.ndarray,
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray,
     np.ndarray, np.ndarray, np.ndarray, np.ndarray, # Breakers (OB)
     np.ndarray, np.ndarray, np.ndarray, np.ndarray  # Breakers (FVG) - NEW
 ]:
@@ -323,8 +330,10 @@ def _smc_zones_kernel(
     # OBs
     act_bull_ob_top = np.zeros(n)
     act_bull_ob_btm = np.zeros(n)
+    act_bull_ob_vol = np.zeros(n)
     act_bear_ob_top = np.zeros(n)
     act_bear_ob_btm = np.zeros(n)
+    act_bear_ob_vol = np.zeros(n)
     
     # FVGs
     act_bull_fvg_top = np.zeros(n)
@@ -537,10 +546,12 @@ def _smc_zones_kernel(
         if best_bull_ob_idx != -1:
             act_bull_ob_top[i] = ob_bull_top[best_bull_ob_idx]
             act_bull_ob_btm[i] = ob_bull_btm[best_bull_ob_idx]
+            act_bull_ob_vol[i] = ob_bull_vol[best_bull_ob_idx]
             
         if best_bear_ob_idx != -1:
             act_bear_ob_top[i] = ob_bear_top[best_bear_ob_idx]
             act_bear_ob_btm[i] = ob_bear_btm[best_bear_ob_idx]
+            act_bear_ob_vol[i] = ob_bear_vol[best_bear_ob_idx]
 
         if best_bull_fvg_idx != -1:
             act_bull_fvg_top[i] = fvg_bull_top[best_bull_fvg_idx]
@@ -571,8 +582,8 @@ def _smc_zones_kernel(
             act_fvg_brk_bear_btm[i] = fvg_bull_btm[best_bear_fvg_brk_idx]
 
     return (
-        act_bull_ob_top, act_bull_ob_btm,
-        act_bear_ob_top, act_bear_ob_btm,
+        act_bull_ob_top, act_bull_ob_btm, act_bull_ob_vol,
+        act_bear_ob_top, act_bear_ob_btm, act_bear_ob_vol,
         act_bull_fvg_top, act_bull_fvg_btm,
         act_bear_fvg_top, act_bear_fvg_btm,
         act_brk_bull_top, act_brk_bull_btm,
@@ -597,6 +608,7 @@ class SMCLuxAlgoNumba:
         self.high = df['high'].values.astype(float)
         self.low = df['low'].values.astype(float)
         self.close = df['close'].values.astype(float)
+        self.volume = df['volume'].values.astype(float)
         self.n = len(df)
         
     def get_signals(self) -> pd.DataFrame:
@@ -605,18 +617,19 @@ class SMCLuxAlgoNumba:
             ib_bull, ib_bear, ic_bull, ic_bear,
             sb_bull, sb_bear, sc_bull, sc_bear,
             i_trend, s_trend,
-            ob_bt_raw, ob_bb_raw, ob_bet_raw, ob_beb_raw,
+            ob_bt_raw, ob_bb_raw, ob_bet_raw, ob_beb_raw, ob_bull_vol_raw, ob_bear_vol_raw,
             fvg_bt_raw, fvg_bb_raw, fvg_bet_raw, fvg_beb_raw,
             sw_high, sw_low,
             int_sweep_bull, int_sweep_bear, sw_sweep_bull, sw_sweep_bear
         ) = _smc_signals_kernel(
-            self.high, self.low, self.close, self.n,
+            self.high, self.low, self.close, self.volume, self.n,
             self.internal_length, self.swing_length
         )
         
         # 2. Run Zone Kernel (Active Memory + Breakers)
         (
-            act_ob_bt, act_ob_bb, act_ob_bet, act_ob_beb,
+            act_ob_bt, act_ob_bb, act_ob_bvol,
+            act_ob_bet, act_ob_beb, act_ob_bevol,
             act_fvg_bt, act_fvg_bb, act_fvg_bet, act_fvg_beb,
             act_brk_bull_t, act_brk_bull_b,
             act_brk_bear_t, act_brk_bear_b,
@@ -624,7 +637,8 @@ class SMCLuxAlgoNumba:
             act_fvg_brk_bear_t, act_fvg_brk_bear_b
         ) = _smc_zones_kernel(
             self.high, self.low, self.close,
-            ob_bt_raw, ob_bb_raw, ob_bet_raw, ob_beb_raw,
+            ob_bt_raw, ob_bb_raw, ob_bull_vol_raw,
+            ob_bet_raw, ob_beb_raw, ob_bear_vol_raw,
             fvg_bt_raw, fvg_bb_raw, fvg_bet_raw, fvg_beb_raw,
             self.n
         )
@@ -654,8 +668,10 @@ class SMCLuxAlgoNumba:
         # Active Zones (OBs)
         df['active_bullish_ob_top'] = act_ob_bt
         df['active_bullish_ob_bottom'] = act_ob_bb
+        df['active_bullish_ob_vol'] = act_ob_bvol
         df['active_bearish_ob_top'] = act_ob_bet
         df['active_bearish_ob_bottom'] = act_ob_beb
+        df['active_bearish_ob_vol'] = act_ob_bevol
         
         # Active Zones (FVGs)
         df['active_bullish_fvg_top'] = act_fvg_bt
