@@ -129,6 +129,11 @@ class SMCWithMLLuxAlgo(IStrategy):
     require_ob_zone = BooleanParameter(default=True, space='buy', optimize=True)
     require_fvg_zone = BooleanParameter(default=True, space='buy', optimize=True)
     
+    # NEW: Volumetric Order Blocks (BigBeluga Style)
+    require_volumetric_ob = BooleanParameter(default=True, space='buy', optimize=True)
+    vol_sma_period = IntParameter(10, 50, default=20, space='buy', optimize=True)
+    ob_rvol_threshold = DecimalParameter(1.2, 3.5, default=1.8, decimals=1, space='buy', optimize=True)
+    
     # Trend filter - disabled by default to match Pine Strategy execution logic
     # (Pine indicator shows trend color, but strategy entry block does not enforce it)
     trade_with_trend = BooleanParameter(default=False, space='buy', optimize=True)
@@ -176,11 +181,11 @@ class SMCWithMLLuxAlgo(IStrategy):
     # Note: ML logic is currently disabled in entry generation to ensure 
     # strict fidelity to Pine Script logic.
     
-    use_ml_filter = BooleanParameter(default=True, space='buy', optimize=False)
-    use_per_symbol_models = BooleanParameter(default=True, space='buy', optimize=False)  # True = per-symbol, False = general
+    use_ml_filter = BooleanParameter(default=False, space='buy', optimize=False)
+    use_per_symbol_models = BooleanParameter(default=False, space='buy', optimize=False)  # True = per-symbol, False = general
     ml_threshold = DecimalParameter(0.05, 0.50, default=0.15, decimals=2, space='buy', optimize=True)
     ml_model_path = "user_data/strategies/SMC/models"
-    enable_auto_training = BooleanParameter(default=True, space='buy', optimize=False)
+    enable_auto_training = BooleanParameter(default=False, space='buy', optimize=False)
     _ml_model = None
 
     # ==========================================================================
@@ -217,11 +222,6 @@ class SMCWithMLLuxAlgo(IStrategy):
     # Granular control over which CHoCH triggers an exit
     exit_on_internal_choch = BooleanParameter(default=True, space='sell', optimize=True)
     exit_on_swing_choch = BooleanParameter(default=True, space='sell', optimize=True)
-    
-    # TP2 (Full Exit) - Optional extention
-    # Pine does not have explicit TP2, it holds until reversal or manual close.
-    # We set a high default or rely on reversal.
-    tp2_pct = DecimalParameter(0.02, 1.00, default=0.05, decimals=3, space='sell', optimize=True)
 
     # ==========================================================================
     # INITIALIZATION
@@ -434,6 +434,20 @@ class SMCWithMLLuxAlgo(IStrategy):
         zone_cols = [c for c in dataframe.columns if c.startswith('active_')]
         for col in zone_cols:
             dataframe[col] = dataframe[col].shift(1).fillna(0)
+            
+        # --- RVOL CALCULATION FOR OBs (BigBeluga Style) ---
+        # The volume output array stores the exact volume of the candle that created the OB.
+        # RVOL = Volume del OB / Volumen Promedio Diario (o SMA Period)
+        dataframe['vol_sma'] = ta.SMA(dataframe['volume'], timeperiod=self.vol_sma_period.value)
+        dataframe['vol_sma'] = dataframe['vol_sma'].replace(0, np.nan) # Prevent division by zero
+        
+        # We calculate the Relative Volume (RVOL) multiplier of the Order Block
+        dataframe['bull_ob_rvol'] = dataframe['active_bullish_ob_vol'] / dataframe['vol_sma']
+        dataframe['bear_ob_rvol'] = dataframe['active_bearish_ob_vol'] / dataframe['vol_sma']
+        
+        # Replace NaNs with 0 (for early candles where SMA is not yet formed)
+        dataframe['bull_ob_rvol'] = dataframe['bull_ob_rvol'].fillna(0)
+        dataframe['bear_ob_rvol'] = dataframe['bear_ob_rvol'].fillna(0)
             
         # --- 2. HTF Calculations (All configured timeframes) ---
         if self.dp:
@@ -726,20 +740,33 @@ class SMCWithMLLuxAlgo(IStrategy):
         
         # ===== ZONE CONDITIONS (Optional Filters) =====
         # Price in bullish OB zone (Must close ABOVE bottom)
-        dataframe['in_bullish_ob'] = (
+        
+        in_bull_ob = (
             (dataframe['active_bullish_ob_top'] > 0) &
             (dataframe['low'] <= dataframe['active_bullish_ob_top']) &
             (dataframe['high'] >= dataframe['active_bullish_ob_bottom']) &
             (dataframe['close'] >= dataframe['active_bullish_ob_bottom'])
         )
         
+        # Apply RVOL Volumetric Filter to OBs
+        if self.require_volumetric_ob.value:
+            in_bull_ob &= (dataframe['bull_ob_rvol'] >= self.ob_rvol_threshold.value)
+            
+        dataframe['in_bullish_ob'] = in_bull_ob
+        
         # Price in bearish OB zone (Must close BELOW top)
-        dataframe['in_bearish_ob'] = (
+        in_bear_ob = (
             (dataframe['active_bearish_ob_top'] > 0) &
             (dataframe['high'] >= dataframe['active_bearish_ob_bottom']) &
             (dataframe['low'] <= dataframe['active_bearish_ob_top']) &
             (dataframe['close'] <= dataframe['active_bearish_ob_top'])
         )
+        
+        # Apply RVOL Volumetric Filter to OBs
+        if self.require_volumetric_ob.value:
+            in_bear_ob &= (dataframe['bear_ob_rvol'] >= self.ob_rvol_threshold.value)
+            
+        dataframe['in_bearish_ob'] = in_bear_ob
         
         # Price in bullish FVG zone (Must close ABOVE bottom to be valid)
         dataframe['in_bullish_fvg'] = (
@@ -776,22 +803,34 @@ class SMCWithMLLuxAlgo(IStrategy):
                 
                 # Add Breakers to OB logic (User description: Breaker OB is a key entry point)
                 if 'active_bullish_breaker_top' in dataframe.columns:
-                     dataframe['in_bull_breaker'] = (
+                     in_bull_breaker = (
                         (dataframe['active_bullish_breaker_top'] > 0) & 
                         # Price touching breaker (Breaker acts as Support)
                         (dataframe['low'] <= dataframe['active_bullish_breaker_top']) & 
                         (dataframe['high'] >= dataframe['active_bullish_breaker_bottom']) &
                         (dataframe['close'] >= dataframe['active_bullish_breaker_bottom'])
                      )
+                     
+                     if self.require_volumetric_ob.value:
+                         # A bullish breaker comes from a broken bearish OB. Use bearish RVOL.
+                         in_bull_breaker &= (dataframe['bear_ob_rvol'] >= self.ob_rvol_threshold.value)
+                         
+                     dataframe['in_bull_breaker'] = in_bull_breaker
                      bullish_zone |= dataframe['in_bull_breaker']
                      
-                     dataframe['in_bear_breaker'] = (
+                     in_bear_breaker = (
                         (dataframe['active_bearish_breaker_top'] > 0) & 
                         # Price touching breaker (Breaker acts as Resistance)
                         (dataframe['high'] >= dataframe['active_bearish_breaker_bottom']) &
                         (dataframe['low'] <= dataframe['active_bearish_breaker_top']) &
                         (dataframe['close'] <= dataframe['active_bearish_breaker_top'])
                      )
+                     
+                     if self.require_volumetric_ob.value:
+                         # A bearish breaker comes from a broken bullish OB. Use bullish RVOL.
+                         in_bear_breaker &= (dataframe['bull_ob_rvol'] >= self.ob_rvol_threshold.value)
+                     
+                     dataframe['in_bear_breaker'] = in_bear_breaker
                      bearish_zone |= dataframe['in_bear_breaker']
             
             if self.require_fvg_zone.value:
@@ -886,15 +925,19 @@ class SMCWithMLLuxAlgo(IStrategy):
                     (dataframe['internal_sweep_bearish'].rolling(sweep_lb, min_periods=1).max() == 1) |
                     (dataframe['swing_sweep_bearish'].rolling(sweep_lb, min_periods=1).max() == 1)
                 )
-                
-                # Sweep bypasses zone requirement
+
+                # Sweep bypasses zone requirement (INCLUDING volumetric filter)
                 bullish_zone |= recent_bull_sweep
                 bearish_zone |= recent_bear_sweep
                 
+                final_bull_zone = bullish_zone
+                final_bear_zone = bearish_zone
+            else:
+                final_bull_zone = bullish_zone
+                final_bear_zone = bearish_zone
         else:
-            # No zone filters enabled - all pass
-            bullish_zone = pd.Series(True, index=dataframe.index)
-            bearish_zone = pd.Series(True, index=dataframe.index)
+            final_bull_zone = bullish_zone
+            final_bear_zone = bearish_zone
         
         # Debugging Zone Counts (Only if backtesting/dry)
         if self.dp: 
@@ -1464,16 +1507,3 @@ class SMCWithMLLuxAlgo(IStrategy):
         
         return None
     
-    def custom_exit(self, pair: str, trade: Trade, current_time: datetime,
-                   current_rate: float, current_profit: float, **kwargs) -> Optional[str]:
-        """
-        Custom exit for TP2 based on PRICE movement.
-        """
-        # Calculate price movement (remove leverage)
-        price_movement = current_profit / trade.leverage
-        
-        # TP2: Full exit
-        if price_movement >= self.tp2_pct.value:
-            return "TP2_exit"
-        
-        return None

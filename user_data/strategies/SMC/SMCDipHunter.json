@@ -1,48 +1,44 @@
 {
-    "strategy_name": "SMCDipHunter",
-    "params": {
-        "roi": {
-            "0": 1.0
-        },
-        "stoploss": {
-            "stoploss": -0.01
-        },
-        "max_open_trades": {
-            "max_open_trades": 5
-        },
-        "buy": {
-            "internal_length": 5,
-            "swing_length": 50,
-            "vol_sma_period": 20,
-            "ob_rvol_threshold": 1.8,
-            "rsi_oversold": 35,
-            "rsi_overbought": 65,
-            "use_htf_filter": true,
-            "htf_1": "4h",
-            "htf_2": "none"
-        },
-        "sell": {
-            "strict_ob_invalidation": true,
-            "exit_on_internal_choch": true,
-            "sl_buffer_pct": 0.002,
-            "enable_tp1": true,
-            "tp1_pct": 0.02,
-            "tp1_amount": 50.0,
-            "enable_be": true,
-            "be_activation_pct": 0.03,
-            "be_buffer_pct": 0.002
-        },
-        "protection": {},
-        "trailing": {
-            "trailing_stop": false
-        },
-        "custom": {}
+  "strategy_name": "SMCDipHunter",
+  "params": {
+    "roi": {
+      "0": 99
     },
-    "ft_stratparam_v": 1,
-    "export_time": "2026-02-21 23:54:00.000000+00:00",
-    "notes": {
-        "stoploss": "Default -2% price movement (leverage applied separately)",
-        "ob_rvol_threshold": "Only OBs that have at least 1.8x the average volume are valid for limit entries.",
-        "limit_hunting": "Strategy enters without requiring CHoCH/BOS immediately upon contact with the P/D Array"
+    "stoploss": {
+      "stoploss": -0.24
+    },
+    "trailing": {
+      "trailing_stop": false,
+      "trailing_stop_positive": null,
+      "trailing_stop_positive_offset": 0.0,
+      "trailing_only_offset_is_reached": false
+    },
+    "max_open_trades": {
+      "max_open_trades": 5
+    },
+    "buy": {
+      "htf_1": "4h",
+      "htf_2": "30m",
+      "internal_length": 9,
+      "ob_rvol_threshold": 1.6,
+      "rsi_overbought": 55,
+      "rsi_oversold": 35,
+      "swing_length": 24,
+      "use_htf_filter": true,
+      "vol_sma_period": 38
+    },
+    "sell": {
+      "be_activation_pct": 0.01,
+      "be_buffer_pct": 0.004,
+      "enable_be": true,
+      "enable_tp1": false,
+      "exit_on_internal_choch": false,
+      "sl_buffer_pct": 0.003,
+      "strict_ob_invalidation": false,
+      "tp1_amount": 90.789,
+      "tp1_pct": 0.03
     }
+  },
+  "ft_stratparam_v": 1,
+  "export_time": "2026-02-22 23:59:59.725294+00:00"
 }

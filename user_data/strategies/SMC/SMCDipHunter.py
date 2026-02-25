@@ -28,7 +28,7 @@ import os
 
 logger = logging.getLogger(__name__)
 
-from freqtrade.strategy import IStrategy, IntParameter, DecimalParameter, BooleanParameter, CategoricalParameter
+from freqtrade.strategy import IStrategy, IntParameter, DecimalParameter, BooleanParameter, CategoricalParameter, merge_informative_pair
 from freqtrade.persistence import Trade
 import talib.abstract as ta
 import pandas_ta as pta
@@ -143,6 +143,15 @@ class SMCDipHunter(IStrategy):
         
         return informative_pairs
 
+    def leverage(self, pair: str, current_time: datetime, current_rate: float,
+                 proposed_leverage: float, max_leverage: float, entry_tag: str,
+                 side: str, **kwargs) -> float:
+        """
+        Require Freqtrade to explicitly set leverage on the exchange.
+        Normally reads 'leverage' from config, defaults to 10.0 if not found.
+        """
+        return self.config.get('leverage', 10.0)
+
     # ==========================================================================
     # INDICATOR CALCULATION
     # ==========================================================================
@@ -203,15 +212,12 @@ class SMCDipHunter(IStrategy):
                     
                     # Define Macro Trend based on price vs HMA
                     # 1 = Bullish Regime, -1 = Bearish Regime
-                    trend_col = f'{htf}_macro_trend'
+                    trend_col = 'macro_trend'
                     inf_htf[trend_col] = np.where(inf_htf['close'] > inf_htf['hma_200'], 1, -1)
                     
-                    # Prepare for merge
-                    inf_htf = inf_htf[['date', trend_col]].copy()
-                    
-                    # Merge timeframe into normal dataframe
-                    dataframe = pd.merge(dataframe, inf_htf, on='date', how='left')
-                    dataframe[trend_col] = dataframe[trend_col].ffill().fillna(0)
+                    # Merge using Freqtrade's secure logic to prevent Lookahead Bias
+                    # This maps 4H data to the exact 15m candle where the 4H has FINISHED closing.
+                    dataframe = merge_informative_pair(dataframe, inf_htf, self.timeframe, htf, ffill=True)
                     
                 except Exception as e:
                     logger.error(f"Error processing HTF {htf}: {e}")
@@ -250,11 +256,12 @@ class SMCDipHunter(IStrategy):
         if self.use_htf_filter.value:
             # Check all active HTFs - require them to be bullish (1) or unknown (0, e.g. startup)
             if self.htf_1.value != 'none':
-                col_name = f'{self.htf_1.value}_macro_trend'
+                # Freqtrade appends the timeframe to the column during merge_informative_pair
+                col_name = f'macro_trend_{self.htf_1.value}'
                 if col_name in dataframe.columns:
                     macro_bullish &= (dataframe[col_name] >= 0)
             if self.htf_2.value != 'none':
-                col_name = f'{self.htf_2.value}_macro_trend'
+                col_name = f'macro_trend_{self.htf_2.value}'
                 if col_name in dataframe.columns:
                     macro_bullish &= (dataframe[col_name] >= 0)
         
@@ -280,11 +287,11 @@ class SMCDipHunter(IStrategy):
         macro_bearish = pd.Series(True, index=dataframe.index)
         if self.use_htf_filter.value:
             if self.htf_1.value != 'none':
-                col_name = f'{self.htf_1.value}_macro_trend'
+                col_name = f'macro_trend_{self.htf_1.value}'
                 if col_name in dataframe.columns:
                     macro_bearish &= (dataframe[col_name] <= 0)
             if self.htf_2.value != 'none':
-                col_name = f'{self.htf_2.value}_macro_trend'
+                col_name = f'macro_trend_{self.htf_2.value}'
                 if col_name in dataframe.columns:
                     macro_bearish &= (dataframe[col_name] <= 0)
         
