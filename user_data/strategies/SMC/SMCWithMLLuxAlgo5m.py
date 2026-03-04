@@ -59,7 +59,7 @@ except ImportError:
     train_model = None
 
 
-class SMCWithMLLuxAlgo(IStrategy):
+class SMCWithMLLuxAlgo5m(IStrategy):
     """
     SMC Strategy (LuxAlgo Aligned)
     
@@ -94,8 +94,7 @@ class SMCWithMLLuxAlgo(IStrategy):
     # HTF TIMEFRAMES (Flexible selection - works with JSON buy params)
     # ==========================================================================
     # Set to 'none' to disable that slot
-    # Common options: '5m', '15m', '30m', '1h', '2h', '4h', '8h', '12h', '1d'
-    HTF_OPTIONS = ['none', '5m', '15m', '30m', '1h', '2h', '4h', '8h', '12h', '1d']
+    HTF_OPTIONS = ['none', '5m', '15m', '1h', '4h', '1d']
     
     htf_1 = CategoricalParameter(HTF_OPTIONS, default='1h', space='buy', optimize=False)
     htf_2 = CategoricalParameter(HTF_OPTIONS, default='4h', space='buy', optimize=False)
@@ -216,7 +215,7 @@ class SMCWithMLLuxAlgo(IStrategy):
     
     # Custom Break Even Target (Optional)
     # If > 0, BE is activated cuando el precio se mueve este %, ignorando el tp1_pct.
-    be_trigger_pct = DecimalParameter(0.0, 0.50, default=0.0, decimals=3, space='sell', optimize=True)
+    be_trigger_pct = DecimalParameter(0.0, 0.50, default=0.025, decimals=3, space='sell', optimize=True)
     
     # Final Exit (Reversal)
     # Granular control over which CHoCH triggers an exit
@@ -797,11 +796,21 @@ class SMCWithMLLuxAlgo(IStrategy):
             bullish_zone = pd.Series(False, index=dataframe.index)
             bearish_zone = pd.Series(False, index=dataframe.index)
             
+            # --- TOXIC ZONE FILTER LOGIC ---
+            # Group 1 analysis showed Breakers and FVG-Breakers alone are unprofitable in 5m
+            # We must require a fresh OB or FVG
+            
+            # 1. Base Strong Zones
+            has_bull_strong_zone = pd.Series(False, index=dataframe.index)
+            has_bear_strong_zone = pd.Series(False, index=dataframe.index)
+            
             if self.require_ob_zone.value:
                 bullish_zone |= dataframe['in_bullish_ob']
                 bearish_zone |= dataframe['in_bearish_ob']
+                has_bull_strong_zone |= dataframe['in_bullish_ob']
+                has_bear_strong_zone |= dataframe['in_bearish_ob']
                 
-                # Add Breakers to OB logic (User description: Breaker OB is a key entry point)
+                # Add Breakers to OB logic
                 if 'active_bullish_breaker_top' in dataframe.columns:
                      in_bull_breaker = (
                         (dataframe['active_bullish_breaker_top'] > 0) & 
@@ -836,6 +845,8 @@ class SMCWithMLLuxAlgo(IStrategy):
             if self.require_fvg_zone.value:
                 bullish_zone |= dataframe['in_bullish_fvg']
                 bearish_zone |= dataframe['in_bearish_fvg']
+                has_bull_strong_zone |= dataframe['in_bullish_fvg']
+                has_bear_strong_zone |= dataframe['in_bearish_fvg']
                 
                 # Add FVG Breakers logic
                 if 'active_bullish_fvg_breaker_top' in dataframe.columns:
@@ -854,6 +865,11 @@ class SMCWithMLLuxAlgo(IStrategy):
                         (dataframe['close'] <= dataframe['active_bearish_fvg_breaker_top'])
                      )
                      bearish_zone |= dataframe['in_bear_fvg_breaker']
+
+            # Apply Toxic Zone Filter
+            # Require at least one "strong" zone (OB or FVG) for the zone condition to pass
+            bullish_zone &= has_bull_strong_zone
+            bearish_zone &= has_bear_strong_zone
 
             # --- DYNAMIC STOPLOSS CALCULATION (For DataFrame) ---
             # We calculate what the SL PRICE would be for this candle if we entered.
