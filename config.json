@@ -79,10 +79,10 @@
             "BTC/USDT:USDT",
             "ETH/USDT:USDT",
             "SOL/USDT:USDT",
+            "BNB/USDT:USDT",
+            "DOGE/USDT:USDT",
             "SUI/USDT:USDT",
-            "ARB/USDT:USDT",
-            "ATH/USDT:USDT",
-            "VET/USDT:USDT"
+            "STX/USDT:USDT"
         ],
         "pair_blacklist": []
     },
