@@ -1694,6 +1694,24 @@ class SMCWithMLLuxAlgo(IStrategy):
         # If trade just opened (no BE yet), we check for Dynamic SL from structure
         be_activated = trade.get_custom_data("be_activated", default=False)
 
+        # --- 1a. STORE DYNAMIC TP1 ADJUSTMENT (independent of dynamic SL) ---
+        # Read tp1_adj from the entry candle once and cache it as custom trade data.
+        if not be_activated and self.use_dynamic_tp_adj.value and trade.get_custom_data("tp1_adj") is None:
+            try:
+                dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+                candle = dataframe.loc[dataframe["date"] == trade.open_date_utc]
+                if not candle.empty:
+                    row = candle.iloc[0]
+                    adj_col = "tp1_adj_short" if trade.is_short else "tp1_adj_long"
+                    if adj_col in row and not pd.isna(row[adj_col]) and row[adj_col] > 0:
+                        trade.set_custom_data("tp1_adj", float(row[adj_col]))
+                        if row[adj_col] < self.tp1_pct.value:
+                            logger.info(
+                                f"🎯 Dynamic TP1 for {pair}: {row[adj_col]:.2%} (opposing zone detected, default was {self.tp1_pct.value:.2%})"
+                            )
+            except Exception:
+                pass
+
         if not be_activated and self.use_dynamic_stoploss.value:
             # Check if we already have the initial SL price stored
             # This ensures we only read the dataframe ONCE at the start of the trade
@@ -1702,8 +1720,6 @@ class SMCWithMLLuxAlgo(IStrategy):
             # If not stored, try to find it in the dataframe
             if initial_sl_price is None:
                 try:
-                    # We need the dataframe.
-                    # Optimization: Only load analyzed dataframe if we haven't stored the SL yet
                     dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
 
                     # Find the candle where the trade opened
@@ -1724,26 +1740,11 @@ class SMCWithMLLuxAlgo(IStrategy):
                             initial_sl_price = price_found
                             trade.set_custom_data("initial_sl_price", initial_sl_price)
                             logger.info(f"Initial Dynamic SL found for {pair}: {initial_sl_price}")
-
-                        # Store adjusted TP1 (based on opposing zone) once at trade open
-                        if (
-                            self.use_dynamic_tp_adj.value
-                            and trade.get_custom_data("tp1_adj") is None
-                        ):
-                            adj_col = "tp1_adj_short" if trade.is_short else "tp1_adj_long"
-                            if adj_col in row and not pd.isna(row[adj_col]) and row[adj_col] > 0:
-                                trade.set_custom_data("tp1_adj", float(row[adj_col]))
-                                if row[adj_col] < self.tp1_pct.value:
-                                    logger.info(
-                                        f"🎯 Dynamic TP1 for {pair}: {row[adj_col]:.2%} (opposing zone detected, default was {self.tp1_pct.value:.2%})"
-                                    )
-                except Exception as e:
-                    # Fallback to default
+                except Exception:
                     pass
 
             # If we have a valid initial SL price (either from storage or just found)
             if initial_sl_price and initial_sl_price > 0:
-                # Use Freqtrade's official helper function
                 logger.debug(
                     f"Dynamic SL for {pair}: sl_price={initial_sl_price:.4f}, current_rate={current_rate:.4f}"
                 )

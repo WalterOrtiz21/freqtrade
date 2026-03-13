@@ -215,7 +215,14 @@ class SMCWithMLLuxAlgo5m(IStrategy):
     
     # Custom Break Even Target (Optional)
     # If > 0, BE is activated cuando el precio se mueve este %, ignorando el tp1_pct.
-    be_trigger_pct = DecimalParameter(0.0, 0.50, default=0.025, decimals=3, space='sell', optimize=True)
+    be_trigger_pct = DecimalParameter(0.0, 0.50, default=0.0, decimals=3, space='sell', optimize=True)
+
+    # Dynamic TP1 Adjustment (Opposing Zone Awareness)
+    # If a bearish OB/FVG (RVOL >= min_rvol) is between entry and TP1,
+    # set TP1 = zone_distance * margin instead of the default tp1_pct.
+    use_dynamic_tp_adj = BooleanParameter(default=True, space='sell', optimize=False)
+    tp_adj_min_rvol = DecimalParameter(1.0, 3.0, default=1.5, decimals=1, space='sell', optimize=True)
+    tp_adj_margin = DecimalParameter(0.1, 0.9, default=0.80, decimals=2, space='sell', optimize=True)
     
     # Final Exit (Reversal)
     # Granular control over which CHoCH triggers an exit
@@ -308,14 +315,14 @@ class SMCWithMLLuxAlgo5m(IStrategy):
     
     def _load_ml_model(self):
         """Load pre-trained ML model if exists.
-        
+
         Tries to load in order:
         1. Per-symbol model: smc_xgboost_{PAIR}.pkl
         2. General model: smc_xgboost_model.pkl
         """
         if not hasattr(self, '_models_cache'):
             self._models_cache = {}
-            
+
         # General model (fallback) - load once
         general_model_file = os.path.join(self.ml_model_path, "smc_xgboost_model.pkl")
         if os.path.exists(general_model_file) and 'general' not in self._models_cache:
@@ -327,7 +334,24 @@ class SMCWithMLLuxAlgo5m(IStrategy):
                 except Exception as e:
                     logger.error(f"❌ Failed to load general ML model: {e}")
                     self._models_cache['general'] = None
-        
+
+        # Load optimal threshold from training output
+        import json as _json
+        threshold_file = os.path.join(self.ml_model_path, "smc_xgboost_threshold.json")
+        if os.path.exists(threshold_file):
+            try:
+                with open(threshold_file, 'r') as f:
+                    tdata = _json.load(f)
+                self._ml_optimal_threshold = tdata.get("threshold", None)
+                logger.info(
+                    f"✅ ML Threshold loaded: {self._ml_optimal_threshold:.4f} "
+                    f"(F1={tdata.get('f1', '?'):.4f}, PR-AUC={tdata.get('pr_auc', '?'):.4f})"
+                )
+            except Exception:
+                self._ml_optimal_threshold = None
+        else:
+            self._ml_optimal_threshold = None
+
         # Set default model to general if exists
         if 'general' in self._models_cache:
             self._ml_model = self._models_cache['general']
@@ -997,10 +1021,77 @@ class SMCWithMLLuxAlgo5m(IStrategy):
             bullish_trend_ok = True
             bearish_trend_ok = True
         
+        # ===== DYNAMIC TP1 ADJUSTMENT (per-candle, stored as column) =====
+        # If a bearish OB/FVG (with RVOL >= min_rvol) sits between entry and default TP1,
+        # set TP1 = zone_distance * margin. Stored so custom_stoploss/adjust_trade_position
+        # can read it once at trade open and cache it as custom trade data.
+
+        default_tp1 = self.tp1_pct.value
+        margin = self.tp_adj_margin.value
+        min_rvol = self.tp_adj_min_rvol.value
+
+        # --- Long TP1 adjustment (bearish zones above price block the move) ---
+        bear_ob_dist_raw = (dataframe['active_bearish_ob_bottom'] - dataframe['close']) / dataframe['close']
+        has_bear_ob_in_range = (
+            (dataframe['active_bearish_ob_bottom'] > dataframe['close'])
+            & (bear_ob_dist_raw > 0)
+            & (bear_ob_dist_raw < default_tp1)
+            & (dataframe['bear_ob_rvol'] >= min_rvol)
+        )
+        bear_fvg_dist_raw = (dataframe['active_bearish_fvg_bottom'] - dataframe['close']) / dataframe['close']
+        has_bear_fvg_in_range = (
+            (dataframe['active_bearish_fvg_bottom'] > dataframe['close'])
+            & (bear_fvg_dist_raw > 0)
+            & (bear_fvg_dist_raw < default_tp1)
+        )
+        nearest_long_obstacle = pd.Series(
+            np.where(
+                has_bear_ob_in_range & has_bear_fvg_in_range,
+                np.minimum(bear_ob_dist_raw, bear_fvg_dist_raw) * margin,
+                np.where(
+                    has_bear_ob_in_range,
+                    bear_ob_dist_raw * margin,
+                    np.where(has_bear_fvg_in_range, bear_fvg_dist_raw * margin, default_tp1),
+                ),
+            ),
+            index=dataframe.index,
+        )
+        dataframe['tp1_adj_long'] = nearest_long_obstacle
+
+        # --- Short TP1 adjustment (bullish zones below price block the move) ---
+        bull_ob_dist_raw = (dataframe['close'] - dataframe['active_bullish_ob_top']) / dataframe['close']
+        has_bull_ob_in_range = (
+            (dataframe['active_bullish_ob_top'] > 0)
+            & (dataframe['active_bullish_ob_top'] < dataframe['close'])
+            & (bull_ob_dist_raw > 0)
+            & (bull_ob_dist_raw < default_tp1)
+            & (dataframe['bull_ob_rvol'] >= min_rvol)
+        )
+        bull_fvg_dist_raw = (dataframe['close'] - dataframe['active_bullish_fvg_top']) / dataframe['close']
+        has_bull_fvg_in_range = (
+            (dataframe['active_bullish_fvg_top'] > 0)
+            & (dataframe['active_bullish_fvg_top'] < dataframe['close'])
+            & (bull_fvg_dist_raw > 0)
+            & (bull_fvg_dist_raw < default_tp1)
+        )
+        nearest_short_obstacle = pd.Series(
+            np.where(
+                has_bull_ob_in_range & has_bull_fvg_in_range,
+                np.minimum(bull_ob_dist_raw, bull_fvg_dist_raw) * margin,
+                np.where(
+                    has_bull_ob_in_range,
+                    bull_ob_dist_raw * margin,
+                    np.where(has_bull_fvg_in_range, bull_fvg_dist_raw * margin, default_tp1),
+                ),
+            ),
+            index=dataframe.index,
+        )
+        dataframe['tp1_adj_short'] = nearest_short_obstacle
+
         # ===== FINAL CONDITIONS =====
         long_condition = bullish_structure & bullish_zone & bullish_trend_ok
         short_condition = bearish_structure & bearish_zone & bearish_trend_ok
-        
+
         # ===== ML FILTER =====
         ml_model = self._get_ml_model_for_pair(metadata['pair'])
         if self.use_ml_filter.value and ml_model:
@@ -1387,46 +1478,61 @@ class SMCWithMLLuxAlgo5m(IStrategy):
         # If trade just opened (no BE yet), we check for Dynamic SL from structure
         be_activated = trade.get_custom_data('be_activated', default=False)
         
+        # --- 1a. STORE DYNAMIC TP1 ADJUSTMENT (independent of dynamic SL) ---
+        # Read tp1_adj from the entry candle once and cache it as custom trade data.
+        if not be_activated and self.use_dynamic_tp_adj.value and trade.get_custom_data('tp1_adj') is None:
+            try:
+                dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+                candle = dataframe.loc[dataframe['date'] == trade.open_date_utc]
+                if not candle.empty:
+                    row = candle.iloc[0]
+                    adj_col = 'tp1_adj_short' if trade.is_short else 'tp1_adj_long'
+                    if adj_col in row and not pd.isna(row[adj_col]) and row[adj_col] > 0:
+                        trade.set_custom_data('tp1_adj', float(row[adj_col]))
+                        if row[adj_col] < self.tp1_pct.value:
+                            logger.info(
+                                f"🎯 Dynamic TP1 for {pair}: {row[adj_col]:.2%} "
+                                f"(opposing zone detected, default was {self.tp1_pct.value:.2%})"
+                            )
+            except Exception:
+                pass
+
         if not be_activated and self.use_dynamic_stoploss.value:
             # Check if we already have the initial SL price stored
             # This ensures we only read the dataframe ONCE at the start of the trade
             initial_sl_price = trade.get_custom_data('initial_sl_price')
-            
+
             # If not stored, try to find it in the dataframe
             if initial_sl_price is None:
                 try:
-                    # We need the dataframe. 
                     # Optimization: Only load analyzed dataframe if we haven't stored the SL yet
                     dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
-                    
+
                     # Find the candle where the trade opened
                     candle = dataframe.loc[dataframe['date'] == trade.open_date_utc]
-                    
+
                     if not candle.empty:
                         row = candle.iloc[0]
                         price_found = 0.0
-                        
+
                         if trade.is_short:
                             if 'sl_short_price' in row and not pd.isna(row['sl_short_price']):
-                                 price_found = row['sl_short_price']
+                                price_found = row['sl_short_price']
                         else:
                             if 'sl_long_price' in row and not pd.isna(row['sl_long_price']):
-                                 price_found = row['sl_long_price']
-                        
+                                price_found = row['sl_long_price']
+
                         if price_found > 0:
                             initial_sl_price = price_found
-                            # STORE IT so we don't recalculate again
                             trade.set_custom_data('initial_sl_price', initial_sl_price)
                             logger.info(f"Initial Dynamic SL found for {pair}: {initial_sl_price}")
-                except Exception as e:
-                    # Fallback to default
+                except Exception:
                     pass
 
             # If we have a valid initial SL price (either from storage or just found)
             if initial_sl_price and initial_sl_price > 0:
-                 # Use Freqtrade's official helper function
-                 logger.debug(f"Dynamic SL for {pair}: sl_price={initial_sl_price:.4f}, current_rate={current_rate:.4f}")
-                 return stoploss_from_absolute(initial_sl_price, current_rate, is_short=trade.is_short, leverage=trade.leverage)
+                logger.debug(f"Dynamic SL for {pair}: sl_price={initial_sl_price:.4f}, current_rate={current_rate:.4f}")
+                return stoploss_from_absolute(initial_sl_price, current_rate, is_short=trade.is_short, leverage=trade.leverage)
 
         # --- 2. BREAK EVEN LOGIC ---
         # Check if BE was already activated (persistent across ticks)
@@ -1445,7 +1551,13 @@ class SMCWithMLLuxAlgo5m(IStrategy):
         should_activate_be = False
         
         # Determine the target percentage to trigger Break Even
-        be_trigger = self.be_trigger_pct.value if self.be_trigger_pct.value > 0 else self.tp1_pct.value
+        # Priority: 1) be_trigger_pct if set  2) dynamic tp1_adj  3) tp1_pct default
+        if self.be_trigger_pct.value > 0:
+            be_trigger = self.be_trigger_pct.value
+        elif self.use_dynamic_tp_adj.value:
+            be_trigger = trade.get_custom_data('tp1_adj', default=self.tp1_pct.value)
+        else:
+            be_trigger = self.tp1_pct.value
         
         if self.move_be_at_tp1.value and price_movement >= be_trigger:
             should_activate_be = True
@@ -1512,9 +1624,14 @@ class SMCWithMLLuxAlgo5m(IStrategy):
         
         # Check if TP1 was already taken (persistent flag)
         tp1_taken = trade.get_custom_data('tp1_taken', default=False)
-        
+
+        # Use dynamic TP1 if available (opposing zone), else fall back to configured tp1_pct
+        effective_tp1 = self.tp1_pct.value
+        if self.use_dynamic_tp_adj.value:
+            effective_tp1 = trade.get_custom_data('tp1_adj', default=self.tp1_pct.value)
+
         # Check for TP1 (only if not already taken)
-        if not tp1_taken and price_movement > self.tp1_pct.value:
+        if not tp1_taken and price_movement > effective_tp1:
             # Check if TP1 is enabled via boolean or amount
             if not self.tp1_enabled.value or self.tp1_amount.value == 0:
                 return None
@@ -1539,7 +1656,7 @@ class SMCWithMLLuxAlgo5m(IStrategy):
             
             logger.info(
                 f"TP1 for {trade.pair} ({'SHORT' if trade.is_short else 'LONG'}): "
-                f"price moved {price_movement:.2%}, closing {self.tp1_amount.value:.0f}% "
+                f"price moved {price_movement:.2%} (trigger={effective_tp1:.2%}), closing {self.tp1_amount.value:.0f}% "
                 f"(Notional: {sell_value:.2f}, Margin: {stake_change:.2f})"
             )
             return (-stake_change, "TP1_partial")

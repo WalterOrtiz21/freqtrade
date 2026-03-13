@@ -1,0 +1,56 @@
+{
+    "strategy_name": "MFDivergenceStrategy",
+    "params": {
+        "roi": {
+            "0": 99
+        },
+        "stoploss": {
+            "stoploss": -0.02
+        },
+        "max_open_trades": {
+            "max_open_trades": 5
+        },
+        "buy": {
+            "mfi_length": 14,
+            "lookback_left": 14,
+            "lookback_right": 5,
+            "expiry_age": 1000,
+            "mitigate_type": "body",
+            "allow_rejection": false,
+            "entry_on_div": true,
+            "entry_on_touch": false,
+            "entry_on_osc_cross": false
+        },
+        "sell": {
+            "exit_on_opposite": true,
+            "exit_on_osc_cross": true,
+            "use_dynamic_stoploss": false,
+            "sl_buffer_pct": 0.002,
+            "tp1_enabled": true,
+            "tp1_pct": 0.05,
+            "tp1_amount": 50.0,
+            "move_be_at_tp1": true,
+            "be_trigger_pct": 0.025
+        },
+        "protection": {},
+        "trailing": {
+            "trailing_stop": false
+        },
+        "custom": {
+            "enable_logging": false
+        }
+    },
+    "ft_stratparam_v": 1,
+    "export_time": "2026-03-08 00:00:00.000000+00:00",
+    "notes": {
+        "stoploss": "-3% price movement base (leverage applied in bot_start)",
+        "entry_on_div": "Primary signal — bullish/bearish MFI divergences",
+        "entry_on_touch": "Optional — price re-enters zone with directional candle",
+        "entry_on_osc_cross": "Optional — HMA-MFI direction change",
+        "tp1_pct": "5% price movement triggers TP1 and BE",
+        "tp1_amount": "50% position closed at TP1",
+        "be_trigger_pct": "2.5% price movement activates Break Even",
+        "use_dynamic_stoploss": "SL placed below bull zone bottom / above bear zone top",
+        "sl_buffer_pct": "0.2% buffer added to zone edge for SL price"
+    }
+}

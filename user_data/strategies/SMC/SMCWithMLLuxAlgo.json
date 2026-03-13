@@ -14,7 +14,7 @@
             "enable_auto_training": false,
             "use_gpu": true,
             "internal_length": 5,
-            "swing_length": 50,
+            "swing_length": 100,
             "use_internal_signals": false,
             "use_swing_signals": true,
             "require_choch": true,

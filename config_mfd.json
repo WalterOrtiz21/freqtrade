@@ -4,7 +4,7 @@
     "stake_amount": "unlimited",
     "tradable_balance_ratio": 0.25,
     "fiat_display_currency": "USD",
-    "timeframe": "15m",
+    "timeframe": "1h",
     "dry_run": true,
     "dry_run_wallet": 100,
     "cancel_open_orders_on_exit": false,

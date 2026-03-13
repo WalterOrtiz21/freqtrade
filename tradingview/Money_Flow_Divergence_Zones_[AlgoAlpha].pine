@@ -1,0 +1,175 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © AlgoAlpha
+
+//@version=6
+indicator("Money Flow Divergence Zones [AlgoAlpha]", "AlgoAlpha - Money Flow Divergence", max_lines_count = 500)
+
+// Inputs
+len = input.int(14, "MFI Length", tooltip = "Lookback length used to control the Money Flow Index")
+divGroup = "Divergence"
+lookbackLeft = input.int(14, "Pivot Lookback Left", minval = 1, group = divGroup, tooltip = "Number of bars to the left required to confirm a pivot.")
+lookbackRight = input.int(5, "Pivot Lookback Right", minval = 1, group = divGroup, tooltip = "Number of bars to the right required to confirm a pivot.")
+calculateDivergence = input.bool(true, title = "Calculate Divergence", group = divGroup, tooltip = "Detect regular bullish and bearish divergences on the oscillator.")
+expiry_age = input.int(1000, "Max Zone Age", minval = 1, tooltip = "Number of bars after which a zone will be automatically removed", group = "Management")
+mitigate = input.string("body", "Sweep Type", options = ["wick", "body"], tooltip = "Body: zone removed when price body (close) crosses it; Wick: zone removed when price wick crosses it", group = "Management")
+allow_rejection = input.bool(false, "Allow Rejection", tooltip = "When enabled with body sweep type, requires two consecutive closes beyond zone to remove it", group = "Management")
+green = input.color(#00ffbb, title = "Bullish Colour", group = "Appearance", tooltip = "Color used for bullish visuals and positive net-volume profile segments.")
+red = input.color(#ff1100, title = "Bearish Colour", group = "Appearance", tooltip = "Color used for bearish visuals and negative net-volume profile segments.")
+
+// Functions
+_inRange(bool cond) =>
+    bars = ta.barssince(cond)
+    5 <= bars and bars <= 60
+
+// Variables
+v = ta.mfi(close, len)
+v_smooth = ta.hma(v, 21)
+midline_transparency = int(90 - math.min(90, math.abs(v_smooth - 50) * 2))
+osc_col = v_smooth > v_smooth[1] ? green : red
+noneColor = color.new(color.white, 100)
+zoneExtremeLen = 5
+bullExtreme = ta.lowest(low, zoneExtremeLen)[lookbackRight]
+bullBodyExtreme = ta.lowest(math.min(open, close), zoneExtremeLen)[lookbackRight]
+bearExtreme = ta.highest(high, zoneExtremeLen)[lookbackRight]
+bearBodyExtreme = ta.highest(math.max(open, close), zoneExtremeLen)[lookbackRight]
+plFound = false
+phFound = false
+bullCond = false
+bearCond = false
+oscLBR = v[lookbackRight]
+lowLBR = low[lookbackRight]
+highLBR = high[lookbackRight]
+var bullZoneEdge = array.new_line()
+var bullZoneBase = array.new_line()
+var bearZoneEdge = array.new_line()
+var bearZoneBase = array.new_line()
+bull_mitigated = false
+bear_mitigated = false
+bull_in_fill = false
+bear_in_fill = false
+bull_touch_char = false
+bear_touch_char = false
+osc_cross_up = false
+osc_cross_down = false
+osc_cross_signal = false
+
+// Calculations
+if calculateDivergence
+    plFound := not na(ta.pivotlow(v, lookbackLeft, lookbackRight))
+    oscHL = oscLBR > ta.valuewhen(plFound, oscLBR, 1) and _inRange(plFound[1])
+    priceLL = lowLBR < ta.valuewhen(plFound, lowLBR, 1)
+    bullCond := priceLL and oscHL and plFound
+
+    phFound := not na(ta.pivothigh(v, lookbackLeft, lookbackRight))
+    oscLH = oscLBR < ta.valuewhen(phFound, oscLBR, 1) and _inRange(phFound[1])
+    priceHH = highLBR > ta.valuewhen(phFound, highLBR, 1)
+    bearCond := priceHH and oscLH and phFound
+
+if bullCond
+    xStart = bar_index - lookbackRight
+    bullEdge = line.new(xStart, bullExtreme, bar_index + 1, bullExtreme, color = green, width = 1, force_overlay = true)
+    bullBase = line.new(xStart, bullBodyExtreme, bar_index + 1, bullBodyExtreme, color = color.new(green, 80), width = 1, force_overlay = true)
+    array.unshift(bullZoneEdge, bullEdge)
+    array.unshift(bullZoneBase, bullBase)
+    linefill.new(bullZoneEdge.first(), bullZoneBase.first(), color.new(green, 82))
+
+if bearCond
+    xStart = bar_index - lookbackRight
+    bearEdge = line.new(xStart, bearExtreme, bar_index + 1, bearExtreme, color = red, width = 1, force_overlay = true)
+    bearBase = line.new(xStart, bearBodyExtreme, bar_index + 1, bearBodyExtreme, color = color.new(red, 80), width = 1, force_overlay = true)
+    array.unshift(bearZoneEdge, bearEdge)
+    array.unshift(bearZoneBase, bearBase)
+    linefill.new(bearZoneEdge.first(), bearZoneBase.first(), color.new(red, 82))
+
+if array.size(bullZoneEdge) > 0
+    for ln = array.size(bullZoneEdge) - 1 to 0
+        if ln < array.size(bullZoneEdge)
+            cL = array.get(bullZoneEdge, ln)
+            cL_ = array.get(bullZoneBase, ln)
+            yL = cL.get_y1()
+            x1 = cL.get_x1()
+            age = bar_index - x1
+            
+            sweep_price = mitigate == "body" ? close : low
+            sweep_price_prev = mitigate == "body" ? close[1] : low[1]
+            
+            remove_by_mitigation = false
+            if allow_rejection and mitigate == "body"
+                remove_by_mitigation := sweep_price < yL and sweep_price_prev < yL
+            else
+                remove_by_mitigation := sweep_price < yL
+
+            if remove_by_mitigation or age > expiry_age
+                array.remove(bullZoneEdge, ln)
+                array.remove(bullZoneBase, ln)
+                bull_mitigated := true
+            else
+                zoneTop = math.max(cL.get_y1(), cL_.get_y1())
+                zoneBot = math.min(cL.get_y1(), cL_.get_y1())
+                bull_in_fill := bull_in_fill or (high >= zoneBot and low <= zoneTop)
+                cL.set_x2(bar_index + 1)
+                cL_.set_x2(bar_index + 1)
+
+if array.size(bearZoneEdge) > 0
+    for ln = array.size(bearZoneEdge) - 1 to 0
+        if ln < array.size(bearZoneEdge)
+            cL = array.get(bearZoneEdge, ln)
+            cL_ = array.get(bearZoneBase, ln)
+            yL = cL.get_y1()
+            x1 = cL.get_x1()
+            age = bar_index - x1
+
+            sweep_price = mitigate == "body" ? close : high
+            sweep_price_prev = mitigate == "body" ? close[1] : high[1]
+
+            remove_by_mitigation = false
+            if allow_rejection and mitigate == "body"
+                remove_by_mitigation := sweep_price > yL and sweep_price_prev > yL
+            else
+                remove_by_mitigation := sweep_price > yL
+
+            if remove_by_mitigation or age > expiry_age
+                array.remove(bearZoneEdge, ln)
+                array.remove(bearZoneBase, ln)
+                bear_mitigated := true
+            else
+                zoneTop = math.max(cL.get_y1(), cL_.get_y1())
+                zoneBot = math.min(cL.get_y1(), cL_.get_y1())
+                bear_in_fill := bear_in_fill or (high >= zoneBot and low <= zoneTop)
+                cL.set_x2(bar_index + 1)
+                cL_.set_x2(bar_index + 1)
+
+bull_touch_char := bull_in_fill and close > open
+bear_touch_char := bear_in_fill and close < open
+osc_cross_up := ta.crossover(v_smooth, v_smooth[1])
+osc_cross_down := ta.crossunder(v_smooth, v_smooth[1])
+osc_cross_signal := osc_cross_up or osc_cross_down
+
+// Visuals
+plot(v, "MFI", color.new(chart.fg_color, 70))
+osc_plot = plot(v_smooth, "Oscillator", osc_col, 1)
+signal_plot = plot(v_smooth[1], "Fast Signal Line", color = color.new(osc_col, 100))
+midline_plot = plot(51, color = color.new(v_smooth > 50 ? green : red, midline_transparency), linewidth = 4, trackprice = false, histbase = 49, style = plot.style_columns)
+fill(osc_plot, signal_plot, color = color.new(osc_col, 88), title = "Fast Fill")
+plotchar(osc_cross_signal ? v_smooth[1] : na, title = "Oscillator Signal Cross Dot", char = "●", location = location.absolute, color = osc_col, size = size.tiny)
+plot(plFound ? oscLBR : na, offset = -lookbackRight, title = "Regular Bullish", linewidth = 2, color = bullCond ? green : noneColor, display = display.pane, editable = calculateDivergence)
+plotshape(bullCond ? oscLBR : na, offset = -lookbackRight, title = "Regular Bullish Label", text = "▲", style = shape.labelup, location = location.absolute, color = green, textcolor = color.white, display = display.pane, editable = calculateDivergence)
+plot(phFound ? oscLBR : na, offset = -lookbackRight, title = "Regular Bearish", linewidth = 2, color = bearCond ? red : noneColor, display = display.pane, editable = calculateDivergence)
+plotshape(bearCond ? oscLBR : na, offset = -lookbackRight, title = "Regular Bearish Label", text = "▼", style = shape.labeldown, location = location.absolute, color = red, textcolor = color.white, display = display.pane, editable = calculateDivergence)
+plot(plFound ? lowLBR : na, offset = -lookbackRight, title = "Regular Bullish Price", linewidth = 2, color = bullCond ? green : noneColor, editable = calculateDivergence, force_overlay = true)
+plot(phFound ? highLBR : na, offset = -lookbackRight, title = "Regular Bearish Price", linewidth = 2, color = bearCond ? red : noneColor, editable = calculateDivergence, force_overlay = true)
+plotshape(bullCond, offset = -lookbackRight, title = "Regular Bullish Price Label", text = "▲", style = shape.labelup, location = location.belowbar, color = green, textcolor = color.white, editable = calculateDivergence, force_overlay = true)
+plotshape(bearCond, offset = -lookbackRight, title = "Regular Bearish Price Label", text = "▼", style = shape.labeldown, location = location.abovebar, color = red, textcolor = color.white, editable = calculateDivergence, force_overlay = true)
+plotchar(bull_touch_char, title = "Bullish Zone Fill Touch", char = "▲", location = location.belowbar, color = green, size = size.tiny, force_overlay = true)
+plotchar(bear_touch_char, title = "Bearish Zone Fill Touch", char = "▼", location = location.abovebar, color = red, size = size.tiny, force_overlay = true)
+
+// Alerts
+alertcondition(bullCond, title = "Regular Bullish Divergence", message = "Found a new Regular Bullish Divergence, `Pivot Lookback Right` number of bars to the left of the current bar.")
+alertcondition(bearCond, title = "Regular Bearish Divergence", message = "Found a new Regular Bearish Divergence, `Pivot Lookback Right` number of bars to the left of the current bar.")
+alertcondition(bull_mitigated, title = "Bullish Zone Mitigated", message = "A bullish liquidity zone was mitigated or expired.")
+alertcondition(bear_mitigated, title = "Bearish Zone Mitigated", message = "A bearish liquidity zone was mitigated or expired.")
+alertcondition(bull_touch_char, title = "Bullish Zone Touch Triangle", message = "Bullish zone touch triangle printed.")
+alertcondition(bear_touch_char, title = "Bearish Zone Touch Triangle", message = "Bearish zone touch triangle printed.")
+alertcondition(osc_cross_up, title = "Oscillator Cross Up", message = "Oscillator crossed above its signal line.")
+alertcondition(osc_cross_down, title = "Oscillator Cross Down", message = "Oscillator crossed below its signal line.")
+alertcondition(osc_cross_signal, title = "Oscillator Cross Signal", message = "Oscillator crossed its signal line.")

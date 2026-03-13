@@ -39,12 +39,15 @@
             "htf_2_use_internal": true
         },
         "sell": {
-            "use_dynamic_stoploss": false,
+            "use_dynamic_stoploss": true,
             "tp1_enabled": true,
             "tp1_pct": 0.025,
             "tp1_amount": 50.0,
             "move_be_at_tp1": true,
-            "be_trigger_pct": 0.025,
+            "be_trigger_pct": 0.0,
+            "use_dynamic_tp_adj": true,
+            "tp_adj_min_rvol": 1.5,
+            "tp_adj_margin": 0.80,
             "exit_on_internal_choch": true,
             "exit_on_swing_choch": true
         },
