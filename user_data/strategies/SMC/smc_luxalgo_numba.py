@@ -696,6 +696,33 @@ class SMCLuxAlgoNumba:
         df['internal_sweep_bearish'] = int_sweep_bear
         df['swing_sweep_bullish'] = sw_sweep_bull
         df['swing_sweep_bearish'] = sw_sweep_bear
-        
+
+        # ── Raw event arrays (for multi-zone tracking in strategy layer) ──
+        # These mark the bar where each new zone was CONFIRMED.
+        # NaN → no event that bar.  Strategy uses these to rebuild zone lists.
+        df['ob_bull_top_raw'] = np.where(~np.isnan(ob_bt_raw), ob_bt_raw, 0.0)
+        df['ob_bull_btm_raw'] = np.where(~np.isnan(ob_bb_raw), ob_bb_raw, 0.0)
+        df['ob_bull_vol_raw'] = np.where(ob_bull_vol_raw > 0, ob_bull_vol_raw, 0.0)
+        df['ob_bear_top_raw'] = np.where(~np.isnan(ob_bet_raw), ob_bet_raw, 0.0)
+        df['ob_bear_btm_raw'] = np.where(~np.isnan(ob_beb_raw), ob_beb_raw, 0.0)
+        df['ob_bear_vol_raw'] = np.where(ob_bear_vol_raw > 0, ob_bear_vol_raw, 0.0)
+
+        df['fvg_bull_top_raw'] = np.where(~np.isnan(fvg_bt_raw), fvg_bt_raw, 0.0)
+        df['fvg_bull_btm_raw'] = np.where(~np.isnan(fvg_bb_raw), fvg_bb_raw, 0.0)
+        df['fvg_bear_top_raw'] = np.where(~np.isnan(fvg_bet_raw), fvg_bet_raw, 0.0)
+        df['fvg_bear_btm_raw'] = np.where(~np.isnan(fvg_beb_raw), fvg_beb_raw, 0.0)
+
+        # FVG impulse volume: candle i-1 (the middle bar of the 3-bar gap pattern)
+        fvg_bull_ivol = np.zeros(self.n)
+        fvg_bear_ivol = np.zeros(self.n)
+        vol_arr = self.volume
+        for idx in range(1, self.n):
+            if not np.isnan(fvg_bt_raw[idx]) and fvg_bt_raw[idx] > 0:
+                fvg_bull_ivol[idx] = vol_arr[idx - 1]
+            if not np.isnan(fvg_bet_raw[idx]) and fvg_bet_raw[idx] > 0:
+                fvg_bear_ivol[idx] = vol_arr[idx - 1]
+        df['fvg_bull_impulse_vol_raw'] = fvg_bull_ivol
+        df['fvg_bear_impulse_vol_raw'] = fvg_bear_ivol
+
         return df
 

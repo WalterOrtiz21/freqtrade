@@ -28,6 +28,7 @@ import logging
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
+from pathlib import Path
 from pandas import DataFrame
 from typing import Optional, Dict, List
 import pickle
@@ -203,6 +204,21 @@ class SMCWithMLLuxAlgo(IStrategy):
     circuit_breaker_limit = IntParameter(
         2, 10, default=3, space="custom", optimize=False
     )  # Max SL hits
+
+    # ── Entry Filters (context-based, driven by backtest analysis) ────────────
+    # All default=True to apply the filters found in analysis.
+    # Set to False in JSON to disable individually.
+    filter_block_kz_ldn             = BooleanParameter(default=False, space="custom", optimize=False)
+    filter_block_off_hours          = BooleanParameter(default=False, space="custom", optimize=False)
+    filter_block_sweep              = BooleanParameter(default=False, space="custom", optimize=False)
+    filter_block_fvg_stale_htf_part = BooleanParameter(default=False, space="custom", optimize=False)
+    filter_friday_reduce_stake      = BooleanParameter(default=False, space="custom", optimize=False)
+    filter_friday_stake_ratio       = DecimalParameter(
+        0.1, 1.0, default=0.5, decimals=1, space="custom", optimize=False
+    )  # Fraction of normal stake on Fridays
+
+    # ── Indicator Export (saves parquet per pair under analisis/) ─────────────
+    export_indicator_data = BooleanParameter(default=False, space="custom", optimize=False)
 
     # ==========================================================================
     # ML PARAMETERS (Placeholder)
@@ -461,18 +477,19 @@ class SMCWithMLLuxAlgo(IStrategy):
         for col in signals.columns:
             dataframe[col] = signals[col].values
 
+        # --- vol_sma: must be computed BEFORE multi-zone tracker ─────────
+        # (tracker needs it to compute per-zone RVOL at creation time)
+        dataframe["vol_sma"] = ta.SMA(dataframe["volume"], timeperiod=self.vol_sma_period.value)
+        dataframe["vol_sma"] = dataframe["vol_sma"].replace(0, np.nan).bfill().ffill()
+
         # --- FVG ATR FILTER (BigBeluga Style) ---
         # Zero out FVGs that are smaller than Threshold * ATR
         # Using ATR(200) to match BigBeluga's volatility reference for "noise".
         if self.fvg_atr_threshold.value > 0:
-            # Calculate ATR(200) locally for this filter
             atr_200 = ta.ATR(dataframe, timeperiod=200)
-            # Handle potential NaNs at start of data
             atr_200 = atr_200.bfill().ffill()
-
             fvg_threshold = atr_200 * self.fvg_atr_threshold.value
 
-            # Bullish FVGs
             bull_range = (
                 dataframe["active_bullish_fvg_top"] - dataframe["active_bullish_fvg_bottom"]
             )
@@ -483,7 +500,6 @@ class SMCWithMLLuxAlgo(IStrategy):
                 mask_small_bull, ["active_bullish_fvg_top", "active_bullish_fvg_bottom"]
             ] = 0
 
-            # Bearish FVGs
             bear_range = (
                 dataframe["active_bearish_fvg_top"] - dataframe["active_bearish_fvg_bottom"]
             )
@@ -494,28 +510,22 @@ class SMCWithMLLuxAlgo(IStrategy):
                 mask_small_bear, ["active_bearish_fvg_top", "active_bearish_fvg_bottom"]
             ] = 0
 
-        # --- LOOKAHEAD BIAS FIX ---
-        # Zone columns (OB/FVG) must be shifted by 1 to avoid using zones
-        # that are created by the CURRENT candle for entry on that same candle.
-        # We evaluate entry at candle close, but should only use zones that
-        # existed BEFORE the candle started.
+        # --- MULTI-ZONE CONTEXT (new features, shift applied inside) ─────
+        dataframe = self._build_multi_zone_context(dataframe)
+
+        # --- LOOKAHEAD BIAS FIX (existing active_* columns) ──────────────
+        # Multi-zone columns already shifted inside _build_multi_zone_context.
         zone_cols = [c for c in dataframe.columns if c.startswith("active_")]
         for col in zone_cols:
             dataframe[col] = dataframe[col].shift(1).fillna(0)
 
-        # --- RVOL CALCULATION FOR OBs (BigBeluga Style) ---
-        # The volume output array stores the exact volume of the candle that created the OB.
-        # RVOL = Volume del OB / Volumen Promedio Diario (o SMA Period)
-        dataframe["vol_sma"] = ta.SMA(dataframe["volume"], timeperiod=self.vol_sma_period.value)
-        dataframe["vol_sma"] = dataframe["vol_sma"].replace(0, np.nan)  # Prevent division by zero
-
-        # We calculate the Relative Volume (RVOL) multiplier of the Order Block
-        dataframe["bull_ob_rvol"] = dataframe["active_bullish_ob_vol"] / dataframe["vol_sma"]
-        dataframe["bear_ob_rvol"] = dataframe["active_bearish_ob_vol"] / dataframe["vol_sma"]
-
-        # Replace NaNs with 0 (for early candles where SMA is not yet formed)
-        dataframe["bull_ob_rvol"] = dataframe["bull_ob_rvol"].fillna(0)
-        dataframe["bear_ob_rvol"] = dataframe["bear_ob_rvol"].fillna(0)
+        # --- RVOL for single-zone OBs (uses already-shifted active_*_vol) -
+        dataframe["bull_ob_rvol"] = (
+            dataframe["active_bullish_ob_vol"] / dataframe["vol_sma"]
+        ).fillna(0)
+        dataframe["bear_ob_rvol"] = (
+            dataframe["active_bearish_ob_vol"] / dataframe["vol_sma"]
+        ).fillna(0)
 
         # --- 2. HTF Calculations (All configured timeframes) ---
         if self.dp:
@@ -527,7 +537,6 @@ class SMCWithMLLuxAlgo(IStrategy):
                         logger.warning(f"No data for {metadata['pair']} {htf}")
                         continue
 
-                    # Calculate SMC on HTF
                     smc_htf = SMCLuxAlgo(
                         inf_htf,
                         internal_length=self.internal_length.value,
@@ -535,37 +544,51 @@ class SMCWithMLLuxAlgo(IStrategy):
                     )
                     signals_htf = smc_htf.get_signals()
 
-                    # Create column names with timeframe prefix
-                    # e.g., '4h_swing_trend', '1h_swing_trend'
-                    swing_col = f"{htf}_swing_trend"
+                    swing_col    = f"{htf}_swing_trend"
                     internal_col = f"{htf}_internal_trend"
+                    sh_col       = f"{htf}_swing_high"
+                    sl_col       = f"{htf}_swing_low"
 
-                    inf_htf[swing_col] = signals_htf["swing_trend"]
+                    inf_htf[swing_col]    = signals_htf["swing_trend"]
                     inf_htf[internal_col] = signals_htf["internal_trend"]
+                    # swing_high/low carry the current HTF trading range (used for
+                    # HTF premium/discount). Not zone columns — no shift(1) needed.
+                    inf_htf[sh_col] = signals_htf["swing_high"]
+                    inf_htf[sl_col] = signals_htf["swing_low"]
 
-                    # Prepare for merge
-                    inf_htf = inf_htf[["date", swing_col, internal_col]].copy()
-
-                    # Merge
+                    inf_htf = inf_htf[
+                        ["date", swing_col, internal_col, sh_col, sl_col]
+                    ].copy()
                     dataframe = pd.merge(dataframe, inf_htf, on="date", how="left")
-                    dataframe[swing_col] = dataframe[swing_col].ffill()
+                    dataframe[swing_col]    = dataframe[swing_col].ffill()
                     dataframe[internal_col] = dataframe[internal_col].ffill()
+                    dataframe[sh_col]       = dataframe[sh_col].ffill()
+                    dataframe[sl_col]       = dataframe[sl_col].ffill()
 
                 except Exception as e:
                     logger.error(f"Error processing HTF {htf}: {e}")
 
-        # Add ML Features (Context & Technicals)
+        # --- 3. Enrichment layers (new features) ─────────────────────────
+        dataframe = self._add_pdh_pdl(dataframe, metadata)
+        dataframe = self._add_premium_discount(dataframe)
+        dataframe = self._add_session_context(dataframe)
+        dataframe = self._add_liquidity_pools(dataframe)
+
+        # --- 4. ML Features (Context & Technicals) ───────────────────────
         dataframe = self._add_ml_features(dataframe)
 
         # Log summary
-        if (
-            self.dp and self.enable_logging.value
-        ):  # Only log if not backtesting or sparse (controlled by param)
+        if self.dp and self.enable_logging.value:
             logger.info(
                 f"SMC LuxAlgo indicators for {metadata['pair']}: "
                 f"MTF Trend Valid={dataframe['swing_trend'].notna().sum()}/{len(dataframe)} "
-                f"HTF Trend Valid={dataframe.get('4h_swing_trend', pd.Series()).notna().sum()}/{len(dataframe)}"
+                f"HTF Trend Valid={dataframe.get('4h_swing_trend', pd.Series()).notna().sum()}/{len(dataframe)} "
+                f"MultiZone Bull OBs={dataframe['n_active_bull_obs'].max():.0f} max active"
             )
+
+        # Export indicator snapshot for post-analysis (if enabled)
+        if self.export_indicator_data.value:
+            self._save_indicator_parquet(dataframe, metadata["pair"])
 
         return dataframe
 
@@ -573,151 +596,175 @@ class SMCWithMLLuxAlgo(IStrategy):
         """
         Generate consistent ML features for both Training and Inference.
         Must match logic in train_smc_model.py.
+
+        All new columns are accumulated in a dict and written via a single
+        pd.concat to avoid the PerformanceWarning from repeated df[col] inserts.
         """
+        nd: dict = {}   # new_data — all columns go here, df stays read-only
+
         # --- 1. Technical Indicators (Momentum & Volatility) ---
 
-        # RSI
-        df["rsi"] = ta.RSI(df["close"], timeperiod=14)
-        df["ml_rsi"] = df["rsi"] / 100.0
+        rsi     = ta.RSI(df["close"], timeperiod=14)
+        nd["rsi"]    = rsi
+        nd["ml_rsi"] = rsi / 100.0
 
-        # ADX (Trend Strength) - NEW
-        df["adx"] = ta.ADX(df["high"], df["low"], df["close"], timeperiod=14)
-        df["ml_adx"] = df["adx"] / 100.0
+        adx          = ta.ADX(df["high"], df["low"], df["close"], timeperiod=14)
+        nd["adx"]    = adx
+        nd["ml_adx"] = adx / 100.0
 
-        # CCI (Cyclical) - NEW
-        df["cci"] = ta.CCI(df["high"], df["low"], df["close"], timeperiod=20)
-        df["ml_cci"] = df["cci"] / 300.0  # Normalize -1 to 1
+        cci          = ta.CCI(df["high"], df["low"], df["close"], timeperiod=20)
+        nd["cci"]    = cci
+        nd["ml_cci"] = cci / 300.0
 
-        # WaveTrend (Oscillator) - NEW
-        n1 = 10
-        n2 = 21
-        ap = (df["high"] + df["low"] + df["close"]) / 3
+        # WaveTrend oscillator
+        n1  = 10
+        n2  = 21
+        ap  = (df["high"] + df["low"] + df["close"]) / 3
         esa = ta.EMA(ap, timeperiod=n1)
-        d = ta.EMA((ap - esa).abs(), timeperiod=n1)
-        ci = (ap - esa) / (0.015 * d)
-        df["wt1"] = ta.EMA(ci, timeperiod=n2)
-        df["wt2"] = ta.SMA(df["wt1"], timeperiod=4)
+        d_  = ta.EMA((ap - esa).abs(), timeperiod=n1)
+        ci  = (ap - esa) / (0.015 * d_)
+        wt1 = ta.EMA(ci, timeperiod=n2)
+        wt2 = ta.SMA(wt1, timeperiod=4)
+        nd["wt1"]        = wt1
+        nd["wt2"]        = wt2
+        nd["ml_wt1"]     = wt1 / 100.0
+        nd["ml_wt2"]     = wt2 / 100.0
+        nd["ml_wt_diff"] = (wt1 - wt2) / 100.0
 
-        df["ml_wt1"] = df["wt1"] / 100.0
-        df["ml_wt2"] = df["wt2"] / 100.0
-        df["ml_wt_diff"] = (df["wt1"] - df["wt2"]) / 100.0
+        ema_50  = ta.EMA(df["close"], timeperiod=50)
+        ema_200 = ta.EMA(df["close"], timeperiod=200)
+        nd["ema_50"]         = ema_50
+        nd["ema_200"]        = ema_200
+        nd["ml_dist_ema50"]  = (df["close"] - ema_50)  / ema_50
+        nd["ml_dist_ema200"] = (df["close"] - ema_200) / ema_200
 
-        # EMAs
-        df["ema_50"] = ta.EMA(df["close"], timeperiod=50)
-        df["ema_200"] = ta.EMA(df["close"], timeperiod=200)
-        df["ml_dist_ema50"] = (df["close"] - df["ema_50"]) / df["ema_50"]
-        df["ml_dist_ema200"] = (df["close"] - df["ema_200"]) / df["ema_200"]
+        atr          = ta.ATR(df, timeperiod=14)
+        nd["atr"]    = atr
+        nd["ml_atr_pct"] = atr / df["close"]
 
-        # ATR
-        df["atr"] = ta.ATR(df, timeperiod=14)
-        df["ml_atr_pct"] = df["atr"] / df["close"]
-
-        # Volatility Filter (Lorentzian Style: atr_1 > atr_10)
-        atr_1 = ta.ATR(df, timeperiod=1)
+        atr_1  = ta.ATR(df, timeperiod=1)
         atr_10 = ta.ATR(df, timeperiod=10)
-        df["ml_volatility_high"] = (atr_1 > atr_10).astype(float)
+        nd["ml_volatility_high"] = (atr_1 > atr_10).astype(float)
 
-        # Volume
-        df["volume_ma"] = ta.SMA(df["volume"], timeperiod=20)
-        df["ml_volume_ratio"] = df["volume"] / df["volume_ma"].replace(0, 1)
+        vol_ma = ta.SMA(df["volume"], timeperiod=20)
+        nd["volume_ma"]       = vol_ma
+        nd["ml_volume_ratio"] = df["volume"] / np.where(vol_ma == 0, 1, vol_ma)
 
-        # RSI(9) - Feature 5 from Lorentzian (separate from RSI 14)
-        df["rsi_9"] = ta.RSI(df["close"], timeperiod=9)
-        df["ml_rsi_9"] = df["rsi_9"] / 100.0
+        rsi_9         = ta.RSI(df["close"], timeperiod=9)
+        nd["rsi_9"]   = rsi_9
+        nd["ml_rsi_9"] = rsi_9 / 100.0
 
         # --- 2. SMC Context ---
 
-        # Bars Since Signals
         def bars_since(series):
             return series.cumsum().groupby(series.cumsum()).cumcount()
 
-        df["ml_bars_since_int_bull_choch"] = bars_since(df["internal_choch_bullish"])
-        df["ml_bars_since_int_bear_choch"] = bars_since(df["internal_choch_bearish"])
+        nd["ml_bars_since_int_bull_choch"] = bars_since(df["internal_choch_bullish"])
+        nd["ml_bars_since_int_bear_choch"] = bars_since(df["internal_choch_bearish"])
 
-        # Trend and Swing
-        df["ml_swing_trend"] = df["swing_trend"]
+        nd["ml_swing_trend"] = df["swing_trend"]
 
-        # Zone Interaction
-        df["ml_in_bull_ob"] = (
+        nd["ml_in_bull_ob"] = (
             (df["active_bullish_ob_top"] > 0) & (df["low"] <= df["active_bullish_ob_top"])
         ).astype(int)
-        df["ml_in_bear_ob"] = (
+        nd["ml_in_bear_ob"] = (
             (df["active_bearish_ob_top"] > 0) & (df["high"] >= df["active_bearish_ob_bottom"])
         ).astype(int)
 
-        # Liquidity Sweeps (Rolling window for ML context)
         if "internal_sweep_bullish" in df.columns:
-            df["ml_recent_bull_sweep"] = (
+            nd["ml_recent_bull_sweep"] = (
                 df["internal_sweep_bullish"].rolling(3, min_periods=1).max().fillna(0)
             )
-            df["ml_recent_bear_sweep"] = (
+            nd["ml_recent_bear_sweep"] = (
                 df["internal_sweep_bearish"].rolling(3, min_periods=1).max().fillna(0)
             )
         else:
-            df["ml_recent_bull_sweep"] = 0
-            df["ml_recent_bear_sweep"] = 0
+            nd["ml_recent_bull_sweep"] = 0
+            nd["ml_recent_bear_sweep"] = 0
 
         # --- 3. Opposing Zone Obstacle Features ---
-        # Detects if there is a strong OB/FVG blocking the path to TP.
-        # e.g. Long entry with bullish CHoCH + FVG touch, but a high-RVOL bearish OB
-        # sits 1% above → price likely reverses before reaching TP1.
-        #
-        # For LONGS: obstacle = bearish zone ABOVE price (resistance)
-        # For SHORTS: obstacle = bullish zone BELOW price (support)
-        # The model uses 'direction' feature to interpret these correctly.
+        NO_ZONE_DIST = 0.5
 
-        NO_ZONE_DIST = 0.5  # Fill value when no zone exists (effectively "no obstacle")
-
-        # -- Bearish OB above price (resistance for longs) --
-        bear_ob_active = df["active_bearish_ob_bottom"] > 0
-        bear_ob_above = bear_ob_active & (df["active_bearish_ob_bottom"] > df["close"])
-        df["ml_bear_ob_above_dist"] = np.where(
+        bear_ob_above = (df["active_bearish_ob_bottom"] > 0) & (
+            df["active_bearish_ob_bottom"] > df["close"]
+        )
+        ml_bear_ob_above_dist = np.where(
             bear_ob_above,
             (df["active_bearish_ob_bottom"] - df["close"]) / df["close"],
             NO_ZONE_DIST,
         )
-        df["ml_bear_ob_above_rvol"] = np.where(bear_ob_above, df["bear_ob_rvol"], 0.0)
+        ml_bear_ob_above_rvol = np.where(bear_ob_above, df["bear_ob_rvol"], 0.0)
+        nd["ml_bear_ob_above_dist"] = ml_bear_ob_above_dist
+        nd["ml_bear_ob_above_rvol"] = ml_bear_ob_above_rvol
 
-        # -- Bearish FVG above price (resistance for longs) --
-        bear_fvg_active = df["active_bearish_fvg_bottom"] > 0
-        bear_fvg_above = bear_fvg_active & (df["active_bearish_fvg_bottom"] > df["close"])
-        df["ml_bear_fvg_above_dist"] = np.where(
+        bear_fvg_above = (df["active_bearish_fvg_bottom"] > 0) & (
+            df["active_bearish_fvg_bottom"] > df["close"]
+        )
+        ml_bear_fvg_above_dist = np.where(
             bear_fvg_above,
             (df["active_bearish_fvg_bottom"] - df["close"]) / df["close"],
             NO_ZONE_DIST,
         )
+        nd["ml_bear_fvg_above_dist"] = ml_bear_fvg_above_dist
 
-        # -- Bullish OB below price (support for shorts) --
-        bull_ob_active = df["active_bullish_ob_top"] > 0
-        bull_ob_below = bull_ob_active & (df["active_bullish_ob_top"] < df["close"])
-        df["ml_bull_ob_below_dist"] = np.where(
-            bull_ob_below, (df["close"] - df["active_bullish_ob_top"]) / df["close"], NO_ZONE_DIST
+        bull_ob_below = (df["active_bullish_ob_top"] > 0) & (
+            df["active_bullish_ob_top"] < df["close"]
         )
-        df["ml_bull_ob_below_rvol"] = np.where(bull_ob_below, df["bull_ob_rvol"], 0.0)
-
-        # -- Bullish FVG below price (support for shorts) --
-        bull_fvg_active = df["active_bullish_fvg_top"] > 0
-        bull_fvg_below = bull_fvg_active & (df["active_bullish_fvg_top"] < df["close"])
-        df["ml_bull_fvg_below_dist"] = np.where(
-            bull_fvg_below, (df["close"] - df["active_bullish_fvg_top"]) / df["close"], NO_ZONE_DIST
+        ml_bull_ob_below_dist = np.where(
+            bull_ob_below,
+            (df["close"] - df["active_bullish_ob_top"]) / df["close"],
+            NO_ZONE_DIST,
         )
+        ml_bull_ob_below_rvol = np.where(bull_ob_below, df["bull_ob_rvol"], 0.0)
+        nd["ml_bull_ob_below_dist"] = ml_bull_ob_below_dist
+        nd["ml_bull_ob_below_rvol"] = ml_bull_ob_below_rvol
 
-        # -- Aggregated: nearest obstacle in each direction --
-        df["ml_min_resist_above_dist"] = df[
-            ["ml_bear_ob_above_dist", "ml_bear_fvg_above_dist"]
-        ].min(axis=1)
-        df["ml_max_resist_above_rvol"] = df["ml_bear_ob_above_rvol"]  # OB has RVOL; FVG does not
+        bull_fvg_below = (df["active_bullish_fvg_top"] > 0) & (
+            df["active_bullish_fvg_top"] < df["close"]
+        )
+        ml_bull_fvg_below_dist = np.where(
+            bull_fvg_below,
+            (df["close"] - df["active_bullish_fvg_top"]) / df["close"],
+            NO_ZONE_DIST,
+        )
+        nd["ml_bull_fvg_below_dist"] = ml_bull_fvg_below_dist
 
-        df["ml_min_support_below_dist"] = df[
-            ["ml_bull_ob_below_dist", "ml_bull_fvg_below_dist"]
-        ].min(axis=1)
-        df["ml_max_support_below_rvol"] = df["ml_bull_ob_below_rvol"]
+        # Aggregated obstacle distances
+        nd["ml_min_resist_above_dist"] = np.minimum(ml_bear_ob_above_dist, ml_bear_fvg_above_dist)
+        nd["ml_max_resist_above_rvol"] = ml_bear_ob_above_rvol
+        nd["ml_min_support_below_dist"] = np.minimum(ml_bull_ob_below_dist, ml_bull_fvg_below_dist)
+        nd["ml_max_support_below_rvol"] = ml_bull_ob_below_rvol
 
-        # Fill NaNs created by indicators
-        feature_cols = [c for c in df.columns if c.startswith("ml_")]
-        df[feature_cols] = df[feature_cols].fillna(0)
+        # --- 4. Single concat + fillna -----------------------------------------
+        new_df = pd.DataFrame(nd, index=df.index).fillna(0)
+        return pd.concat([df, new_df], axis=1)
 
-        return df
+    # ── Indicator Export ──────────────────────────────────────────────────────
+
+    _EXPORT_COLS = [
+        "bull_ob_0_rvol", "bear_ob_0_rvol",
+        "bull_fvg_0_rvol", "bear_fvg_0_rvol",
+        "bull_fvg_0_filled_pct", "bear_fvg_0_filled_pct",
+        "bull_ob_0_touches", "bear_ob_0_touches",
+        "n_active_bull_obs", "n_active_bear_obs",
+        "htf_range_position_pct", "daily_range_position_pct",
+    ]
+
+    def _save_indicator_parquet(self, dataframe: DataFrame, pair: str) -> None:
+        """Save a snapshot of key indicator columns to parquet for post-analysis.
+
+        File: user_data/strategies/SMC/analisis/indicators_<PAIR>.parquet
+        Key: date (UTC, matching the signal candle).
+        analyze_backtest.py joins on pair + (open_date - 1 timeframe).
+        """
+        out_dir = Path("user_data/strategies/SMC/analisis")
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        safe_pair = pair.replace("/", "_").replace(":", "_")
+        out_path  = out_dir / f"indicators_{safe_pair}.parquet"
+
+        cols = ["date"] + [c for c in self._EXPORT_COLS if c in dataframe.columns]
+        dataframe[cols].to_parquet(out_path, index=False)
 
     def _apply_zone_memory(self, dataframe: DataFrame, smc: SMCLuxAlgo) -> DataFrame:
         """Apply zone memory for OBs and FVGs."""
@@ -771,6 +818,648 @@ class SMCWithMLLuxAlgo(IStrategy):
                             dataframe.loc[dataframe.index[i], "active_bearish_fvg_bottom"] = (
                                 fvg.bottom
                             )
+
+        return dataframe
+
+    # ==========================================================================
+    # MULTI-ZONE CONTEXT  (Priority 1 & 3 features)
+    # ==========================================================================
+
+    # Slots exported per direction
+    _MZ_MAX_OBS  = 10
+    _MZ_MAX_FVGS =  5
+    _MZ_MAX_BRKS =  3
+
+    def _build_multi_zone_context(self, dataframe: DataFrame) -> DataFrame:
+        """
+        Pure-Python zone tracker built on top of the raw event arrays exposed
+        by smc_luxalgo_numba.get_signals().
+
+        For each bar it maintains running lists of active zones and writes
+        indexed columns (bull_ob_0_top … bull_ob_9_top, etc.).
+
+        Zone quality per slot (k=0 → most recent):
+          OB:  top, bottom, rvol, age_bars, touches, mitigated (0/1)
+          FVG: top, bottom, rvol, filled_pct, in_ob (0/1)
+          BRK: top, bottom
+
+        NOTE: shift(1) is applied to all new columns at the end so they obey
+        the same lookahead-bias rule as the existing active_* columns.
+        """
+        # Guard: if raw columns are missing, return silently
+        if "ob_bull_top_raw" not in dataframe.columns:
+            logger.warning("Multi-zone: raw event columns not found – skipping.")
+            return dataframe
+
+        MAX_OBS  = self._MZ_MAX_OBS
+        MAX_FVGS = self._MZ_MAX_FVGS
+        MAX_BRKS = self._MZ_MAX_BRKS
+
+        n      = len(dataframe)
+        high   = dataframe["high"].values
+        low    = dataframe["low"].values
+        close  = dataframe["close"].values
+        vs_arr = dataframe["vol_sma"].values  # already computed upstream
+
+        ob_bt  = dataframe["ob_bull_top_raw"].values
+        ob_bb  = dataframe["ob_bull_btm_raw"].values
+        ob_bv  = dataframe["ob_bull_vol_raw"].values
+        ob_et  = dataframe["ob_bear_top_raw"].values
+        ob_eb  = dataframe["ob_bear_btm_raw"].values
+        ob_ev  = dataframe["ob_bear_vol_raw"].values
+
+        fvg_bt  = dataframe["fvg_bull_top_raw"].values
+        fvg_bb  = dataframe["fvg_bull_btm_raw"].values
+        fvg_biv = dataframe["fvg_bull_impulse_vol_raw"].values
+        fvg_et  = dataframe["fvg_bear_top_raw"].values
+        fvg_eb  = dataframe["fvg_bear_btm_raw"].values
+        fvg_eiv = dataframe["fvg_bear_impulse_vol_raw"].values
+
+        # ── Output arrays (n × MAX_*) ──────────────────────────────────────
+        bull_ob_top  = np.zeros((n, MAX_OBS)); bull_ob_btm  = np.zeros((n, MAX_OBS))
+        bull_ob_rvol = np.zeros((n, MAX_OBS)); bull_ob_age  = np.zeros((n, MAX_OBS))
+        bull_ob_tch  = np.zeros((n, MAX_OBS)); bull_ob_mit  = np.zeros((n, MAX_OBS))
+
+        bear_ob_top  = np.zeros((n, MAX_OBS)); bear_ob_btm  = np.zeros((n, MAX_OBS))
+        bear_ob_rvol = np.zeros((n, MAX_OBS)); bear_ob_age  = np.zeros((n, MAX_OBS))
+        bear_ob_tch  = np.zeros((n, MAX_OBS)); bear_ob_mit  = np.zeros((n, MAX_OBS))
+
+        bull_fvg_top  = np.zeros((n, MAX_FVGS)); bull_fvg_btm    = np.zeros((n, MAX_FVGS))
+        bull_fvg_rvol = np.zeros((n, MAX_FVGS)); bull_fvg_filled = np.zeros((n, MAX_FVGS))
+        bull_fvg_inob = np.zeros((n, MAX_FVGS))
+
+        bear_fvg_top  = np.zeros((n, MAX_FVGS)); bear_fvg_btm    = np.zeros((n, MAX_FVGS))
+        bear_fvg_rvol = np.zeros((n, MAX_FVGS)); bear_fvg_filled = np.zeros((n, MAX_FVGS))
+        bear_fvg_inob = np.zeros((n, MAX_FVGS))
+
+        bull_brk_top = np.zeros((n, MAX_BRKS)); bull_brk_btm = np.zeros((n, MAX_BRKS))
+        bear_brk_top = np.zeros((n, MAX_BRKS)); bear_brk_btm = np.zeros((n, MAX_BRKS))
+
+        # ── In-flight zone state (list of dicts) ────────────────────────────
+        # Each dict: top, bottom, rvol, bar_idx, age, touches, inside,
+        #            mid_touched, min_low (FVG fill tracker), max_high
+        act_bull_obs  = []
+        act_bear_obs  = []
+        act_bull_fvgs = []
+        act_bear_fvgs = []
+        act_bull_brks = []   # created when bear OB is broken upward
+        act_bear_brks = []   # created when bull OB is broken downward
+
+        for i in range(n):
+            c  = close[i]
+            h  = high[i]
+            l  = low[i]
+            vs = vs_arr[i] if (vs_arr[i] > 0 and not np.isnan(vs_arr[i])) else 1.0
+
+            # ── 1. Update existing zones ──────────────────────────────────
+
+            # --- Bull OBs (support) ---
+            next_bull_obs = []
+            for z in act_bull_obs:
+                if c < z["bottom"]:
+                    # Invalidated → flip to bearish breaker
+                    act_bear_brks.append({"top": z["top"], "bottom": z["bottom"]})
+                    if len(act_bear_brks) > MAX_BRKS:
+                        act_bear_brks = act_bear_brks[-MAX_BRKS:]
+                else:
+                    was_inside = z["inside"]
+                    z["inside"] = (l <= z["top"]) and (c >= z["bottom"])
+                    if z["inside"]:
+                        if not was_inside:
+                            z["touches"] += 1
+                        mid = (z["top"] + z["bottom"]) / 2
+                        if l <= mid:
+                            z["mid_touched"] = True
+                    z["age"] = i - z["bar_idx"]
+                    next_bull_obs.append(z)
+            act_bull_obs = next_bull_obs
+
+            # --- Bear OBs (resistance) ---
+            next_bear_obs = []
+            for z in act_bear_obs:
+                if c > z["top"]:
+                    # Invalidated → flip to bullish breaker
+                    act_bull_brks.append({"top": z["top"], "bottom": z["bottom"]})
+                    if len(act_bull_brks) > MAX_BRKS:
+                        act_bull_brks = act_bull_brks[-MAX_BRKS:]
+                else:
+                    was_inside = z["inside"]
+                    z["inside"] = (h >= z["bottom"]) and (c <= z["top"])
+                    if z["inside"]:
+                        if not was_inside:
+                            z["touches"] += 1
+                        mid = (z["top"] + z["bottom"]) / 2
+                        if h >= mid:
+                            z["mid_touched"] = True
+                    z["age"] = i - z["bar_idx"]
+                    next_bear_obs.append(z)
+            act_bear_obs = next_bear_obs
+
+            # --- Bull FVGs (support gap; price enters from above) ---
+            # fvg_bull: bottom=high[i-2], top=low[i] → zone BELOW price, fills as price retraces down
+            next_bull_fvgs = []
+            for z in act_bull_fvgs:
+                if c < z["bottom"]:
+                    pass  # fully broken → discard
+                else:
+                    if l <= z["top"]:
+                        # Price entered the gap (came down from above)
+                        deepest = min(l, z.get("min_low", z["top"]))
+                        z["min_low"] = deepest
+                        gap = z["top"] - z["bottom"]
+                        z["filled_pct"] = (z["top"] - deepest) / gap if gap > 0 else 0.0
+                        z["filled_pct"] = min(1.0, z["filled_pct"])
+                    z["age"] = i - z["bar_idx"]
+                    next_bull_fvgs.append(z)
+            act_bull_fvgs = next_bull_fvgs
+
+            # --- Bear FVGs (resistance gap; price enters from below) ---
+            next_bear_fvgs = []
+            for z in act_bear_fvgs:
+                if c > z["top"]:
+                    pass  # fully broken → discard
+                else:
+                    if h >= z["bottom"]:
+                        deepest = max(h, z.get("max_high", z["bottom"]))
+                        z["max_high"] = deepest
+                        gap = z["top"] - z["bottom"]
+                        z["filled_pct"] = (deepest - z["bottom"]) / gap if gap > 0 else 0.0
+                        z["filled_pct"] = min(1.0, z["filled_pct"])
+                    z["age"] = i - z["bar_idx"]
+                    next_bear_fvgs.append(z)
+            act_bear_fvgs = next_bear_fvgs
+
+            # --- Breakers validation ---
+            act_bull_brks = [z for z in act_bull_brks if c >= z["bottom"]]
+            act_bear_brks = [z for z in act_bear_brks if c <= z["top"]]
+
+            # ── 2. Add new zones ──────────────────────────────────────────
+
+            if ob_bt[i] > 0:
+                act_bull_obs.append({
+                    "top": ob_bt[i], "bottom": ob_bb[i],
+                    "rvol": ob_bv[i] / vs,
+                    "bar_idx": i, "age": 0,
+                    "touches": 0, "inside": False, "mid_touched": False,
+                })
+                if len(act_bull_obs) > MAX_OBS:
+                    act_bull_obs = act_bull_obs[-MAX_OBS:]
+
+            if ob_et[i] > 0:
+                act_bear_obs.append({
+                    "top": ob_et[i], "bottom": ob_eb[i],
+                    "rvol": ob_ev[i] / vs,
+                    "bar_idx": i, "age": 0,
+                    "touches": 0, "inside": False, "mid_touched": False,
+                })
+                if len(act_bear_obs) > MAX_OBS:
+                    act_bear_obs = act_bear_obs[-MAX_OBS:]
+
+            if fvg_bt[i] > 0:
+                act_bull_fvgs.append({
+                    "top": fvg_bt[i], "bottom": fvg_bb[i],
+                    "rvol": fvg_biv[i] / vs,
+                    "bar_idx": i, "age": 0,
+                    "filled_pct": 0.0, "min_low": fvg_bt[i],
+                })
+                if len(act_bull_fvgs) > MAX_FVGS:
+                    act_bull_fvgs = act_bull_fvgs[-MAX_FVGS:]
+
+            if fvg_et[i] > 0:
+                act_bear_fvgs.append({
+                    "top": fvg_et[i], "bottom": fvg_eb[i],
+                    "rvol": fvg_eiv[i] / vs,
+                    "bar_idx": i, "age": 0,
+                    "filled_pct": 0.0, "max_high": fvg_eb[i],
+                })
+                if len(act_bear_fvgs) > MAX_FVGS:
+                    act_bear_fvgs = act_bear_fvgs[-MAX_FVGS:]
+
+            # ── 3. Write outputs (slot 0 = most recent) ───────────────────
+
+            for k, z in enumerate(reversed(act_bull_obs)):
+                if k >= MAX_OBS: break
+                bull_ob_top[i, k] = z["top"];    bull_ob_btm[i, k]  = z["bottom"]
+                bull_ob_rvol[i, k] = z["rvol"];  bull_ob_age[i, k]  = z["age"]
+                bull_ob_tch[i, k]  = z["touches"]; bull_ob_mit[i, k] = int(z["mid_touched"])
+
+            for k, z in enumerate(reversed(act_bear_obs)):
+                if k >= MAX_OBS: break
+                bear_ob_top[i, k] = z["top"];    bear_ob_btm[i, k]  = z["bottom"]
+                bear_ob_rvol[i, k] = z["rvol"];  bear_ob_age[i, k]  = z["age"]
+                bear_ob_tch[i, k]  = z["touches"]; bear_ob_mit[i, k] = int(z["mid_touched"])
+
+            for k, z in enumerate(reversed(act_bull_fvgs)):
+                if k >= MAX_FVGS: break
+                bull_fvg_top[i, k]    = z["top"];    bull_fvg_btm[i, k]    = z["bottom"]
+                bull_fvg_rvol[i, k]   = z["rvol"];   bull_fvg_filled[i, k] = z["filled_pct"]
+                # in_ob: FVG entirely inside an active bull OB
+                for ob in act_bull_obs:
+                    if z["top"] <= ob["top"] and z["bottom"] >= ob["bottom"]:
+                        bull_fvg_inob[i, k] = 1
+                        break
+
+            for k, z in enumerate(reversed(act_bear_fvgs)):
+                if k >= MAX_FVGS: break
+                bear_fvg_top[i, k]    = z["top"];    bear_fvg_btm[i, k]    = z["bottom"]
+                bear_fvg_rvol[i, k]   = z["rvol"];   bear_fvg_filled[i, k] = z["filled_pct"]
+                for ob in act_bear_obs:
+                    if z["top"] <= ob["top"] and z["bottom"] >= ob["bottom"]:
+                        bear_fvg_inob[i, k] = 1
+                        break
+
+            for k, z in enumerate(reversed(act_bull_brks)):
+                if k >= MAX_BRKS: break
+                bull_brk_top[i, k] = z["top"]; bull_brk_btm[i, k] = z["bottom"]
+
+            for k, z in enumerate(reversed(act_bear_brks)):
+                if k >= MAX_BRKS: break
+                bear_brk_top[i, k] = z["top"]; bear_brk_btm[i, k] = z["bottom"]
+
+        # ── 4. Build all new columns as a dict → single pd.concat ───────────
+        # Avoids the PerformanceWarning from repeated df[col] = ... inserts.
+        new_data: dict[str, np.ndarray] = {}
+
+        for k in range(MAX_OBS):
+            new_data[f"bull_ob_{k}_top"]       = bull_ob_top[:, k]
+            new_data[f"bull_ob_{k}_bottom"]    = bull_ob_btm[:, k]
+            new_data[f"bull_ob_{k}_rvol"]      = bull_ob_rvol[:, k]
+            new_data[f"bull_ob_{k}_age"]       = bull_ob_age[:, k]
+            new_data[f"bull_ob_{k}_touches"]   = bull_ob_tch[:, k]
+            new_data[f"bull_ob_{k}_mitigated"] = bull_ob_mit[:, k]
+
+        for k in range(MAX_OBS):
+            new_data[f"bear_ob_{k}_top"]       = bear_ob_top[:, k]
+            new_data[f"bear_ob_{k}_bottom"]    = bear_ob_btm[:, k]
+            new_data[f"bear_ob_{k}_rvol"]      = bear_ob_rvol[:, k]
+            new_data[f"bear_ob_{k}_age"]       = bear_ob_age[:, k]
+            new_data[f"bear_ob_{k}_touches"]   = bear_ob_tch[:, k]
+            new_data[f"bear_ob_{k}_mitigated"] = bear_ob_mit[:, k]
+
+        for k in range(MAX_FVGS):
+            new_data[f"bull_fvg_{k}_top"]        = bull_fvg_top[:, k]
+            new_data[f"bull_fvg_{k}_bottom"]     = bull_fvg_btm[:, k]
+            new_data[f"bull_fvg_{k}_rvol"]       = bull_fvg_rvol[:, k]
+            new_data[f"bull_fvg_{k}_filled_pct"] = bull_fvg_filled[:, k]
+            new_data[f"bull_fvg_{k}_in_ob"]      = bull_fvg_inob[:, k]
+
+        for k in range(MAX_FVGS):
+            new_data[f"bear_fvg_{k}_top"]        = bear_fvg_top[:, k]
+            new_data[f"bear_fvg_{k}_bottom"]     = bear_fvg_btm[:, k]
+            new_data[f"bear_fvg_{k}_rvol"]       = bear_fvg_rvol[:, k]
+            new_data[f"bear_fvg_{k}_filled_pct"] = bear_fvg_filled[:, k]
+            new_data[f"bear_fvg_{k}_in_ob"]      = bear_fvg_inob[:, k]
+
+        for k in range(MAX_BRKS):
+            new_data[f"bull_brk_{k}_top"]    = bull_brk_top[:, k]
+            new_data[f"bull_brk_{k}_bottom"] = bull_brk_btm[:, k]
+            new_data[f"bear_brk_{k}_top"]    = bear_brk_top[:, k]
+            new_data[f"bear_brk_{k}_bottom"] = bear_brk_btm[:, k]
+
+        # Summary counts
+        new_data["n_active_bull_obs"]  = (bull_ob_top  > 0).sum(axis=1)
+        new_data["n_active_bear_obs"]  = (bear_ob_top  > 0).sum(axis=1)
+        new_data["n_active_bull_fvgs"] = (bull_fvg_top > 0).sum(axis=1)
+        new_data["n_active_bear_fvgs"] = (bear_fvg_top > 0).sum(axis=1)
+
+        # ── 5. Shift(1) en bloque + concat único ─────────────────────────
+        # shift() on the whole DataFrame at once → single memory allocation.
+        new_df = pd.DataFrame(new_data, index=dataframe.index)
+        new_df = new_df.shift(1).fillna(0)
+
+        dataframe = pd.concat([dataframe, new_df], axis=1)
+        return dataframe
+
+    # ==========================================================================
+    # PDH / PDL  (Priority 4)
+    # ==========================================================================
+
+    def _add_pdh_pdl(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        """
+        Previous Day High / Low computed from 1h HTF data (already loaded).
+        Falls back to grouping the 15m data by UTC day if 1h is unavailable.
+        """
+        pdh = np.full(len(dataframe), np.nan)
+        pdl = np.full(len(dataframe), np.nan)
+
+        try:
+            if self.dp:
+                # Prefer 1h (always loaded as HTF), fall back to 4h or raw 15m
+                src_tf = None
+                for tf in ["1h", "4h"]:
+                    if tf in self._get_active_htf_list():
+                        src_tf = tf
+                        break
+
+                if src_tf:
+                    htf = self.dp.get_pair_dataframe(metadata["pair"], src_tf)
+                else:
+                    htf = dataframe[["date", "high", "low"]].copy()
+                    src_tf = self.timeframe
+
+                if not htf.empty:
+                    htf = htf.copy()
+                    htf["date"] = pd.to_datetime(htf["date"], utc=True)
+                    htf["_day"] = htf["date"].dt.floor("D")
+
+                    daily = (
+                        htf.groupby("_day")
+                        .agg(day_high=("high", "max"), day_low=("low", "min"))
+                        .reset_index()
+                    )
+                    daily["pdh"] = daily["day_high"].shift(1)
+                    daily["pdl"] = daily["day_low"].shift(1)
+
+                    # Merge into MTF dataframe
+                    main = dataframe.copy()
+                    main["date"] = pd.to_datetime(main["date"], utc=True)
+                    main["_day"] = main["date"].dt.floor("D")
+                    main = main.merge(daily[["_day", "pdh", "pdl"]], on="_day", how="left")
+                    pdh = main["pdh"].ffill().values
+                    pdl = main["pdl"].ffill().values
+
+        except Exception as e:
+            logger.warning(f"PDH/PDL calc failed: {e}")
+
+        dataframe["pdh"] = pdh
+        dataframe["pdl"] = pdl
+        dataframe["above_pdh"] = (dataframe["close"] > dataframe["pdh"]).fillna(False)
+        dataframe["below_pdl"] = (dataframe["close"] < dataframe["pdl"]).fillna(False)
+
+        # -- Daily premium/discount (using PDH/PDL as the daily range) --------
+        d_rng = (dataframe["pdh"] - dataframe["pdl"]).clip(lower=1e-10)
+        d_pct = (dataframe["close"] - dataframe["pdl"]) / d_rng * 100
+        dataframe["daily_equilibrium"]       = (dataframe["pdh"] + dataframe["pdl"]) / 2
+        dataframe["daily_range_position_pct"] = d_pct.fillna(50.0)
+        dataframe["daily_prem_disc_label"]   = self._pct_to_pd_label(d_pct)
+
+        # -- Weekly Previous High / Low (PWH / PWL) ----------------------------
+        pwh = np.full(len(dataframe), np.nan)
+        pwl = np.full(len(dataframe), np.nan)
+        try:
+            if self.dp:
+                src_tf = None
+                for tf in ["1h", "4h"]:
+                    if tf in self._get_active_htf_list():
+                        src_tf = tf
+                        break
+                if src_tf:
+                    wkly_src = self.dp.get_pair_dataframe(metadata["pair"], src_tf)
+                else:
+                    wkly_src = dataframe[["date", "high", "low"]].copy()
+
+                if wkly_src is not None and not wkly_src.empty:
+                    ws = wkly_src.copy()
+                    ws["date"] = pd.to_datetime(ws["date"], utc=True)
+                    # ISO week start (Monday 00:00 UTC) via date arithmetic.
+                    # Avoids dt.to_period() which silently drops timezone info.
+                    d = ws["date"]
+                    ws["_week"] = (d - pd.to_timedelta(d.dt.weekday, unit="D")).dt.normalize()
+
+                    weekly = (
+                        ws.groupby("_week")
+                        .agg(wk_high=("high", "max"), wk_low=("low", "min"))
+                        .reset_index()
+                    )
+                    weekly["pwh"] = weekly["wk_high"].shift(1)
+                    weekly["pwl"] = weekly["wk_low"].shift(1)
+
+                    main_w = dataframe.copy()
+                    main_w["date"] = pd.to_datetime(main_w["date"], utc=True)
+                    d2 = main_w["date"]
+                    main_w["_week"] = (d2 - pd.to_timedelta(d2.dt.weekday, unit="D")).dt.normalize()
+
+                    main_w = main_w.merge(
+                        weekly[["_week", "pwh", "pwl"]], on="_week", how="left"
+                    )
+                    pwh = main_w["pwh"].ffill().values
+                    pwl = main_w["pwl"].ffill().values
+        except Exception as e:
+            logger.warning(f"PWH/PWL calc failed: {e}")
+
+        dataframe["pwh"] = pwh
+        dataframe["pwl"] = pwl
+
+        w_rng = (dataframe["pwh"] - dataframe["pwl"]).clip(lower=1e-10)
+        w_pct = (dataframe["close"] - dataframe["pwl"]) / w_rng * 100
+        dataframe["weekly_equilibrium"]        = (dataframe["pwh"] + dataframe["pwl"]) / 2
+        dataframe["weekly_range_position_pct"] = w_pct.fillna(50.0)
+        dataframe["weekly_prem_disc_label"]    = self._pct_to_pd_label(w_pct)
+
+        return dataframe
+
+    @staticmethod
+    def _pct_to_pd_label(pct: pd.Series) -> pd.Series:
+        """Convert a 0-100 range position to deep_discount/discount/premium/deep_premium."""
+        lbl = pd.Series("premium", index=pct.index, dtype=object)
+        lbl[pct < 50]  = "discount"
+        lbl[pct >= 75] = "deep_premium"
+        lbl[pct < 25]  = "deep_discount"
+        return lbl
+
+    # ==========================================================================
+    # PREMIUM / DISCOUNT  (Priority 5)
+    # ==========================================================================
+
+    def _add_premium_discount(self, dataframe: DataFrame) -> DataFrame:
+        """
+        Three-tier premium/discount framework (ICT style).
+
+        A) Swing / MTF (15m internal range) — noisy, changes with each swing.
+           Kept as reference, clearly labelled as swing_*.
+
+           swing_range_position_pct   : 0-100 within [swing_low, swing_high]
+           swing_prem_disc_label      : deep_discount / discount / premium / deep_premium
+           swing_fib_236 … swing_fib_786
+
+        B) HTF (4h or 1h, whichever is configured) — stable institutional range.
+           The range is the last confirmed 4h swing_high / swing_low pair.
+           This range stays fixed until a new HTF swing is confirmed.
+
+           htf_range_high / htf_range_low
+           htf_equilibrium
+           htf_range_position_pct
+           htf_prem_disc_label
+           htf_fib_236 … htf_fib_786
+
+        C) Daily and Weekly ranges are handled in _add_pdh_pdl (they need the
+           raw OHLCV data from the HTF source). This method reads those results.
+        """
+        # -- A. Swing / MTF range ---------------------------------------------
+        sh  = dataframe["swing_high"].ffill()
+        sl  = dataframe["swing_low"].ffill()
+        rng = (sh - sl).clip(lower=1e-10)
+
+        pct = (dataframe["close"] - sl) / rng * 100
+        dataframe["swing_range_position_pct"] = pct.fillna(50.0)
+        dataframe["swing_prem_disc_label"]    = self._pct_to_pd_label(pct)
+
+        for level in [0.236, 0.382, 0.500, 0.618, 0.786]:
+            dataframe[f"swing_fib_{int(level * 1000):03d}"] = sl + rng * level
+
+        # -- B. HTF range (4h preferred, fall back to 1h then swing) ----------
+        # Determine which HTF columns are available
+        primary_htf = None
+        for candidate in ["4h", "1h"]:
+            if f"{candidate}_swing_high" in dataframe.columns:
+                primary_htf = candidate
+                break
+
+        if primary_htf is not None:
+            htf_sh  = dataframe[f"{primary_htf}_swing_high"].ffill()
+            htf_sl  = dataframe[f"{primary_htf}_swing_low"].ffill()
+            htf_rng = (htf_sh - htf_sl).clip(lower=1e-10)
+            htf_pct = (dataframe["close"] - htf_sl) / htf_rng * 100
+        else:
+            # Fallback: use the same MTF swing range
+            htf_sh  = sh
+            htf_sl  = sl
+            htf_rng = rng
+            htf_pct = pct
+
+        dataframe["htf_range_high"]        = htf_sh
+        dataframe["htf_range_low"]         = htf_sl
+        dataframe["htf_equilibrium"]       = (htf_sh + htf_sl) / 2
+        dataframe["htf_range_position_pct"] = htf_pct.fillna(50.0)
+        dataframe["htf_prem_disc_label"]   = self._pct_to_pd_label(htf_pct)
+
+        for level in [0.236, 0.382, 0.500, 0.618, 0.786]:
+            dataframe[f"htf_fib_{int(level * 1000):03d}"] = htf_sl + htf_rng * level
+
+        return dataframe
+
+    # ==========================================================================
+    # SESSION CONTEXT  (Priority 6)
+    # ==========================================================================
+
+    def _add_session_context(self, dataframe: DataFrame) -> DataFrame:
+        """
+        Label each bar with its UTC trading session and ICT kill-zone flags.
+
+        Sessions (UTC)
+        --------------
+        asia        : 00:00 – 07:00
+        london      : 07:00 – 13:00
+        london_ny   : 13:00 – 16:00  (overlap)
+        new_york    : 16:00 – 20:00
+        new_york_pm : 20:00 – 22:00
+        off_hours   : 22:00 – 00:00
+
+        Kill zones (ICT standard)
+        -------------------------
+        London open : 07:00 – 08:30 UTC
+        NY open     : 13:00 – 14:30 UTC
+        """
+        dt = pd.to_datetime(dataframe["date"], utc=True)
+        mins = dt.dt.hour * 60 + dt.dt.minute   # 0 – 1439
+
+        # Session buckets
+        session = pd.Series("off_hours", index=dataframe.index, dtype=object)
+        session[mins <  7 * 60]                           = "asia"
+        session[(mins >= 7*60) & (mins < 13*60)]          = "london"
+        session[(mins >= 13*60) & (mins < 16*60)]         = "london_ny"
+        session[(mins >= 16*60) & (mins < 20*60)]         = "new_york"
+        session[(mins >= 20*60) & (mins < 22*60)]         = "new_york_pm"
+        dataframe["session"] = session.values
+
+        # Kill zones
+        in_lkz = (mins >= 7*60)  & (mins < 8*60 + 30)   # London open
+        in_nykz = (mins >= 13*60) & (mins < 14*60 + 30)  # NY open
+        dataframe["in_kill_zone"] = (in_lkz | in_nykz).values
+
+        dow = dt.dt.dayofweek
+        dataframe["is_monday"] = (dow == 0).values
+        dataframe["is_friday"] = (dow == 4).values
+
+        return dataframe
+
+    # ==========================================================================
+    # LIQUIDITY POOLS  (Priority 7)
+    # ==========================================================================
+
+    def _add_liquidity_pools(self, dataframe: DataFrame) -> DataFrame:
+        """
+        Identify clusters of swing highs/lows within a LOOKBACK window.
+
+        A 'pivot high' = bar whose high > both neighbours (3-bar window).
+        Levels within CLUSTER_PCT of each other are merged into one pool.
+        Pools are sorted by proximity to close.
+
+        New columns (per direction, 5 slots each)
+        -----------------------------------------
+        nearest_resistance, nearest_support
+        resist_{k}_level, resist_{k}_density  (k=0..4)
+        support_{k}_level, support_{k}_density (k=0..4)
+        """
+        LOOKBACK    = 50
+        TOP_N       = 5
+        CLUSTER_PCT = 0.002   # 0.2 %
+
+        n     = len(dataframe)
+        high  = dataframe["high"].values
+        low   = dataframe["low"].values
+        close = dataframe["close"].values
+
+        # Vectorised pivot detection (3-bar local max/min)
+        pivot_high = np.zeros(n, dtype=bool)
+        pivot_low  = np.zeros(n, dtype=bool)
+        pivot_high[1:-1] = (high[1:-1] > high[:-2]) & (high[1:-1] > high[2:])
+        pivot_low[1:-1]  = (low[1:-1]  < low[:-2])  & (low[1:-1]  < low[2:])
+
+        nearest_resist = np.full(n, np.nan)
+        nearest_support = np.full(n, np.nan)
+        resist_lvl = np.zeros((n, TOP_N))
+        resist_den = np.zeros((n, TOP_N))
+        support_lvl = np.zeros((n, TOP_N))
+        support_den = np.zeros((n, TOP_N))
+
+        def _cluster(levels: list, pct: float) -> list:
+            """Merge nearby levels; return [(avg_price, count)] sorted asc."""
+            if not levels:
+                return []
+            levels = sorted(levels)
+            clusters: list = []
+            grp = [levels[0]]
+            for lv in levels[1:]:
+                if grp and lv / grp[-1] - 1 <= pct:
+                    grp.append(lv)
+                else:
+                    clusters.append((sum(grp) / len(grp), len(grp)))
+                    grp = [lv]
+            clusters.append((sum(grp) / len(grp), len(grp)))
+            return clusters
+
+        for i in range(LOOKBACK, n):
+            c   = close[i]
+            s   = max(0, i - LOOKBACK)
+            wh  = high[s:i][pivot_high[s:i]]
+            wl  = low[s:i][pivot_low[s:i]]
+
+            # Resistance: pivot highs ABOVE close
+            r_clusters = _cluster([v for v in wh if v > c], CLUSTER_PCT)
+            r_clusters.sort(key=lambda x: x[0])              # nearest first
+            if r_clusters:
+                nearest_resist[i] = r_clusters[0][0]
+            for k, (lv, dn) in enumerate(r_clusters[:TOP_N]):
+                resist_lvl[i, k] = lv
+                resist_den[i, k] = dn
+
+            # Support: pivot lows BELOW close
+            s_clusters = _cluster([v for v in wl if v < c], CLUSTER_PCT)
+            s_clusters.sort(key=lambda x: -x[0])             # nearest first (highest)
+            if s_clusters:
+                nearest_support[i] = s_clusters[0][0]
+            for k, (lv, dn) in enumerate(s_clusters[:TOP_N]):
+                support_lvl[i, k] = lv
+                support_den[i, k] = dn
+
+        dataframe["nearest_resistance"] = nearest_resist
+        dataframe["nearest_support"]    = nearest_support
+        for k in range(TOP_N):
+            dataframe[f"resist_{k}_level"]   = resist_lvl[:, k]
+            dataframe[f"resist_{k}_density"] = resist_den[:, k]
+            dataframe[f"support_{k}_level"]  = support_lvl[:, k]
+            dataframe[f"support_{k}_density"]= support_den[:, k]
 
         return dataframe
 
@@ -1302,6 +1991,13 @@ class SMCWithMLLuxAlgo(IStrategy):
         # Clean trailing '+'
         dataframe["enter_tag"] = dataframe["enter_tag"].str.rstrip("+")
 
+        # === GRANULAR CONTEXT TAGS (components A-F) ===
+        # Each component appends a "+TAG" suffix to the existing zone tag.
+        # All operations are vectorized; no Python loops.
+        dataframe = self._append_context_tags(
+            dataframe, long_condition, short_condition
+        )
+
         # === DETAILED ENTRY LOGGING ===
         # Log each entry with zone details (only if logging enabled)
         #
@@ -1476,6 +2172,195 @@ class SMCWithMLLuxAlgo(IStrategy):
             f"SMC LuxAlgo signals for {metadata['pair']}: "
             f"Long={long_condition.sum()}, Short={short_condition.sum()}"
         )
+
+        return dataframe
+
+    # ==========================================================================
+    # GRANULAR CONTEXT TAGS  (Tarea 2)
+    # ==========================================================================
+
+    def _append_context_tags(
+        self,
+        dataframe: DataFrame,
+        long_condition: pd.Series,
+        short_condition: pd.Series,
+    ) -> DataFrame:
+        """
+        Append diagnostic context suffixes to enter_tag for every entry signal.
+
+        Components
+        ----------
+        A  OB quality  : OB_FRESH / OB_TOUCHED / OB_MITIGATED
+        B  P/D context : PD_DEEP_DISC / PD_DISC / PD_NEUTRAL / PD_PREM / PD_DEEP_PREM
+        C  Session     : KZ_LDN / KZ_NY / SESSION / OFF
+        D  FVG quality : FVG_CLEAN / FVG_PARTIAL / FVG_STALE
+        E  Structure   : SWEEP / HTF_ALIGN / HTF_PART / HTF_CONF
+        F  Day         : MON / FRI  (nothing on Tue/Wed/Thu)
+
+        Each active component is joined with '+'. The result is appended to the
+        existing zone tag: "OB" + "+OB_FRESH+PD_DISC+KZ_NY+..." = full tag.
+        """
+        idx = dataframe.index
+        lc  = long_condition
+        sc  = short_condition
+        any_entry = lc | sc
+
+        def _safe(col: str, default=0.0) -> pd.Series:
+            """Return column or a constant Series when the column is absent."""
+            if col in dataframe.columns:
+                return dataframe[col].fillna(default)
+            return pd.Series(default, index=idx, dtype=float)
+
+        def _tag(mask: pd.Series, label: str) -> None:
+            """Append '+label' to enter_tag wherever mask is True."""
+            dataframe.loc[mask, "enter_tag"] += f"+{label}"
+
+        # ------------------------------------------------------------------
+        # A. OB quality (applies when entry zone is OB or Breaker)
+        # ------------------------------------------------------------------
+        in_ob_long  = lc & (
+            dataframe.get("in_bullish_ob", pd.Series(False, index=idx)).fillna(False)
+            | dataframe.get("in_bull_breaker", pd.Series(False, index=idx)).fillna(False)
+        )
+        in_ob_short = sc & (
+            dataframe.get("in_bearish_ob", pd.Series(False, index=idx)).fillna(False)
+            | dataframe.get("in_bear_breaker", pd.Series(False, index=idx)).fillna(False)
+        )
+
+        # Pull directional OB metrics (slot 0 = most recent active OB)
+        ob_age     = pd.Series(99.0, index=idx)
+        ob_touches = pd.Series(0.0,  index=idx)
+        ob_mit     = pd.Series(0.0,  index=idx)
+        ob_age[lc]     = _safe("bull_ob_0_age",       99.0)[lc]
+        ob_age[sc]     = _safe("bear_ob_0_age",       99.0)[sc]
+        ob_touches[lc] = _safe("bull_ob_0_touches",   0.0)[lc]
+        ob_touches[sc] = _safe("bear_ob_0_touches",   0.0)[sc]
+        ob_mit[lc]     = _safe("bull_ob_0_mitigated", 0.0)[lc]
+        ob_mit[sc]     = _safe("bear_ob_0_mitigated", 0.0)[sc]
+
+        in_ob = in_ob_long | in_ob_short
+        # Priority: OB_MITIGATED > OB_TOUCHED > OB_FRESH > (no tag)
+        _tag(in_ob & (ob_mit == 1),                              "OB_MITIGATED")
+        _tag(in_ob & (ob_mit == 0) & (ob_touches >= 1),         "OB_TOUCHED")
+        _tag(in_ob & (ob_mit == 0) & (ob_touches == 0) & (ob_age < 20), "OB_FRESH")
+
+        # ------------------------------------------------------------------
+        # B. Premium/Discount context (daily range, primary source)
+        # ------------------------------------------------------------------
+        daily_eq  = _safe("daily_equilibrium", 0.0)
+        close_col = dataframe["close"]
+        daily_pd  = _safe("daily_prem_disc_label", "discount").astype(str)
+
+        # Neutral overrides the label: price within 5% of daily equilibrium
+        neutral_mask = any_entry & (daily_eq > 0) & (
+            (close_col - daily_eq).abs() / daily_eq.clip(lower=1e-10) < 0.05
+        )
+        _tag(any_entry & ~neutral_mask & (daily_pd == "deep_discount"), "PD_DEEP_DISC")
+        _tag(any_entry & ~neutral_mask & (daily_pd == "discount"),      "PD_DISC")
+        _tag(neutral_mask,                                               "PD_NEUTRAL")
+        _tag(any_entry & ~neutral_mask & (daily_pd == "premium"),       "PD_PREM")
+        _tag(any_entry & ~neutral_mask & (daily_pd == "deep_premium"),  "PD_DEEP_PREM")
+
+        # ------------------------------------------------------------------
+        # C. Session context
+        # ------------------------------------------------------------------
+        session = _safe("session", "off_hours").astype(str)
+        in_kz   = _safe("in_kill_zone", 0.0).astype(bool)
+
+        kz_ldn = any_entry & in_kz & (session == "london")
+        kz_ny  = any_entry & in_kz & (
+            (session == "london_ny") | (session == "new_york")
+        )
+        active  = any_entry & ~in_kz & (session != "off_hours")
+        off_hrs = any_entry & (session == "off_hours")
+
+        _tag(kz_ldn,  "KZ_LDN")
+        _tag(kz_ny,   "KZ_NY")
+        _tag(active,  "SESSION")
+        _tag(off_hrs, "OFF")
+
+        # ------------------------------------------------------------------
+        # D. FVG quality (applies when entry zone includes FVG or FVG-Breaker)
+        # ------------------------------------------------------------------
+        in_fvg_long  = lc & (
+            dataframe.get("in_bullish_fvg",    pd.Series(False, index=idx)).fillna(False)
+            | dataframe.get("in_bull_fvg_breaker", pd.Series(False, index=idx)).fillna(False)
+        )
+        in_fvg_short = sc & (
+            dataframe.get("in_bearish_fvg",    pd.Series(False, index=idx)).fillna(False)
+            | dataframe.get("in_bear_fvg_breaker", pd.Series(False, index=idx)).fillna(False)
+        )
+        in_fvg = in_fvg_long | in_fvg_short
+
+        fvg_filled = pd.Series(0.0, index=idx)
+        fvg_rvol   = pd.Series(0.0, index=idx)
+        fvg_filled[lc] = _safe("bull_fvg_0_filled_pct", 0.0)[lc]
+        fvg_filled[sc] = _safe("bear_fvg_0_filled_pct", 0.0)[sc]
+        fvg_rvol[lc]   = _safe("bull_fvg_0_rvol", 0.0)[lc]
+        fvg_rvol[sc]   = _safe("bear_fvg_0_rvol", 0.0)[sc]
+
+        _tag(in_fvg & (fvg_filled < 0.20) & (fvg_rvol > 1.5),          "FVG_CLEAN")
+        _tag(in_fvg & (fvg_filled >= 0.20) & (fvg_filled < 0.70),      "FVG_PARTIAL")
+        _tag(in_fvg & (fvg_filled >= 0.70),                              "FVG_STALE")
+
+        # ------------------------------------------------------------------
+        # E. Structural context
+        # ------------------------------------------------------------------
+        # SWEEP: a liquidity sweep of the appropriate direction occurred recently
+        sweep_lb = self.sweep_lookback.value
+        bull_sweep = (
+            (_safe("internal_sweep_bullish", 0).rolling(sweep_lb, min_periods=1).max() > 0)
+            | (_safe("swing_sweep_bullish",  0).rolling(sweep_lb, min_periods=1).max() > 0)
+        )
+        bear_sweep = (
+            (_safe("internal_sweep_bearish", 0).rolling(sweep_lb, min_periods=1).max() > 0)
+            | (_safe("swing_sweep_bearish",  0).rolling(sweep_lb, min_periods=1).max() > 0)
+        )
+        _tag((lc & bull_sweep) | (sc & bear_sweep), "SWEEP")
+
+        # HTF trend alignment: compare each configured HTF trend to MTF swing_trend
+        mtf_trend = _safe("swing_trend", 0)
+        htf_list  = self._get_active_htf_list()
+
+        # Primary HTF = highest timeframe (rightmost after sort by minutes)
+        _TF_MIN = {"5m": 5, "15m": 15, "30m": 30, "1h": 60,
+                   "2h": 120, "4h": 240, "8h": 480, "12h": 720, "1d": 1440}
+        htf_sorted = sorted(
+            [tf for tf in htf_list if f"{tf}_swing_trend" in dataframe.columns],
+            key=lambda t: _TF_MIN.get(t, 0),
+            reverse=True,
+        )
+
+        if htf_sorted:
+            primary_htf_trend = _safe(f"{htf_sorted[0]}_swing_trend", 0)
+            # Count how many HTFs agree with MTF direction
+            agree = sum(
+                ((_safe(f"{tf}_swing_trend", 0) == mtf_trend).astype(int))
+                for tf in htf_sorted
+            )
+            n_htfs = len(htf_sorted)
+
+            # Entry direction: +1 for long, -1 for short
+            entry_dir = pd.Series(0.0, index=idx)
+            entry_dir[lc] =  1.0
+            entry_dir[sc] = -1.0
+
+            # HTF_CONF: primary HTF trend is opposite to the entry direction
+            htf_conf = any_entry & (primary_htf_trend * entry_dir < 0)
+            htf_align = any_entry & ~htf_conf & (agree == n_htfs)
+            htf_part  = any_entry & ~htf_conf & ~htf_align & (agree > 0)
+
+            _tag(htf_align, "HTF_ALIGN")
+            _tag(htf_part,  "HTF_PART")
+            _tag(htf_conf,  "HTF_CONF")
+
+        # ------------------------------------------------------------------
+        # F. Day of week (only Mon and Fri are tagged; Tue/Wed/Thu silent)
+        # ------------------------------------------------------------------
+        is_mon = _safe("is_monday", 0).astype(bool)
+        is_fri = _safe("is_friday", 0).astype(bool)
+        _tag(any_entry & is_mon, "MON")
+        _tag(any_entry & is_fri, "FRI")
 
         return dataframe
 
@@ -1672,7 +2557,56 @@ class SMCWithMLLuxAlgo(IStrategy):
                     )
                     return False
 
+        # ── Context-based entry filters (driven by backtest analysis) ──────────
+        tag = entry_tag or ""
+
+        # KZ_LDN: London kill zone, avg profit ~+1% vs +9.5% rest
+        if self.filter_block_kz_ldn.value and "KZ_LDN" in tag:
+            if self.enable_logging.value:
+                logger.info(f"Entry blocked for {pair}: KZ_LDN filter")
+            return False
+
+        # OFF: off-hours session, lower win rate vs SESSION
+        if self.filter_block_off_hours.value and "+OFF" in tag:
+            if self.enable_logging.value:
+                logger.info(f"Entry blocked for {pair}: OFF hours filter")
+            return False
+
+        # SWEEP: liquidity sweep entries, WR 38.3% consistently below average
+        if self.filter_block_sweep.value and "+SWEEP" in tag:
+            if self.enable_logging.value:
+                logger.info(f"Entry blocked for {pair}: SWEEP filter")
+            return False
+
+        # FVG_STALE + HTF_PART combo: 17 trades avg +0.15%, not worth the risk
+        if (self.filter_block_fvg_stale_htf_part.value
+                and "FVG_STALE" in tag and "HTF_PART" in tag):
+            if self.enable_logging.value:
+                logger.info(f"Entry blocked for {pair}: FVG_STALE+HTF_PART combo filter")
+            return False
+
         return True
+
+    def custom_stake_amount(
+        self,
+        pair: str,
+        current_time: datetime,
+        current_rate: float,
+        proposed_stake: float,
+        min_stake: Optional[float],
+        max_stake: float,
+        leverage: float,
+        entry_tag: Optional[str],
+        side: str,
+        **kwargs,
+    ) -> float:
+        """Reduce stake on Fridays (WR 39.6%, avg +5.5% vs +9.5% non-Friday)."""
+        if self.filter_friday_reduce_stake.value and current_time.weekday() == 4:
+            reduced = proposed_stake * float(self.filter_friday_stake_ratio.value)
+            if min_stake and reduced < min_stake:
+                reduced = min_stake
+            return reduced
+        return proposed_stake
 
     def custom_stoploss(
         self,
