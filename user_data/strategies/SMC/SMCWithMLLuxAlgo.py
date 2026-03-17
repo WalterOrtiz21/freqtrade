@@ -123,19 +123,25 @@ class SMCWithMLLuxAlgo(IStrategy):
     swing_length = IntParameter(20, 100, default=50, space="buy", optimize=True)
 
     # Use internal or swing signals for entry
-    # Note: Pine Script uses a dropdown XOR selection. Here we allow both via flags.
-    # To match Pine exactly: enable ONE, disable the other.
-    use_internal_signals = BooleanParameter(default=False, space="buy", optimize=True)
-    use_swing_signals = BooleanParameter(default=True, space="buy", optimize=True)
+    # Note: Pine Script uses a dropdown XOR selection. Here we allow both via categorical.
+    entry_signal_type = CategoricalParameter(
+        ["swing_only", "internal_only", "both"],
+        default="swing_only",
+        space="buy",
+        optimize=True,
+    )
 
     # Only trade CHoCH (reversals) or also BOS (continuations)?
     # Pine Strategy ONLY trades CHoCH for entries. Default to True to match.
     require_choch = BooleanParameter(default=True, space="buy", optimize=True)
 
-    # Zone requirements - disabled by default to match Pine Strategy execution logic
-    # Zone Filters
-    require_ob_zone = BooleanParameter(default=True, space="buy", optimize=True)
-    require_fvg_zone = BooleanParameter(default=True, space="buy", optimize=True)
+    # Zone requirements - combined to avoid flat spaces in Hyperopt
+    required_zone = CategoricalParameter(
+        ["ob_only", "fvg_only", "any", "none"],
+        default="any",
+        space="buy",
+        optimize=True,
+    )
 
     # NEW: Volumetric Order Blocks (BigBeluga Style)
     require_volumetric_ob = BooleanParameter(default=True, space="buy", optimize=True)
@@ -152,9 +158,6 @@ class SMCWithMLLuxAlgo(IStrategy):
     # 1 = Instant Entry (Signal + Zone on same candle)
     # > 1 = Retest Logic (Signal happened X bars ago, entering now on Zone or Pullback)
     entry_signal_lookback = IntParameter(1, 24, default=1, space="buy", optimize=True)
-
-    # NEW: Toggle for HTF (4h) Filter
-    use_htf_filter = BooleanParameter(default=True, space="buy", optimize=True)
 
     # Per-HTF: Use internal_trend (faster, reacts to CHoCH) vs swing_trend (slower, more reliable)
     htf_1_use_internal = BooleanParameter(default=False, space="buy", optimize=True)
@@ -271,8 +274,12 @@ class SMCWithMLLuxAlgo(IStrategy):
 
     # Final Exit (Reversal)
     # Granular control over which CHoCH triggers an exit
-    exit_on_internal_choch = BooleanParameter(default=True, space="sell", optimize=True)
-    exit_on_swing_choch = BooleanParameter(default=True, space="sell", optimize=True)
+    exit_trend_type = CategoricalParameter(
+        ["swing", "internal", "both", "none"],
+        default="both",
+        space="sell",
+        optimize=True,
+    )
 
     # ==========================================================================
     # INITIALIZATION
@@ -1511,14 +1518,14 @@ class SMCWithMLLuxAlgo(IStrategy):
         bullish_structure = pd.Series(False, index=dataframe.index)
 
         # Internal Signals
-        if self.use_internal_signals.value:
+        if self.entry_signal_type.value in ["internal_only", "both"]:
             if self.require_choch.value:
                 bullish_structure |= internal_choch_bull
             else:
                 bullish_structure |= internal_choch_bull | internal_bos_bull
 
         # Swing Signals
-        if self.use_swing_signals.value:
+        if self.entry_signal_type.value in ["swing_only", "both"]:
             if self.require_choch.value:
                 bullish_structure |= swing_choch_bull
             else:
@@ -1556,14 +1563,14 @@ class SMCWithMLLuxAlgo(IStrategy):
         bearish_structure = pd.Series(False, index=dataframe.index)
 
         # Internal Signals
-        if self.use_internal_signals.value:
+        if self.entry_signal_type.value in ["internal_only", "both"]:
             if self.require_choch.value:
                 bearish_structure |= internal_choch_bear
             else:
                 bearish_structure |= internal_choch_bear | internal_bos_bear
 
         # Swing Signals
-        if self.use_swing_signals.value:
+        if self.entry_signal_type.value in ["swing_only", "both"]:
             if self.require_choch.value:
                 bearish_structure |= swing_choch_bear
             else:
@@ -1619,16 +1626,16 @@ class SMCWithMLLuxAlgo(IStrategy):
         dataframe["in_bull_fvg_breaker"] = False
         dataframe["in_bear_fvg_breaker"] = False
 
-        # Zone requirements - OR logic (any enabled filter can pass)
+        # Zone requirements
         # If NO zone filter is enabled, all bars pass (default True)
-        any_zone_enabled = self.require_ob_zone.value or self.require_fvg_zone.value
+        any_zone_enabled = self.required_zone.value != "none"
 
         if any_zone_enabled:
             # Start with False, use OR to add conditions
             bullish_zone = pd.Series(False, index=dataframe.index)
             bearish_zone = pd.Series(False, index=dataframe.index)
 
-            if self.require_ob_zone.value:
+            if self.required_zone.value in ["ob_only", "any"]:
                 bullish_zone |= dataframe["in_bullish_ob"]
                 bearish_zone |= dataframe["in_bearish_ob"]
 
@@ -1666,7 +1673,7 @@ class SMCWithMLLuxAlgo(IStrategy):
                     dataframe["in_bear_breaker"] = in_bear_breaker
                     bearish_zone |= dataframe["in_bear_breaker"]
 
-            if self.require_fvg_zone.value:
+            if self.required_zone.value in ["fvg_only", "any"]:
                 bullish_zone |= dataframe["in_bullish_fvg"]
                 bearish_zone |= dataframe["in_bearish_fvg"]
 
@@ -1781,11 +1788,11 @@ class SMCWithMLLuxAlgo(IStrategy):
             n_bull_zones = bullish_zone.sum()
             n_bear_zones = bearish_zone.sum()
             if (n_bull_zones == 0 or n_bear_zones == 0) and (
-                self.require_ob_zone.value or self.require_fvg_zone.value
+                self.required_zone.value != "none"
             ):
                 logger.warning(
                     f"⚠️ ZONES EMPTY! Bull: {n_bull_zones}, Bear: {n_bear_zones}. "
-                    f"OB Req: {self.require_ob_zone.value}, FVG Req: {self.require_fvg_zone.value}"
+                    f"Zones: {self.required_zone.value}"
                 )
                 logger.warning(
                     f"   Active Bull OB Candles: {(dataframe['active_bullish_ob_top'] > 0).sum()}"
@@ -1801,7 +1808,7 @@ class SMCWithMLLuxAlgo(IStrategy):
             bearish_trend_ok = dataframe["swing_trend"] == -1
 
             # HTF Filter - Check ALL configured timeframes
-            if self.use_htf_filter.value:
+            if self.htf_1.value != "none":
                 htf_list = self._get_active_htf_list()
                 # Per-HTF internal trend toggle mapping
                 htf_internal_map = {
@@ -2375,16 +2382,16 @@ class SMCWithMLLuxAlgo(IStrategy):
             # Exit long on bearish CHoCH (trend reversal)
             # Check configured exit triggers
             exit_long = pd.Series(False, index=dataframe.index)
-            if self.exit_on_internal_choch.value:
+            if self.exit_trend_type.value in ["internal", "both"]:
                 exit_long |= dataframe["internal_choch_bearish"] == 1
-            if self.exit_on_swing_choch.value:
+            if self.exit_trend_type.value in ["swing", "both"]:
                 exit_long |= dataframe["swing_choch_bearish"] == 1
 
             # Exit short on bullish CHoCH
             exit_short = pd.Series(False, index=dataframe.index)
-            if self.exit_on_internal_choch.value:
+            if self.exit_trend_type.value in ["internal", "both"]:
                 exit_short |= dataframe["internal_choch_bullish"] == 1
-            if self.exit_on_swing_choch.value:
+            if self.exit_trend_type.value in ["swing", "both"]:
                 exit_short |= dataframe["swing_choch_bullish"] == 1
         else:
             exit_long = pd.Series(False, index=dataframe.index)

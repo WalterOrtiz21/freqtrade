@@ -15,11 +15,9 @@
             "use_gpu": true,
             "internal_length": 5,
             "swing_length": 100,
-            "use_internal_signals": false,
-            "use_swing_signals": true,
+            "entry_signal_type": "swing_only",
             "require_choch": true,
-            "require_ob_zone": true,
-            "require_fvg_zone": true,
+            "required_zone": "any",
             "require_volumetric_ob": true,
             "vol_sma_period": 20,
             "ob_rvol_threshold": 1.8,
@@ -32,7 +30,6 @@
             "use_ml_filter": false,
             "use_per_symbol_models": false,
             "ml_threshold": 0.45,
-            "use_htf_filter": true,
             "htf_1": "1h",
             "htf_1_use_internal": false,
             "htf_2": "4h",
@@ -48,8 +45,7 @@
             "use_dynamic_tp_adj": true,
             "tp_adj_min_rvol": 1.5,
             "tp_adj_margin": 0.8,
-            "exit_on_internal_choch": true,
-            "exit_on_swing_choch": true
+            "exit_trend_type": "both"
         },
         "protection": {},
         "trailing": {
