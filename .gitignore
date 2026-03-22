@@ -18,6 +18,10 @@ freqtrade-profit-plot.html
 freqtrade/rpc/api_server/ui/*
 build_helpers/ta-lib/*
 
+# Agent rules and Claude config (local AI configuration)
+.agent/rules/*.md
+CLAUDE.md
+
 # Macos related
 .DS_Store
 
