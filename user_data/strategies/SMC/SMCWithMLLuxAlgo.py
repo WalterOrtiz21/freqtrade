@@ -94,8 +94,9 @@ class SMCWithMLLuxAlgo(IStrategy):
     use_exit_signal = True
     use_custom_stoploss = True  # Enable for breakeven
     position_adjustment_enable = True  # Enable for partial TPs
+    process_only_new_candles = True  # Avoid reprocessing closed candles on every tick
     max_open_trades = 3
-    startup_candle_count: int = 250
+    startup_candle_count: int = 400  # EMA(200) + ATR(200) + swing_length up to 100 (×2 for confirmation)
     can_short = True
 
     # ==========================================================================
@@ -566,6 +567,13 @@ class SMCWithMLLuxAlgo(IStrategy):
                     inf_htf = inf_htf[
                         ["date", swing_col, internal_col, sh_col, sl_col]
                     ].copy()
+
+                    # FIX: shift(1) all HTF columns BEFORE merging so a 15m candle
+                    # at HH:00 never reads the HTF candle that opened at HH:00 but
+                    # hasn't closed yet (lookahead bias).
+                    for col in [swing_col, internal_col, sh_col, sl_col]:
+                        inf_htf[col] = inf_htf[col].shift(1)
+
                     dataframe = pd.merge(dataframe, inf_htf, on="date", how="left")
                     dataframe[swing_col]    = dataframe[swing_col].ffill()
                     dataframe[internal_col] = dataframe[internal_col].ffill()
@@ -772,61 +780,6 @@ class SMCWithMLLuxAlgo(IStrategy):
 
         cols = ["date"] + [c for c in self._EXPORT_COLS if c in dataframe.columns]
         dataframe[cols].to_parquet(out_path, index=False)
-
-    def _apply_zone_memory(self, dataframe: DataFrame, smc: SMCLuxAlgo) -> DataFrame:
-        """Apply zone memory for OBs and FVGs."""
-        n = len(dataframe)
-
-        # Initialize zone columns
-        dataframe["active_bullish_ob_top"] = 0.0
-        dataframe["active_bullish_ob_bottom"] = 0.0
-        dataframe["active_bearish_ob_top"] = 0.0
-        dataframe["active_bearish_ob_bottom"] = 0.0
-
-        dataframe["active_bullish_fvg_top"] = 0.0
-        dataframe["active_bullish_fvg_bottom"] = 0.0
-        dataframe["active_bearish_fvg_top"] = 0.0
-        dataframe["active_bearish_fvg_bottom"] = 0.0
-
-        # Process each bar to find active zones
-        for i in range(n):
-            # Find active OBs at this bar
-            active_obs = smc.get_active_order_blocks(as_of_index=i)
-
-            for ob in active_obs:
-                if ob.bar_index <= i:
-                    if ob.bias == 1:  # Bullish
-                        if dataframe.loc[dataframe.index[i], "active_bullish_ob_top"] == 0:
-                            dataframe.loc[dataframe.index[i], "active_bullish_ob_top"] = ob.top
-                            dataframe.loc[dataframe.index[i], "active_bullish_ob_bottom"] = (
-                                ob.bottom
-                            )
-                    else:  # Bearish
-                        if dataframe.loc[dataframe.index[i], "active_bearish_ob_top"] == 0:
-                            dataframe.loc[dataframe.index[i], "active_bearish_ob_top"] = ob.top
-                            dataframe.loc[dataframe.index[i], "active_bearish_ob_bottom"] = (
-                                ob.bottom
-                            )
-
-            # Find active FVGs at this bar
-            active_fvgs = smc.get_active_fvgs(as_of_index=i)
-
-            for fvg in active_fvgs:
-                if fvg.bar_index <= i:
-                    if fvg.bias == 1:  # Bullish
-                        if dataframe.loc[dataframe.index[i], "active_bullish_fvg_top"] == 0:
-                            dataframe.loc[dataframe.index[i], "active_bullish_fvg_top"] = fvg.top
-                            dataframe.loc[dataframe.index[i], "active_bullish_fvg_bottom"] = (
-                                fvg.bottom
-                            )
-                    else:  # Bearish
-                        if dataframe.loc[dataframe.index[i], "active_bearish_fvg_top"] == 0:
-                            dataframe.loc[dataframe.index[i], "active_bearish_fvg_top"] = fvg.top
-                            dataframe.loc[dataframe.index[i], "active_bearish_fvg_bottom"] = (
-                                fvg.bottom
-                            )
-
-        return dataframe
 
     # ==========================================================================
     # MULTI-ZONE CONTEXT  (Priority 1 & 3 features)
@@ -1407,11 +1360,18 @@ class SMCWithMLLuxAlgo(IStrategy):
         low   = dataframe["low"].values
         close = dataframe["close"].values
 
-        # Vectorised pivot detection (3-bar local max/min)
+        # Vectorised pivot detection (3-bar local max/min).
+        # FIX: detecting pivot at bar i requires high[i+1] (lookahead). We shift
+        # the result by 1 so the pivot is only "known" at bar i+1, when the right
+        # neighbour has already closed.
+        _ph = np.zeros(n, dtype=bool)
+        _pl = np.zeros(n, dtype=bool)
+        _ph[1:-1] = (high[1:-1] > high[:-2]) & (high[1:-1] > high[2:])
+        _pl[1:-1] = (low[1:-1]  < low[:-2])  & (low[1:-1]  < low[2:])
         pivot_high = np.zeros(n, dtype=bool)
         pivot_low  = np.zeros(n, dtype=bool)
-        pivot_high[1:-1] = (high[1:-1] > high[:-2]) & (high[1:-1] > high[2:])
-        pivot_low[1:-1]  = (low[1:-1]  < low[:-2])  & (low[1:-1]  < low[2:])
+        pivot_high[1:] = _ph[:-1]   # confirmed one bar later
+        pivot_low[1:]  = _pl[:-1]
 
         nearest_resist = np.full(n, np.nan)
         nearest_support = np.full(n, np.nan)
@@ -1733,8 +1693,8 @@ class SMCWithMLLuxAlgo(IStrategy):
             # Apply offset
             dataframe["sl_long_price"] = bull_sl_price * (1 - self.sl_buffer_pct.value)
 
-            # Same for Shorts (Top + offset)
-            bear_sl_price[mask_bull_ob] = np.nan  # reset logic
+            # Same for Shorts: SL is ABOVE the bearish zone top (+ offset).
+            # np.fmax keeps the highest top across zone types (most conservative SL for shorts).
             bear_sl_price = pd.Series(np.nan, index=dataframe.index)
 
             mask_bear_ob = dataframe["active_bearish_ob_top"] > 0
@@ -1743,14 +1703,10 @@ class SMCWithMLLuxAlgo(IStrategy):
             if "active_bearish_breaker_top" in dataframe.columns:
                 bear_sl_price = np.fmax(bear_sl_price, dataframe["active_bearish_breaker_top"])
 
-            # FVG Breaker Top (NEW)
-            if (
-                "active_bullish_fvg_breaker_top" in dataframe.columns
-            ):  # wait, Bearish FVG Breaker for Shorts
-                if "active_bearish_fvg_breaker_top" in dataframe.columns:
-                    bear_sl_price = np.fmax(
-                        bear_sl_price, dataframe["active_bearish_fvg_breaker_top"]
-                    )
+            if "active_bearish_fvg_breaker_top" in dataframe.columns:
+                bear_sl_price = np.fmax(
+                    bear_sl_price, dataframe["active_bearish_fvg_breaker_top"]
+                )
 
             dataframe["sl_short_price"] = bear_sl_price * (1 + self.sl_buffer_pct.value)
 
@@ -2417,8 +2373,8 @@ class SMCWithMLLuxAlgo(IStrategy):
         side: str,
         **kwargs,
     ) -> float:
-        """Get leverage from config."""
-        return self.config.get("leverage", 10.0)
+        """Get leverage from config. Default matches bot_start to avoid stoploss miscalculation."""
+        return self.config.get("leverage", 1.0)
 
     def _get_timeframe_minutes(self) -> int:
         """Convert timeframe string to minutes."""
@@ -2641,6 +2597,8 @@ class SMCWithMLLuxAlgo(IStrategy):
             try:
                 dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
                 candle = dataframe.loc[dataframe["date"] == trade.open_date_utc]
+                if candle.empty:
+                    candle = dataframe.iloc[[-1]]
                 if not candle.empty:
                     row = candle.iloc[0]
                     adj_col = "tp1_adj_short" if trade.is_short else "tp1_adj_long"
@@ -2663,8 +2621,16 @@ class SMCWithMLLuxAlgo(IStrategy):
                 try:
                     dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
 
-                    # Find the candle where the trade opened
+                    # Prefer the exact entry candle; fall back to the last available
+                    # candle when the trade opened long ago and the entry bar rolled
+                    # out of the analyzed window (live trading edge case).
                     candle = dataframe.loc[dataframe["date"] == trade.open_date_utc]
+                    if candle.empty:
+                        candle = dataframe.iloc[[-1]]
+                        logger.debug(
+                            f"Entry candle not in analyzed window for {pair}, "
+                            f"using latest candle for dynamic SL lookup."
+                        )
 
                     if not candle.empty:
                         row = candle.iloc[0]
