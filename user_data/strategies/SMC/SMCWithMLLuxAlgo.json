@@ -21,7 +21,7 @@
             "require_volumetric_ob": true,
             "vol_sma_period": 20,
             "ob_rvol_threshold": 1.8,
-            "fvg_atr_threshold": 0.1,
+            "fvg_atr_threshold": 0.15,
             "trade_with_trend": true,
             "use_sweep_bypass": false,
             "sweep_lookback": 10,
@@ -31,9 +31,10 @@
             "use_per_symbol_models": false,
             "ml_threshold": 0.45,
             "htf_1": "1h",
-            "htf_1_use_internal": false,
-            "htf_2": "4h",
-            "htf_2_use_internal": true
+            "htf_1_use_internal": true,
+            "htf_2": "none",
+            "htf_2_use_internal": false,
+            "require_htf_zone": "enabled"
         },
         "sell": {
             "use_dynamic_stoploss": true,
@@ -43,8 +44,9 @@
             "move_be_at_tp1": true,
             "be_trigger_pct": 0.0,
             "use_dynamic_tp_adj": true,
-            "tp_adj_min_rvol": 1.5,
+            "tp_adj_min_rvol": 2.0,
             "tp_adj_margin": 0.8,
+            "_exit_trend_type": "[swing, internal, both, none]",
             "exit_trend_type": "both"
         },
         "protection": {},
@@ -63,7 +65,7 @@
             "filter_block_fvg_stale_htf_part": true,
             "filter_block_kz_ldn": true,
             "filter_block_off_hours": false,
-            "filter_block_sweep": false,
+            "filter_block_sweep": true,
             "filter_friday_reduce_stake": false,
             "filter_friday_stake_ratio": 0.5,
             "export_indicator_data": false

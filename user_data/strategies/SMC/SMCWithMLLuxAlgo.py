@@ -282,6 +282,16 @@ class SMCWithMLLuxAlgo(IStrategy):
         optimize=True,
     )
 
+    # HTF Zone Requirement
+    # enabled: price must be inside an active HTF OB/FVG/Breaker to enter
+    # disabled: HTF acts as direction filter only (legacy behavior)
+    require_htf_zone = CategoricalParameter(
+        ["enabled", "disabled"],
+        default="enabled",
+        space="buy",
+        optimize=True,
+    )
+
     # ==========================================================================
     # INITIALIZATION
     # ==========================================================================
@@ -564,21 +574,48 @@ class SMCWithMLLuxAlgo(IStrategy):
                     inf_htf[sh_col] = signals_htf["swing_high"]
                     inf_htf[sl_col] = signals_htf["swing_low"]
 
-                    inf_htf = inf_htf[
-                        ["date", swing_col, internal_col, sh_col, sl_col]
-                    ].copy()
+                    # HTF Zone columns: OB / FVG / Breaker / FVG-Breaker
+                    # Naming: {htf}_bull_ob_top, {htf}_bull_ob_bot, etc.
+                    htf_zone_map = {
+                        f"{htf}_bull_ob_top":   "active_bullish_ob_top",
+                        f"{htf}_bull_ob_bot":   "active_bullish_ob_bottom",
+                        f"{htf}_bear_ob_top":   "active_bearish_ob_top",
+                        f"{htf}_bear_ob_bot":   "active_bearish_ob_bottom",
+                        f"{htf}_bull_fvg_top":  "active_bullish_fvg_top",
+                        f"{htf}_bull_fvg_bot":  "active_bullish_fvg_bottom",
+                        f"{htf}_bear_fvg_top":  "active_bearish_fvg_top",
+                        f"{htf}_bear_fvg_bot":  "active_bearish_fvg_bottom",
+                        f"{htf}_bull_brk_top":  "active_bullish_breaker_top",
+                        f"{htf}_bull_brk_bot":  "active_bullish_breaker_bottom",
+                        f"{htf}_bear_brk_top":  "active_bearish_breaker_top",
+                        f"{htf}_bear_brk_bot":  "active_bearish_breaker_bottom",
+                        f"{htf}_bull_fbrk_top": "active_bullish_fvg_breaker_top",
+                        f"{htf}_bull_fbrk_bot": "active_bullish_fvg_breaker_bottom",
+                        f"{htf}_bear_fbrk_top": "active_bearish_fvg_breaker_top",
+                        f"{htf}_bear_fbrk_bot": "active_bearish_fvg_breaker_bottom",
+                    }
+                    for dest_col, src_col in htf_zone_map.items():
+                        if src_col in signals_htf.columns:
+                            inf_htf[dest_col] = signals_htf[src_col].values
+
+                    all_htf_cols = (
+                        [swing_col, internal_col, sh_col, sl_col]
+                        + list(htf_zone_map.keys())
+                    )
+                    inf_htf = inf_htf[["date"] + all_htf_cols].copy()
 
                     # FIX: shift(1) all HTF columns BEFORE merging so a 15m candle
                     # at HH:00 never reads the HTF candle that opened at HH:00 but
                     # hasn't closed yet (lookahead bias).
-                    for col in [swing_col, internal_col, sh_col, sl_col]:
+                    for col in all_htf_cols:
                         inf_htf[col] = inf_htf[col].shift(1)
 
                     dataframe = pd.merge(dataframe, inf_htf, on="date", how="left")
-                    dataframe[swing_col]    = dataframe[swing_col].ffill()
-                    dataframe[internal_col] = dataframe[internal_col].ffill()
-                    dataframe[sh_col]       = dataframe[sh_col].ffill()
-                    dataframe[sl_col]       = dataframe[sl_col].ffill()
+                    for col in all_htf_cols:
+                        dataframe[col] = dataframe[col].ffill()
+                    # Zone columns default to 0 (no zone) rather than NaN
+                    for dest_col in htf_zone_map.keys():
+                        dataframe[dest_col] = dataframe[dest_col].fillna(0)
 
                 except Exception as e:
                     logger.error(f"Error processing HTF {htf}: {e}")
@@ -1787,6 +1824,52 @@ class SMCWithMLLuxAlgo(IStrategy):
             bullish_trend_ok = True
             bearish_trend_ok = True
 
+        # ===== HTF ZONE FILTER =====
+        # Price must overlap with an active HTF zone (OB/FVG/Breaker/FVG-Breaker).
+        # This is the architectural core: 15m CHoCH is the trigger; the HTF zone
+        # is the "why" (institutional presence). Without a zone, the signal has no
+        # structural backing at the higher timeframe.
+        htf_bull_zone_ok = pd.Series(True, index=dataframe.index)
+        htf_bear_zone_ok = pd.Series(True, index=dataframe.index)
+
+        if self.require_htf_zone.value == "enabled" and self.trade_with_trend.value:
+            htf_list = self._get_active_htf_list()
+            if htf_list:
+                htf_bull_zone_ok = pd.Series(False, index=dataframe.index)
+                htf_bear_zone_ok = pd.Series(False, index=dataframe.index)
+
+                for htf in htf_list:
+                    bull_zone_pairs = [
+                        (f"{htf}_bull_ob_top",   f"{htf}_bull_ob_bot"),
+                        (f"{htf}_bull_fvg_top",  f"{htf}_bull_fvg_bot"),
+                        (f"{htf}_bull_brk_top",  f"{htf}_bull_brk_bot"),
+                        (f"{htf}_bull_fbrk_top", f"{htf}_bull_fbrk_bot"),
+                    ]
+                    bear_zone_pairs = [
+                        (f"{htf}_bear_ob_top",   f"{htf}_bear_ob_bot"),
+                        (f"{htf}_bear_fvg_top",  f"{htf}_bear_fvg_bot"),
+                        (f"{htf}_bear_brk_top",  f"{htf}_bear_brk_bot"),
+                        (f"{htf}_bear_fbrk_top", f"{htf}_bear_fbrk_bot"),
+                    ]
+
+                    for top_col, bot_col in bull_zone_pairs:
+                        if top_col in dataframe.columns and bot_col in dataframe.columns:
+                            zone_active = dataframe[top_col] > 0
+                            price_in_zone = (
+                                (dataframe["low"] <= dataframe[top_col])
+                                & (dataframe["close"] >= dataframe[bot_col])
+                            )
+                            htf_bull_zone_ok |= zone_active & price_in_zone
+
+                    for top_col, bot_col in bear_zone_pairs:
+                        if top_col in dataframe.columns and bot_col in dataframe.columns:
+                            zone_active = dataframe[top_col] > 0
+                            price_in_zone = (
+                                (dataframe["high"] >= dataframe[bot_col])
+                                & (dataframe["close"] <= dataframe[top_col])
+                            )
+                            htf_bear_zone_ok |= zone_active & price_in_zone
+
         # ===== DYNAMIC TP1 ADJUSTMENT (per-candle, stored as column) =====
         # Instead of blocking entries, adapt TP1/BE to the nearest opposing zone.
         # Long: if bearish OB/FVG is between price and default TP1 → take partial just before it.
@@ -1866,8 +1949,8 @@ class SMCWithMLLuxAlgo(IStrategy):
         dataframe["tp1_adj_short"] = nearest_short_obstacle
 
         # ===== FINAL CONDITIONS =====
-        long_condition = bullish_structure & bullish_zone & bullish_trend_ok
-        short_condition = bearish_structure & bearish_zone & bearish_trend_ok
+        long_condition = bullish_structure & bullish_zone & bullish_trend_ok & htf_bull_zone_ok
+        short_condition = bearish_structure & bearish_zone & bearish_trend_ok & htf_bear_zone_ok
 
         # ===== ML FILTER =====
         ml_model = self._get_ml_model_for_pair(metadata["pair"])
