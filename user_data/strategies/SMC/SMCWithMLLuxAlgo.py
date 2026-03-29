@@ -47,17 +47,17 @@ from freqtrade.strategy import (
 from freqtrade.persistence import Trade
 import talib.abstract as ta
 
-# Import LuxAlgo-style SMC library
+# Import SMC engine (Numba-optimized: CHoCH, BOS, OBs, FVGs, Sweeps)
 # Module copied to user_data/strategies/ for Hyperopt compatibility
 try:
-    from smc_luxalgo_numba import SMCLuxAlgoNumba as SMCLuxAlgo
+    from smc_engine import SMCEngine as SMCEngine
 except ImportError:
     # Fallback: try local import
     import sys
     from pathlib import Path
 
     sys.path.insert(0, str(Path(__file__).parent))
-    from smc_luxalgo_numba import SMCLuxAlgoNumba as SMCLuxAlgo
+    from smc_engine import SMCEngine as SMCEngine
 
 # train_model is imported lazily inside bot_start only when auto-training is enabled.
 
@@ -495,7 +495,7 @@ class SMCWithMLLuxAlgo(IStrategy):
         # --- 1. MTF (15m) Calculations ---
         # Calculate SMC signals (Numba)
         # Returns signals AND active zones
-        smc = SMCLuxAlgo(
+        smc = SMCEngine(
             dataframe,
             internal_length=self.internal_length.value,
             swing_length=self.swing_length.value,
@@ -566,7 +566,7 @@ class SMCWithMLLuxAlgo(IStrategy):
                         logger.warning(f"No data for {metadata['pair']} {htf}")
                         continue
 
-                    smc_htf = SMCLuxAlgo(
+                    smc_htf = SMCEngine(
                         inf_htf,
                         internal_length=self.internal_length.value,
                         swing_length=self.swing_length.value,
@@ -844,7 +844,7 @@ class SMCWithMLLuxAlgo(IStrategy):
     def _build_multi_zone_context(self, dataframe: DataFrame) -> DataFrame:
         """
         Pure-Python zone tracker built on top of the raw event arrays exposed
-        by smc_luxalgo_numba.get_signals().
+        by smc_engine.get_signals().
 
         For each bar it maintains running lists of active zones and writes
         indexed columns (bull_ob_0_top … bull_ob_9_top, etc.).
@@ -1152,7 +1152,7 @@ class SMCWithMLLuxAlgo(IStrategy):
 
         Uses BTC/USDT:USDT as institutional macro reference (not the traded pair):
         - Daily EMA200: close > EMA200*(1+0.5%) → +1 bull, close < EMA200*(1-0.5%) → -1 bear
-        - 4H swing_trend from SMCLuxAlgo kernel: +1 or -1
+        - 4H swing_trend from SMCEngine kernel: +1 or -1
         - Combined bias: +1 only if both agree bull, -1 only if both agree bear, else 0 (neutral)
 
         Using BTC as reference instead of per-pair weekly EMA avoids the 2024 regime trap:
@@ -1191,7 +1191,7 @@ class SMCWithMLLuxAlgo(IStrategy):
                 logger.warning("Macro bias: BTC/USDT:USDT 4H not available, defaulting to neutral.")
                 return dataframe
 
-            smc_btc = SMCLuxAlgo(
+            smc_btc = SMCEngine(
                 btc_4h,
                 internal_length=self.internal_length.value,
                 swing_length=self.swing_length.value,

@@ -2,7 +2,7 @@
 SMC ML Training Script (LuxAlgo Version)
 ========================================
 
-Trains XGBoost using SMCLuxAlgo logic to match the strategy.
+Trains XGBoost using SMCEngine signals to match the strategy.
 
 Usage:
 1. Ensure data is available (freqtrade download-data).
@@ -31,8 +31,7 @@ logger = logging.getLogger(__name__)
 # Add strategy path
 sys.path.insert(0, str(Path(__file__).parent))
 # Import NEW library (Numba Optimized)
-# from smc_luxalgo import SMCLuxAlgo
-from smc_luxalgo_numba import SMCLuxAlgoNumba as SMCLuxAlgo
+from smc_engine import SMCEngine as SMCEngine
 
 try:
     from xgboost import XGBClassifier
@@ -397,7 +396,7 @@ def generate_labels(df: pd.DataFrame, config: dict) -> pd.DataFrame:
 
     # 1. Calculate Indicators
     # Numba version returns active zones in the DF
-    smc = SMCLuxAlgo(df, config["internal_length"], config["swing_length"])
+    smc = SMCEngine(df, config["internal_length"], config["swing_length"])
     signals = smc.get_signals()
     for col in signals.columns:
         df[col] = signals[col].values

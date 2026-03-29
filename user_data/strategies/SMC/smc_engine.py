@@ -596,8 +596,8 @@ def _smc_zones_kernel(
 # WRAPPER CLASS
 # =============================================================================
 
-class SMCLuxAlgoNumba:
-    """Numba-optimized SMC replacement."""
+class SMCEngine:
+    """Numba-optimized Smart Money Concepts engine (CHoCH, BOS, OBs, FVGs, Sweeps)."""
     
     def __init__(self, df: pd.DataFrame, internal_length: int = 5, swing_length: int = 50):
         self.df = df
