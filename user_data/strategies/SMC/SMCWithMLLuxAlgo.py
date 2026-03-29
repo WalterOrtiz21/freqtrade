@@ -373,7 +373,7 @@ class SMCWithMLLuxAlgo(IStrategy):
     def informative_pairs(self):
         """
         Define pairs to load based on htf_1 and htf_2 parameters.
-        Macro regime filter uses each pair's own 1H data (already in htf_list) — no extra pair needed.
+        BTC/USDT:USDT 1D and 4H are always loaded for the macro regime filter.
         """
         pairs = self.dp.current_whitelist()
         htf_list = self._get_active_htf_list()
@@ -382,8 +382,11 @@ class SMCWithMLLuxAlgo(IStrategy):
         for tf in htf_list:
             informative_pairs += [(pair, tf) for pair in pairs]
 
-        # Macro regime filter uses each pair's own 1H data (already loaded via htf_1).
-        # No extra informative pair needed.
+        # BTC macro reference — always loaded for all pairs regardless of whitelist
+        informative_pairs += [
+            ("BTC/USDT:USDT", "1d"),
+            ("BTC/USDT:USDT", "4h"),
+        ]
 
         logger.info(f"Informative pairs configured for timeframes: {htf_list}")
         return informative_pairs
@@ -1140,16 +1143,25 @@ class SMCWithMLLuxAlgo(IStrategy):
         return dataframe
 
     # ==========================================================================
-    # MACRO REGIME FILTER  (Pair-Specific Weekly EMA21)
+    # MACRO REGIME FILTER  (BTC EMA200 Daily + BTC 4H Swing Trend)
     # ==========================================================================
 
     def _add_macro_bias(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """
         Adds 'btc_macro_bias' column: +1 = bull, 0 = neutral, -1 = bear.
 
-        Uses each pair's own 1H data resampled to weekly vs EMA21 with ±1% buffer.
-        Resamples to Monday-anchored weeks (same as TradingView "W" bars).
-        shift(1) ensures no lookahead — only closed weekly candles influence entries.
+        Uses BTC/USDT:USDT as institutional macro reference (not the traded pair):
+        - Daily EMA200: close > EMA200*(1+0.5%) → +1 bull, close < EMA200*(1-0.5%) → -1 bear
+        - 4H swing_trend from SMCLuxAlgo kernel: +1 or -1
+        - Combined bias: +1 only if both agree bull, -1 only if both agree bear, else 0 (neutral)
+
+        Using BTC as reference instead of per-pair weekly EMA avoids the 2024 regime trap:
+        ETH can be in a local pullback (weekly bearish) while BTC is at ATH → per-pair
+        bias would block longs/take shorts on ETH, losing against the macro trend.
+
+        ewm(span=200, min_periods=1): starts from first bar, converges to true EMA200.
+        shift(1) on both biases ensures only *closed* candles influence entries (no lookahead).
+        merge_asof(direction="backward") handles timestamp alignment across timeframes.
         Falls back to 0 (neutral = both directions allowed) on any error.
         """
         dataframe["btc_macro_bias"] = 0  # default: neutral
@@ -1158,50 +1170,69 @@ class SMCWithMLLuxAlgo(IStrategy):
             return dataframe
 
         try:
-            btc_1h = self.dp.get_pair_dataframe(metadata["pair"], "1h")
-            if btc_1h is None or btc_1h.empty:
-                logger.warning(f"Macro bias: {metadata['pair']} 1H dataframe not available, defaulting to neutral.")
+            # ── BTC Daily EMA200 ──────────────────────────────────────────────
+            btc_1d = self.dp.get_pair_dataframe("BTC/USDT:USDT", "1d")
+            if btc_1d is None or btc_1d.empty:
+                logger.warning("Macro bias: BTC/USDT:USDT 1D not available, defaulting to neutral.")
                 return dataframe
 
-            # Resample 1H → weekly (Monday anchor, same as TradingView "W")
-            btc_1h = btc_1h[["date", "open", "high", "low", "close", "volume"]].copy()
-            btc_1h = btc_1h.set_index("date")
-            btc_weekly = btc_1h.resample("W-MON", label="left", closed="left").agg(
-                {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
-            ).dropna(subset=["close"])
-            btc_weekly = btc_weekly.reset_index()
+            btc_1d = btc_1d[["date", "close"]].copy()
+            btc_1d["ema200"] = btc_1d["close"].ewm(span=200, min_periods=1).mean()
+            btc_1d["bias_1d"] = np.where(
+                btc_1d["close"] > btc_1d["ema200"] * 1.005,  1,
+                np.where(btc_1d["close"] < btc_1d["ema200"] * 0.995, -1, 0),
+            )
+            # shift(1): only the *closed* daily candle contributes — the current one is forming
+            btc_1d["bias_1d"] = btc_1d["bias_1d"].shift(1).fillna(0).astype(int)
 
-            # pandas ewm with min_periods=1 avoids the hard NaN warmup of talib EMA.
-            # talib EMA(21) needs 21 full weeks before producing any value — with
-            # startup_candle_count limited to ~12 weeks, it returns all NaN.
-            # ewm(span=21, min_periods=1) starts from the first available data point
-            # and converges to the true EMA21 as more data accumulates.
-            btc_weekly["btc_ema21_1w"] = btc_weekly["close"].ewm(span=21, min_periods=1).mean()
+            # ── BTC 4H Swing Trend ────────────────────────────────────────────
+            btc_4h = self.dp.get_pair_dataframe("BTC/USDT:USDT", "4h")
+            if btc_4h is None or btc_4h.empty:
+                logger.warning("Macro bias: BTC/USDT:USDT 4H not available, defaulting to neutral.")
+                return dataframe
 
-            btc_weekly["btc_macro_bias"] = np.where(
-                btc_weekly["close"] > btc_weekly["btc_ema21_1w"] * 1.01,  1,
-                np.where(btc_weekly["close"] < btc_weekly["btc_ema21_1w"] * 0.99, -1, 0),
+            smc_btc = SMCLuxAlgo(
+                btc_4h,
+                internal_length=self.internal_length.value,
+                swing_length=self.swing_length.value,
+            )
+            signals_btc = smc_btc.get_signals()
+            btc_4h = btc_4h[["date"]].copy()
+            # shift(1): 4H candle's trend is known only after it closes
+            btc_4h["bias_4h"] = signals_btc["swing_trend"].shift(1).fillna(0).astype(int)
+
+            # ── Align timezones before merge_asof ────────────────────────────
+            ref_tz = dataframe["date"].dt.tz
+            for src_df in (btc_1d, btc_4h):
+                src_tz = src_df["date"].dt.tz
+                if ref_tz is not None and src_tz is None:
+                    src_df["date"] = src_df["date"].dt.tz_localize("UTC")
+                elif ref_tz is None and src_tz is not None:
+                    src_df["date"] = src_df["date"].dt.tz_convert(None)
+
+            # ── merge_asof: propagate each bias to all 15m candles ────────────
+            # dataframe is already sorted by date in populate_indicators.
+            # merge_asof finds the most recent key <= each 15m timestamp (no lookahead).
+            df_base = dataframe[["date"]].copy()
+            df_base = pd.merge_asof(
+                df_base,
+                btc_1d.sort_values("date")[["date", "bias_1d"]],
+                on="date", direction="backward",
+            )
+            df_base = pd.merge_asof(
+                df_base,
+                btc_4h.sort_values("date")[["date", "bias_4h"]],
+                on="date", direction="backward",
             )
 
-            # shift(1): bias is determined by the *closed* weekly candle, not the current one
-            btc_weekly["btc_macro_bias"] = btc_weekly["btc_macro_bias"].shift(1)
+            bias_1d = df_base["bias_1d"].fillna(0).astype(int)
+            bias_4h = df_base["bias_4h"].fillna(0).astype(int)
 
-            # Expand weekly → 15m by forward-filling across all candles.
-            # Strategy: merge on exact Monday 00:00 timestamps, then ffill.
-            # The 15m dataframe's date column is the open time of each candle.
-            weekly_bias = btc_weekly[["date", "btc_macro_bias"]].copy()
-            # Align timezones: convert weekly dates to match main dataframe
-            if dataframe["date"].dt.tz is not None and weekly_bias["date"].dt.tz is None:
-                weekly_bias["date"] = weekly_bias["date"].dt.tz_localize("UTC")
-            elif dataframe["date"].dt.tz is None and weekly_bias["date"].dt.tz is not None:
-                weekly_bias["date"] = weekly_bias["date"].dt.tz_convert(None)
-
-            # Rename before merge to avoid collision with the default=0 column already on dataframe
-            weekly_bias = weekly_bias.rename(columns={"btc_macro_bias": "_macro_bias_w"})
-            dataframe = pd.merge(dataframe, weekly_bias, on="date", how="left")
-
-            # Forward-fill weekly value across all 15m candles; leading NaN → neutral
-            dataframe["btc_macro_bias"] = dataframe.pop("_macro_bias_w").ffill().fillna(0).astype(int)
+            # Require consensus: both timeframes must agree for a directional bias
+            dataframe["btc_macro_bias"] = np.where(
+                (bias_1d == 1)  & (bias_4h == 1),   1,
+                np.where((bias_1d == -1) & (bias_4h == -1), -1, 0),
+            )
 
         except Exception as e:
             logger.warning(f"Macro bias calculation failed, defaulting to neutral: {e}")

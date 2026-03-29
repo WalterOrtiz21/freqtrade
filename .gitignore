@@ -123,3 +123,4 @@ target/
 docker-compose-*.yml
 user_data/strategies/AI-Edge-Documentation.pdf
 user_data/strategies/AI-Edge-Documentation.txt
+.claude/
