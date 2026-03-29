@@ -12,7 +12,6 @@
         },
         "buy": {
             "enable_auto_training": false,
-            "use_gpu": true,
             "internal_length": 5,
             "swing_length": 100,
             "entry_signal_type": "swing_only",
@@ -34,7 +33,8 @@
             "htf_1_use_internal": true,
             "htf_2": "none",
             "htf_2_use_internal": false,
-            "require_htf_zone": "enabled"
+            "require_htf_zone": "enabled",
+            "use_macro_filter": "enabled"
         },
         "sell": {
             "use_dynamic_stoploss": true,

@@ -59,13 +59,7 @@ except ImportError:
     sys.path.insert(0, str(Path(__file__).parent))
     from smc_luxalgo_numba import SMCLuxAlgoNumba as SMCLuxAlgo
 
-# Import Training Logic
-try:
-    from user_data.strategies.SMC.train_smc_model import train_model
-except ImportError:
-    # Fallback if path parsing fails (e.g. running from different root)
-    logger.warning("Could not import train_model. Auto-training disabled.")
-    train_model = None
+# train_model is imported lazily inside bot_start only when auto-training is enabled.
 
 
 class SMCWithMLLuxAlgo(IStrategy):
@@ -95,7 +89,7 @@ class SMCWithMLLuxAlgo(IStrategy):
     use_custom_stoploss = True  # Enable for breakeven
     position_adjustment_enable = True  # Enable for partial TPs
     process_only_new_candles = True  # Avoid reprocessing closed candles on every tick
-    max_open_trades = 3
+    max_open_trades = 5
     startup_candle_count: int = 400  # EMA(200) + ATR(200) + swing_length up to 100 (×2 for confirmation)
     can_short = True
 
@@ -118,10 +112,10 @@ class SMCWithMLLuxAlgo(IStrategy):
     # To match Pine Default: set use_swing_signals=True, use_internal_signals=False.
 
     # Internal structure length (reactive)
-    internal_length = IntParameter(3, 10, default=5, space="buy", optimize=True)
+    internal_length = IntParameter(3, 8, default=5, space="buy", optimize=True)
 
     # Swing structure length (stable)
-    swing_length = IntParameter(20, 100, default=50, space="buy", optimize=True)
+    swing_length = IntParameter(20, 60, default=50, space="buy", optimize=True)
 
     # Use internal or swing signals for entry
     # Note: Pine Script uses a dropdown XOR selection. Here we allow both via categorical.
@@ -134,56 +128,56 @@ class SMCWithMLLuxAlgo(IStrategy):
 
     # Only trade CHoCH (reversals) or also BOS (continuations)?
     # Pine Strategy ONLY trades CHoCH for entries. Default to True to match.
-    require_choch = BooleanParameter(default=True, space="buy", optimize=True)
+    require_choch = BooleanParameter(default=True, space="buy", optimize=False)
 
     # Zone requirements - combined to avoid flat spaces in Hyperopt
     required_zone = CategoricalParameter(
-        ["ob_only", "fvg_only", "any", "none"],
+        ["ob_only", "fvg_only", "any"],
         default="any",
         space="buy",
         optimize=True,
     )
 
     # NEW: Volumetric Order Blocks (BigBeluga Style)
-    require_volumetric_ob = BooleanParameter(default=True, space="buy", optimize=True)
-    vol_sma_period = IntParameter(10, 50, default=20, space="buy", optimize=True)
+    require_volumetric_ob = BooleanParameter(default=True, space="buy", optimize=False)
+    vol_sma_period = IntParameter(10, 30, default=20, space="buy", optimize=True)
     ob_rvol_threshold = DecimalParameter(
-        1.2, 3.5, default=1.8, decimals=1, space="buy", optimize=True
+        1.2, 2.5, default=1.5, decimals=1, space="buy", optimize=True
     )
 
     # Trend filter - disabled by default to match Pine Strategy execution logic
     # (Pine indicator shows trend color, but strategy entry block does not enforce it)
-    trade_with_trend = BooleanParameter(default=False, space="buy", optimize=True)
+    trade_with_trend = BooleanParameter(default=True, space="buy", optimize=False)
 
     # Lookback for recent signals
     # 1 = Instant Entry (Signal + Zone on same candle)
     # > 1 = Retest Logic (Signal happened X bars ago, entering now on Zone or Pullback)
-    entry_signal_lookback = IntParameter(1, 24, default=1, space="buy", optimize=True)
+    entry_signal_lookback = IntParameter(1, 6, default=2, space="buy", optimize=True)
 
     # Per-HTF: Use internal_trend (faster, reacts to CHoCH) vs swing_trend (slower, more reliable)
-    htf_1_use_internal = BooleanParameter(default=False, space="buy", optimize=True)
-    htf_2_use_internal = BooleanParameter(default=True, space="buy", optimize=True)
+    htf_1_use_internal = BooleanParameter(default=False, space="buy", optimize=False)
+    htf_2_use_internal = BooleanParameter(default=False, space="buy", optimize=False)
 
     # NEW: Dynamic Stoploss Toggle & Offset
-    use_dynamic_stoploss = BooleanParameter(default=True, space="sell", optimize=True)
+    use_dynamic_stoploss = BooleanParameter(default=True, space="sell", optimize=False)
     sl_buffer_pct = DecimalParameter(
-        0.001, 0.01, default=0.002, decimals=3, space="sell", optimize=True
+        0.001, 0.008, default=0.003, decimals=3, space="sell", optimize=True
     )
 
     # NEW: FVG ATR Filter (BigBeluga Style)
     # Filter out based on volatility (ATR) rather than percentage.
     # Threshold = ATR(200) * fvg_atr_threshold.
     fvg_atr_threshold = DecimalParameter(
-        0.05, 0.50, default=0.1, decimals=2, space="buy", optimize=True
+        0.05, 0.25, default=0.10, decimals=2, space="buy", optimize=True
     )
 
     # NEW: Conservative Entry Mode
     # If False, ignores signals on the current candle (0 bars ago), forcing a wait.
-    allow_immediate_entry = BooleanParameter(default=True, space="buy", optimize=True)
+    allow_immediate_entry = BooleanParameter(default=False, space="buy", optimize=False)
 
     # Liquidity Sweep: If detected + CHoCH, bypass zone requirement
-    use_sweep_bypass = BooleanParameter(default=True, space="buy", optimize=True)
-    sweep_lookback = IntParameter(1, 10, default=3, space="buy", optimize=True)
+    use_sweep_bypass = BooleanParameter(default=False, space="buy", optimize=False)
+    sweep_lookback = IntParameter(1, 10, default=3, space="buy", optimize=False)
 
     # Dynamic TP1 / BE adjustment based on opposing zone proximity.
     # If a strong OB/FVG sits between entry and default TP1, reduce TP1 to just below
@@ -191,10 +185,10 @@ class SMCWithMLLuxAlgo(IStrategy):
     # to the actual structure instead of a fixed percentage.
     use_dynamic_tp_adj = BooleanParameter(default=True, space="sell", optimize=False)
     tp_adj_min_rvol = DecimalParameter(
-        1.0, 3.0, default=1.5, decimals=1, space="sell", optimize=True
+        1.2, 2.5, default=1.5, decimals=1, space="sell", optimize=True
     )
     tp_adj_margin = DecimalParameter(
-        0.1, 0.9, default=0.80, decimals=2, space="sell", optimize=True
+        0.50, 0.90, default=0.80, decimals=2, space="sell", optimize=True
     )  # Take profit at X% of zone distance
 
     # Logging Control
@@ -235,7 +229,7 @@ class SMCWithMLLuxAlgo(IStrategy):
         default=False, space="buy", optimize=False
     )  # True = per-symbol, False = general
     ml_threshold = DecimalParameter(
-        0.05, 0.50, default=0.15, decimals=2, space="buy", optimize=True
+        0.05, 0.50, default=0.15, decimals=2, space="buy", optimize=False
     )
     ml_model_path = "user_data/strategies/SMC/models"
     enable_auto_training = BooleanParameter(default=False, space="buy", optimize=False)
@@ -254,29 +248,29 @@ class SMCWithMLLuxAlgo(IStrategy):
 
     # TP1: % movement of price (not leveraged PnL)
     # Pine Default: 1.0%. Adjusted Range to allow "high value" (e.g. 0.50 = 50% move).
-    tp1_pct = DecimalParameter(0.005, 0.50, default=0.01, decimals=3, space="sell", optimize=True)
+    tp1_pct = DecimalParameter(0.005, 0.05, default=0.015, decimals=3, space="sell", optimize=True)
 
     # TP1 Enabled: Bool to turn on/off the partial exit
-    tp1_enabled = BooleanParameter(default=True, space="sell", optimize=True)
+    tp1_enabled = BooleanParameter(default=True, space="sell", optimize=False)
 
     # TP1 Amount: % of position to close
     # Pine Default: 50%. Allow 0.0 to disable partials.
-    tp1_amount = DecimalParameter(0.0, 100.0, default=50.0, space="sell", optimize=True)
+    tp1_amount = CategoricalParameter([25, 33, 50, 67, 75], default=50, space="sell", optimize=True)
 
     # Break Even (Pine 'stratMoveBE')
     # Pine Default: False
-    move_be_at_tp1 = BooleanParameter(default=False, space="sell", optimize=True)
+    move_be_at_tp1 = BooleanParameter(default=True, space="sell", optimize=False)
 
     # Custom Break Even Target (Optional)
     # If > 0, BE is activated cuando el precio se mueve este %, ignorando el tp1_pct.
     be_trigger_pct = DecimalParameter(
-        0.0, 0.50, default=0.0, decimals=3, space="sell", optimize=True
+        0.0, 0.04, default=0.0, decimals=3, space="sell", optimize=True
     )
 
     # Final Exit (Reversal)
     # Granular control over which CHoCH triggers an exit
     exit_trend_type = CategoricalParameter(
-        ["swing", "internal", "both", "none"],
+        ["swing", "internal", "both"],
         default="both",
         space="sell",
         optimize=True,
@@ -289,7 +283,23 @@ class SMCWithMLLuxAlgo(IStrategy):
         ["enabled", "disabled"],
         default="enabled",
         space="buy",
-        optimize=True,
+        optimize=False,
+    )
+
+    # ==========================================================================
+    # MACRO REGIME FILTER
+    # ==========================================================================
+    # Uses BTC Weekly EMA(21) as macro bias arbiter.
+    # Bull bias  (BTC > EMA21 * 1.01): longs allowed, shorts blocked
+    # Bear bias  (BTC < EMA21 * 0.99): shorts allowed, longs blocked
+    # Neutral    (within ±1% of EMA21): both directions allowed
+    # BTC/USDT:USDT is always loaded as informative regardless of whitelist.
+
+    use_macro_filter = CategoricalParameter(
+        ["enabled", "disabled"],
+        default="enabled",
+        space="buy",
+        optimize=False,
     )
 
     # ==========================================================================
@@ -306,27 +316,23 @@ class SMCWithMLLuxAlgo(IStrategy):
         Strategy startup.
         Applies leverage to risk parameters defined in JSON.
         """
-        print(
-            f"🤖 DEBUG: Bot Start. use_ml_filter: {self.use_ml_filter.value}, auto_train: {self.enable_auto_training.value}"
-        )
         logger.info(
-            f"🤖 Bot Start. use_ml_filter: {self.use_ml_filter.value}, auto_train: {self.enable_auto_training.value}"
+            f"SMCWithMLLuxAlgo starting. use_ml_filter={self.use_ml_filter.value}, "
+            f"auto_train={self.enable_auto_training.value}"
         )
 
         # 0. Auto-Train Model (Only if explicitly enabled)
-        if self.use_ml_filter.value and self.enable_auto_training.value and train_model:
-            print("🚀 DEBUG: Starting Auto-Training...")
-            logger.info("🚀 Starting Auto-Training of ML Model (Hyperopt enabled)...")
-            success = train_model()
-            if success:
-                logger.info("✅ Auto-Training Complete.")
-                print("✅ DEBUG: Auto-Training Complete.")
-            else:
-                logger.error("❌ Auto-Training Failed. Using existing model if available.")
-                print("❌ DEBUG: Auto-Training Failed.")
-        elif self.use_ml_filter.value and not self.enable_auto_training.value:
-            logger.info("ℹ️ Auto-Training disabled. Loading existing model.")
-            print("ℹ️ DEBUG: Auto-Training disabled.")
+        if self.use_ml_filter.value and self.enable_auto_training.value:
+            try:
+                from user_data.strategies.SMC.train_smc_model import train_model
+                logger.info("Starting Auto-Training of ML Model...")
+                success = train_model()
+                if success:
+                    logger.info("Auto-Training Complete.")
+                else:
+                    logger.error("Auto-Training Failed. Using existing model if available.")
+            except ImportError:
+                logger.error("Could not import train_smc_model. Auto-training disabled.")
 
         # Load ML model here (after params are loaded)
         self._load_ml_model()
@@ -367,6 +373,7 @@ class SMCWithMLLuxAlgo(IStrategy):
     def informative_pairs(self):
         """
         Define pairs to load based on htf_1 and htf_2 parameters.
+        Macro regime filter uses each pair's own 1H data (already in htf_list) — no extra pair needed.
         """
         pairs = self.dp.current_whitelist()
         htf_list = self._get_active_htf_list()
@@ -374,6 +381,9 @@ class SMCWithMLLuxAlgo(IStrategy):
         informative_pairs = []
         for tf in htf_list:
             informative_pairs += [(pair, tf) for pair in pairs]
+
+        # Macro regime filter uses each pair's own 1H data (already loaded via htf_1).
+        # No extra informative pair needed.
 
         logger.info(f"Informative pairs configured for timeframes: {htf_list}")
         return informative_pairs
@@ -400,24 +410,22 @@ class SMCWithMLLuxAlgo(IStrategy):
                     logger.error(f"❌ Failed to load general ML model: {e}")
                     self._models_cache["general"] = None
 
-        # Load optimal threshold saved by training script
-        import json as _json
-
-        threshold_file = os.path.join(self.ml_model_path, "smc_xgboost_threshold.json")
-        if os.path.exists(threshold_file):
-            try:
-                with open(threshold_file, "r") as f:
-                    tdata = _json.load(f)
-                self._ml_optimal_threshold = tdata.get("threshold", None)
-                logger.info(
-                    f"✅ ML Threshold loaded: {self._ml_optimal_threshold:.4f} "
-                    f"(F1={tdata.get('f1', 0):.4f}, AUC={tdata.get('auc', 0):.4f})"
-                )
-            except Exception as e:
-                logger.warning(f"Could not load ML threshold file: {e}")
-                self._ml_optimal_threshold = None
-        else:
-            self._ml_optimal_threshold = None
+        # Load optimal threshold — only needed when ML filter is active
+        self._ml_optimal_threshold = None
+        if self.use_ml_filter.value:
+            import json as _json
+            threshold_file = os.path.join(self.ml_model_path, "smc_xgboost_threshold.json")
+            if os.path.exists(threshold_file):
+                try:
+                    with open(threshold_file, "r") as f:
+                        tdata = _json.load(f)
+                    self._ml_optimal_threshold = tdata.get("threshold", None)
+                    logger.info(
+                        f"ML Threshold loaded: {self._ml_optimal_threshold:.4f} "
+                        f"(F1={tdata.get('f1', 0):.4f}, AUC={tdata.get('auc', 0):.4f})"
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not load ML threshold file: {e}")
 
         # Set default model to general if exists
         if "general" in self._models_cache:
@@ -620,14 +628,17 @@ class SMCWithMLLuxAlgo(IStrategy):
                 except Exception as e:
                     logger.error(f"Error processing HTF {htf}: {e}")
 
-        # --- 3. Enrichment layers (new features) ─────────────────────────
+        # --- 3. Macro Regime Filter (BTC Weekly EMA21) ───────────────────
+        dataframe = self._add_macro_bias(dataframe, metadata)
+
+        # --- 4. Enrichment layers (new features) ─────────────────────────
         dataframe = self._add_pdh_pdl(dataframe, metadata)
         dataframe = self._add_premium_discount(dataframe)
         dataframe = self._add_session_context(dataframe)
-        dataframe = self._add_liquidity_pools(dataframe)
 
-        # --- 4. ML Features (Context & Technicals) ───────────────────────
-        dataframe = self._add_ml_features(dataframe)
+        # --- 5. ML Features (only when ML filter is active) ─────────────
+        if self.use_ml_filter.value:
+            dataframe = self._add_ml_features(dataframe)
 
         # Log summary
         if self.dp and self.enable_logging.value:
@@ -848,9 +859,10 @@ class SMCWithMLLuxAlgo(IStrategy):
             logger.warning("Multi-zone: raw event columns not found – skipping.")
             return dataframe
 
-        MAX_OBS  = self._MZ_MAX_OBS
-        MAX_FVGS = self._MZ_MAX_FVGS
-        MAX_BRKS = self._MZ_MAX_BRKS
+        # When ML is off only slot-0 is used in entry/exit — skip the rest
+        MAX_OBS  = self._MZ_MAX_OBS  if self.use_ml_filter.value else 1
+        MAX_FVGS = self._MZ_MAX_FVGS if self.use_ml_filter.value else 1
+        MAX_BRKS = self._MZ_MAX_BRKS if self.use_ml_filter.value else 1
 
         n      = len(dataframe)
         high   = dataframe["high"].values
@@ -1128,6 +1140,76 @@ class SMCWithMLLuxAlgo(IStrategy):
         return dataframe
 
     # ==========================================================================
+    # MACRO REGIME FILTER  (Pair-Specific Weekly EMA21)
+    # ==========================================================================
+
+    def _add_macro_bias(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        """
+        Adds 'btc_macro_bias' column: +1 = bull, 0 = neutral, -1 = bear.
+
+        Uses each pair's own 1H data resampled to weekly vs EMA21 with ±1% buffer.
+        Resamples to Monday-anchored weeks (same as TradingView "W" bars).
+        shift(1) ensures no lookahead — only closed weekly candles influence entries.
+        Falls back to 0 (neutral = both directions allowed) on any error.
+        """
+        dataframe["btc_macro_bias"] = 0  # default: neutral
+
+        if not self.dp:
+            return dataframe
+
+        try:
+            btc_1h = self.dp.get_pair_dataframe(metadata["pair"], "1h")
+            if btc_1h is None or btc_1h.empty:
+                logger.warning(f"Macro bias: {metadata['pair']} 1H dataframe not available, defaulting to neutral.")
+                return dataframe
+
+            # Resample 1H → weekly (Monday anchor, same as TradingView "W")
+            btc_1h = btc_1h[["date", "open", "high", "low", "close", "volume"]].copy()
+            btc_1h = btc_1h.set_index("date")
+            btc_weekly = btc_1h.resample("W-MON", label="left", closed="left").agg(
+                {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+            ).dropna(subset=["close"])
+            btc_weekly = btc_weekly.reset_index()
+
+            # pandas ewm with min_periods=1 avoids the hard NaN warmup of talib EMA.
+            # talib EMA(21) needs 21 full weeks before producing any value — with
+            # startup_candle_count limited to ~12 weeks, it returns all NaN.
+            # ewm(span=21, min_periods=1) starts from the first available data point
+            # and converges to the true EMA21 as more data accumulates.
+            btc_weekly["btc_ema21_1w"] = btc_weekly["close"].ewm(span=21, min_periods=1).mean()
+
+            btc_weekly["btc_macro_bias"] = np.where(
+                btc_weekly["close"] > btc_weekly["btc_ema21_1w"] * 1.01,  1,
+                np.where(btc_weekly["close"] < btc_weekly["btc_ema21_1w"] * 0.99, -1, 0),
+            )
+
+            # shift(1): bias is determined by the *closed* weekly candle, not the current one
+            btc_weekly["btc_macro_bias"] = btc_weekly["btc_macro_bias"].shift(1)
+
+            # Expand weekly → 15m by forward-filling across all candles.
+            # Strategy: merge on exact Monday 00:00 timestamps, then ffill.
+            # The 15m dataframe's date column is the open time of each candle.
+            weekly_bias = btc_weekly[["date", "btc_macro_bias"]].copy()
+            # Align timezones: convert weekly dates to match main dataframe
+            if dataframe["date"].dt.tz is not None and weekly_bias["date"].dt.tz is None:
+                weekly_bias["date"] = weekly_bias["date"].dt.tz_localize("UTC")
+            elif dataframe["date"].dt.tz is None and weekly_bias["date"].dt.tz is not None:
+                weekly_bias["date"] = weekly_bias["date"].dt.tz_convert(None)
+
+            # Rename before merge to avoid collision with the default=0 column already on dataframe
+            weekly_bias = weekly_bias.rename(columns={"btc_macro_bias": "_macro_bias_w"})
+            dataframe = pd.merge(dataframe, weekly_bias, on="date", how="left")
+
+            # Forward-fill weekly value across all 15m candles; leading NaN → neutral
+            dataframe["btc_macro_bias"] = dataframe.pop("_macro_bias_w").ffill().fillna(0).astype(int)
+
+        except Exception as e:
+            logger.warning(f"Macro bias calculation failed, defaulting to neutral: {e}")
+            dataframe["btc_macro_bias"] = 0
+
+        return dataframe
+
+    # ==========================================================================
     # PDH / PDL  (Priority 4)
     # ==========================================================================
 
@@ -1367,103 +1449,6 @@ class SMCWithMLLuxAlgo(IStrategy):
         dow = dt.dt.dayofweek
         dataframe["is_monday"] = (dow == 0).values
         dataframe["is_friday"] = (dow == 4).values
-
-        return dataframe
-
-    # ==========================================================================
-    # LIQUIDITY POOLS  (Priority 7)
-    # ==========================================================================
-
-    def _add_liquidity_pools(self, dataframe: DataFrame) -> DataFrame:
-        """
-        Identify clusters of swing highs/lows within a LOOKBACK window.
-
-        A 'pivot high' = bar whose high > both neighbours (3-bar window).
-        Levels within CLUSTER_PCT of each other are merged into one pool.
-        Pools are sorted by proximity to close.
-
-        New columns (per direction, 5 slots each)
-        -----------------------------------------
-        nearest_resistance, nearest_support
-        resist_{k}_level, resist_{k}_density  (k=0..4)
-        support_{k}_level, support_{k}_density (k=0..4)
-        """
-        LOOKBACK    = 50
-        TOP_N       = 5
-        CLUSTER_PCT = 0.002   # 0.2 %
-
-        n     = len(dataframe)
-        high  = dataframe["high"].values
-        low   = dataframe["low"].values
-        close = dataframe["close"].values
-
-        # Vectorised pivot detection (3-bar local max/min).
-        # FIX: detecting pivot at bar i requires high[i+1] (lookahead). We shift
-        # the result by 1 so the pivot is only "known" at bar i+1, when the right
-        # neighbour has already closed.
-        _ph = np.zeros(n, dtype=bool)
-        _pl = np.zeros(n, dtype=bool)
-        _ph[1:-1] = (high[1:-1] > high[:-2]) & (high[1:-1] > high[2:])
-        _pl[1:-1] = (low[1:-1]  < low[:-2])  & (low[1:-1]  < low[2:])
-        pivot_high = np.zeros(n, dtype=bool)
-        pivot_low  = np.zeros(n, dtype=bool)
-        pivot_high[1:] = _ph[:-1]   # confirmed one bar later
-        pivot_low[1:]  = _pl[:-1]
-
-        nearest_resist = np.full(n, np.nan)
-        nearest_support = np.full(n, np.nan)
-        resist_lvl = np.zeros((n, TOP_N))
-        resist_den = np.zeros((n, TOP_N))
-        support_lvl = np.zeros((n, TOP_N))
-        support_den = np.zeros((n, TOP_N))
-
-        def _cluster(levels: list, pct: float) -> list:
-            """Merge nearby levels; return [(avg_price, count)] sorted asc."""
-            if not levels:
-                return []
-            levels = sorted(levels)
-            clusters: list = []
-            grp = [levels[0]]
-            for lv in levels[1:]:
-                if grp and lv / grp[-1] - 1 <= pct:
-                    grp.append(lv)
-                else:
-                    clusters.append((sum(grp) / len(grp), len(grp)))
-                    grp = [lv]
-            clusters.append((sum(grp) / len(grp), len(grp)))
-            return clusters
-
-        for i in range(LOOKBACK, n):
-            c   = close[i]
-            s   = max(0, i - LOOKBACK)
-            wh  = high[s:i][pivot_high[s:i]]
-            wl  = low[s:i][pivot_low[s:i]]
-
-            # Resistance: pivot highs ABOVE close
-            r_clusters = _cluster([v for v in wh if v > c], CLUSTER_PCT)
-            r_clusters.sort(key=lambda x: x[0])              # nearest first
-            if r_clusters:
-                nearest_resist[i] = r_clusters[0][0]
-            for k, (lv, dn) in enumerate(r_clusters[:TOP_N]):
-                resist_lvl[i, k] = lv
-                resist_den[i, k] = dn
-
-            # Support: pivot lows BELOW close
-            s_clusters = _cluster([v for v in wl if v < c], CLUSTER_PCT)
-            s_clusters.sort(key=lambda x: -x[0])             # nearest first (highest)
-            if s_clusters:
-                nearest_support[i] = s_clusters[0][0]
-            for k, (lv, dn) in enumerate(s_clusters[:TOP_N]):
-                support_lvl[i, k] = lv
-                support_den[i, k] = dn
-
-        dataframe["nearest_resistance"] = nearest_resist
-        dataframe["nearest_support"]    = nearest_support
-        for k in range(TOP_N):
-            dataframe[f"resist_{k}_level"]   = resist_lvl[:, k]
-            dataframe[f"resist_{k}_density"] = resist_den[:, k]
-            dataframe[f"support_{k}_level"]  = support_lvl[:, k]
-            dataframe[f"support_{k}_density"]= support_den[:, k]
 
         return dataframe
 
@@ -1995,6 +1980,24 @@ class SMCWithMLLuxAlgo(IStrategy):
             except Exception as e:
                 logger.error(f"❌ ML Inference Failed for {metadata['pair']}: {e}")
                 pass
+
+        # ===== MACRO REGIME FILTER (BTC Weekly EMA21) =====
+        if self.use_macro_filter.value == "enabled":
+            macro_long_ok  = dataframe["btc_macro_bias"] >= 0   # bull or neutral → longs allowed
+            macro_short_ok = dataframe["btc_macro_bias"] <= 0   # bear or neutral → shorts allowed
+
+            blocked_macro_long  = long_condition.sum()  - (long_condition  & macro_long_ok).sum()
+            blocked_macro_short = short_condition.sum() - (short_condition & macro_short_ok).sum()
+
+            long_condition  = long_condition  & macro_long_ok
+            short_condition = short_condition & macro_short_ok
+
+            if (blocked_macro_long > 0 or blocked_macro_short > 0) and self.enable_logging.value:
+                logger.info(
+                    f"🌍 Macro Filter ({metadata['pair']}) blocked "
+                    f"{blocked_macro_long} longs, {blocked_macro_short} shorts. "
+                    f"BTC macro bias: {dataframe['btc_macro_bias'].iloc[-1]}"
+                )
 
         # Apply signals
         dataframe.loc[long_condition, "enter_long"] = 1

@@ -1,5 +1,6 @@
 {
     "max_open_trades": 5,
+    "stoploss": -0.02,
     "stake_currency": "USDT",
     "stake_amount": 10,
     "tradable_balance_ratio": 0.99,
@@ -128,13 +129,7 @@
             "SOPH/USDT:USDT",
             "1000CAT/USDT:USDT"
         ],
-        "pair_blacklist": [
-            "TSLA/USDT:USDT",
-            "JASMY/USDT:USDT",
-            "NVDA/USDT:USDT",
-            "ETH/USDT:USDT",
-            "HYPE/USDT:USDT"
-        ]
+        "pair_blacklist": []
     },
     "fee": 0.0004,
     "pairlists": [
