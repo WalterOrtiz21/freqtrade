@@ -5,7 +5,7 @@ from datetime import datetime
 from pandas import DataFrame
 from typing import Optional
 
-from freqtrade.strategy import IStrategy, IntParameter, DecimalParameter, BooleanParameter, CategoricalParameter, stoploss_from_absolute
+from freqtrade.strategy import IStrategy, IntParameter, DecimalParameter, BooleanParameter, CategoricalParameter, stoploss_from_absolute, merge_informative_pair
 from freqtrade.persistence import Trade
 import talib.abstract as ta
 from numba import njit
@@ -94,7 +94,7 @@ class VolatilityGaussianBands(IStrategy):
         if not hasattr(self, '_models_cache'):
             self._models_cache = {}
             
-        general_model_file = os.path.join(self.ml_model_path, "smc_xgboost_model.pkl")
+        general_model_file = os.path.join(self.ml_model_path, "gaussian_xgboost_model.pkl")
         if os.path.exists(general_model_file) and 'general' not in self._models_cache:
             if self.use_ml_filter.value:
                 try:
@@ -217,10 +217,15 @@ class VolatilityGaussianBands(IStrategy):
                 inf_htf.loc[inf_htf['htf_cross_dn'], 'htf_trend_signal'] = -1
                 inf_htf['htf_trend'] = inf_htf['htf_trend_signal'].replace(0, np.nan).ffill().fillna(0)
                 
-                # Merge logic
-                inf_htf = inf_htf[['date', 'htf_trend']].copy()
-                df = pd.merge(df, inf_htf, on='date', how='left')
-                df['htf_trend'] = df['htf_trend'].ffill().fillna(0)
+                # Merge with proper shift — merge_informative_pair shifts HTF dates
+                # forward by 1 HTF period so each base candle only sees CLOSED HTF candles.
+                # pd.merge on 'date' was lookahead: 1H candle at 00:00 was getting the
+                # 4H trend from the candle that opens at 00:00 but closes at 04:00.
+                inf_htf_merge = inf_htf[['date', 'htf_trend']].copy()
+                df = merge_informative_pair(df, inf_htf_merge, self.timeframe, htf, ffill=True)
+                # merge_informative_pair appends the HTF suffix; rename back for downstream code
+                df['htf_trend'] = df[f'htf_trend_{htf}'].fillna(0)
+                df.drop(columns=[f'htf_trend_{htf}', f'date_{htf}'], errors='ignore', inplace=True)
             else:
                 df['htf_trend'] = 0
         else:

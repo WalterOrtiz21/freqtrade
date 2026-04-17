@@ -9,7 +9,7 @@ from numba import njit
 import talib.abstract as ta
 import pandas_ta as pta
 
-from freqtrade.strategy import IStrategy, IntParameter, DecimalParameter, BooleanParameter, CategoricalParameter, stoploss_from_absolute
+from freqtrade.strategy import IStrategy, IntParameter, DecimalParameter, BooleanParameter, CategoricalParameter, stoploss_from_absolute, merge_informative_pair
 from freqtrade.persistence import Trade
 
 logger = logging.getLogger(__name__)
@@ -189,7 +189,7 @@ class TrendlinesWithBreaks(IStrategy):
     }
     
     # Stoploss - Set to something wide, we manage it dynamically
-    stoploss = -0.99 
+    stoploss = -0.15
     
     timeframe = '5m'
     
@@ -199,7 +199,7 @@ class TrendlinesWithBreaks(IStrategy):
     use_custom_stoploss = True
     position_adjustment_enable = True
     max_open_trades = 3
-    startup_candle_count: int = 50
+    startup_candle_count: int = 200
     
     # Trendline Parameters
     length = IntParameter(10, 50, default=14, space='buy', optimize=True)
@@ -381,12 +381,15 @@ class TrendlinesWithBreaks(IStrategy):
                     inf_htf.loc[inf_htf['close'] > htf_upper, htf_trend_col] = 1
                     inf_htf.loc[inf_htf['close'] < htf_lower, htf_trend_col] = -1
                     
-                    # Prepare for merge
-                    inf_htf = inf_htf[['date', htf_trend_col]].copy()
-                    
-                    # Merge into main dataframe
-                    dataframe = pd.merge(dataframe, inf_htf, on='date', how='left')
-                    dataframe[htf_trend_col] = dataframe[htf_trend_col].ffill().fillna(0)
+                    # Prepare for merge — merge_informative_pair shifts HTF dates forward
+                    # by 1 HTF period so base candles only see CLOSED HTF candles.
+                    # pd.merge on 'date' was lookahead: 5m candle at 00:00 was getting
+                    # the 1h trend from the candle that opens at 00:00 but closes at 01:00.
+                    inf_htf_merge = inf_htf[['date', htf_trend_col]].copy()
+                    dataframe = merge_informative_pair(dataframe, inf_htf_merge, self.timeframe, htf, ffill=True)
+                    merged_col = f'{htf_trend_col}_{htf}'
+                    dataframe[htf_trend_col] = dataframe[merged_col].fillna(0)
+                    dataframe.drop(columns=[merged_col, f'date_{htf}'], errors='ignore', inplace=True)
                     
                     logger.info(f"HTF {htf} trend calculated for {metadata['pair']}")
                     
