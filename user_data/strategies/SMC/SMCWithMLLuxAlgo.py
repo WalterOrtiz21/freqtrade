@@ -364,45 +364,10 @@ class SMCWithMLLuxAlgo(IStrategy):
         # Load ML model here (after params are loaded)
         self._load_ml_model()
 
-        # Load LLM Confluence Filter
+        # LLM filter init is deferred to _init_llm_filter() (lazy init)
+        # because freqtrade loads JSON params AFTER bot_start()
         self._llm_filter = None
-        if self.use_llm_filter.value or self.use_llm_shadow.value:
-            # Disable for backtest/hyperopt — API calls are not viable for historical data
-            if self.dp and self.dp.runmode.value in ("backtest", "hyperopt"):
-                logger.info("LLM filter disabled for backtest/hyperopt mode")
-            else:
-                api_key = os.environ.get("OPENROUTER_API_KEY", "")
-                if api_key:
-                    shadow = self.use_llm_shadow.value and not self.use_llm_filter.value
-                    log_dir = ""
-                    if shadow:
-                        log_dir = os.path.join(
-                            os.path.dirname(__file__), "..", "llm_shadow_logs"
-                        )
-                    try:
-                        self._llm_filter = LLMConfluenceFilter(
-                            api_key=api_key,
-                            model=self.llm_model_name.value,
-                            confidence_threshold=self.llm_confidence_threshold.value,
-                            timeout=25,
-                            max_retries=2,
-                            cache_ttl=900,
-                            shadow_mode=shadow,
-                            log_dir=log_dir,
-                        )
-                        mode_str = "SHADOW (log only)" if shadow else "FILTER (blocking)"
-                        logger.info(
-                            f"LLM Confluence Filter [{mode_str}]: "
-                            f"model={self.llm_model_name.value}, "
-                            f"threshold={self.llm_confidence_threshold.value:.2f}"
-                        )
-                    except Exception as e:
-                        logger.error(f"Failed to initialize LLM filter: {e}")
-                        self._llm_filter = None
-                else:
-                    logger.warning(
-                        "use_llm_filter=True but OPENROUTER_API_KEY not set. LLM filter disabled."
-                    )
+        self._llm_initialized = False
 
         # 1. Get Leverage
         config_leverage = self.config.get("leverage", 1.0)
@@ -556,8 +521,64 @@ class SMCWithMLLuxAlgo(IStrategy):
     # INDICATOR CALCULATION
     # ==========================================================================
 
+    def _init_llm_filter(self) -> None:
+        """Lazy init of LLM filter — called on first populate_indicators.
+
+        freqtrade loads JSON params AFTER bot_start(), so we can't read
+        use_llm_shadow / use_llm_filter there. This runs once, when params
+        are already loaded.
+        """
+        if self._llm_initialized:
+            return
+        self._llm_initialized = True
+
+        if not (self.use_llm_filter.value or self.use_llm_shadow.value):
+            return
+
+        if self.dp and self.dp.runmode.value in ("backtest", "hyperopt"):
+            logger.info("LLM filter disabled for backtest/hyperopt mode")
+            return
+
+        api_key = os.environ.get("OPENROUTER_API_KEY", "")
+        if not api_key:
+            logger.warning(
+                "use_llm_filter/shadow=True but OPENROUTER_API_KEY not set. "
+                "LLM filter disabled."
+            )
+            return
+
+        shadow = self.use_llm_shadow.value and not self.use_llm_filter.value
+        log_dir = ""
+        if shadow:
+            log_dir = os.path.join(
+                os.path.dirname(__file__), "..", "llm_shadow_logs"
+            )
+        try:
+            self._llm_filter = LLMConfluenceFilter(
+                api_key=api_key,
+                model=self.llm_model_name.value,
+                confidence_threshold=self.llm_confidence_threshold.value,
+                timeout=25,
+                max_retries=2,
+                cache_ttl=900,
+                shadow_mode=shadow,
+                log_dir=log_dir,
+            )
+            mode_str = "SHADOW (log only)" if shadow else "FILTER (blocking)"
+            logger.info(
+                f"LLM Confluence Filter [{mode_str}]: "
+                f"model={self.llm_model_name.value}, "
+                f"threshold={self.llm_confidence_threshold.value:.2f}"
+            )
+        except Exception as e:
+            logger.error(f"Failed to initialize LLM filter: {e}")
+            self._llm_filter = None
+
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         """Calculate SMC indicators using LuxAlgo-style library."""
+
+        # Lazy init LLM filter (params loaded after bot_start)
+        self._init_llm_filter()
 
         # --- 1. MTF (15m) Calculations ---
         # Calculate SMC signals (Numba)
@@ -2079,8 +2100,8 @@ class SMCWithMLLuxAlgo(IStrategy):
                 logger.error(f"❌ ML Inference Failed for {metadata['pair']}: {e}")
                 pass
 
-        # ===== LLM CONFLUENCE FILTER =====
-        if self.use_llm_filter.value and self._llm_filter is not None:
+        # ===== LLM CONFLUENCE FILTER / SHADOW =====
+        if (self.use_llm_filter.value or self.use_llm_shadow.value) and self._llm_filter is not None:
             try:
                 llm_long_ok, llm_short_ok, llm_stats = self._llm_filter.evaluate_entries(
                     pair=metadata["pair"],
@@ -2088,18 +2109,29 @@ class SMCWithMLLuxAlgo(IStrategy):
                     long_mask=long_condition,
                     short_mask=short_condition,
                 )
-                llm_blocked_long = long_condition.sum() - (long_condition & llm_long_ok).sum()
-                llm_blocked_short = short_condition.sum() - (short_condition & llm_short_ok).sum()
-                long_condition &= llm_long_ok
-                short_condition &= llm_short_ok
-                if llm_blocked_long > 0 or llm_blocked_short > 0:
-                    logger.info(
-                        f"LLM Filter ({metadata['pair']}) Blocked "
-                        f"{llm_blocked_long} Longs, {llm_blocked_short} Shorts. "
-                        f"Threshold: {self.llm_confidence_threshold.value:.2f}. "
-                        f"Cached: {llm_stats.get('cached', 0)}, "
-                        f"Errors: {llm_stats.get('errors', 0)}"
-                    )
+                if self.use_llm_filter.value:
+                    llm_blocked_long = long_condition.sum() - (long_condition & llm_long_ok).sum()
+                    llm_blocked_short = short_condition.sum() - (short_condition & llm_short_ok).sum()
+                    long_condition &= llm_long_ok
+                    short_condition &= llm_short_ok
+                    if llm_blocked_long > 0 or llm_blocked_short > 0:
+                        logger.info(
+                            f"LLM Filter ({metadata['pair']}) Blocked "
+                            f"{llm_blocked_long} Longs, {llm_blocked_short} Shorts. "
+                            f"Threshold: {self.llm_confidence_threshold.value:.2f}. "
+                            f"Cached: {llm_stats.get('cached', 0)}, "
+                            f"Errors: {llm_stats.get('errors', 0)}"
+                        )
+                else:
+                    shadow_logged = llm_stats.get("shadow_logged", 0)
+                    would_block = llm_stats.get("blocked_long", 0) + llm_stats.get("blocked_short", 0)
+                    if shadow_logged > 0:
+                        logger.info(
+                            f"LLM Shadow ({metadata['pair']}) Evaluated {shadow_logged} signals, "
+                            f"would block {would_block}. "
+                            f"Cached: {llm_stats.get('cached', 0)}, "
+                            f"Errors: {llm_stats.get('errors', 0)}"
+                        )
             except Exception as e:
                 logger.error(f"LLM Filter failed for {metadata['pair']}: {e}")
 
