@@ -20,6 +20,8 @@ services:
     #   dockerfile: "./docker/Dockerfile.custom"
     restart: unless-stopped
     container_name: freqtrade
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
     volumes:
       - "./user_data:/freqtrade/user_data"
     # Expose api on port 8080 (localhost only)

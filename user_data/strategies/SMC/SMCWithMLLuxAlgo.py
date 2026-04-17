@@ -59,6 +59,14 @@ except ImportError:
     sys.path.insert(0, str(Path(__file__).parent))
     from smc_engine import SMCEngine as SMCEngine
 
+# LLM Confluence Filter (OpenRouter API)
+try:
+    from llm_filter import LLMConfluenceFilter
+except ImportError:
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent))
+    from llm_filter import LLMConfluenceFilter
+
 # train_model is imported lazily inside bot_start only when auto-training is enabled.
 
 
@@ -236,6 +244,24 @@ class SMCWithMLLuxAlgo(IStrategy):
     _ml_model = None
 
     # ==========================================================================
+    # LLM CONFLUENCE FILTER PARAMETERS
+    # ==========================================================================
+    use_llm_filter = BooleanParameter(default=False, space="buy", optimize=False)
+    use_llm_shadow = BooleanParameter(default=False, space="buy", optimize=False)
+    llm_confidence_threshold = DecimalParameter(
+        0.3, 0.8, default=0.6, decimals=2, space="buy", optimize=False
+    )
+    llm_model_name = CategoricalParameter(
+        ["z-ai/glm-5-turbo",
+         "openai/gpt-oss-20b:free",
+         "openai/gpt-oss-120b:free",
+         "nvidia/nemotron-3-super-120b-a12b:free"],
+        default="z-ai/glm-5-turbo",
+        space="buy",
+        optimize=False,
+    )
+
+    # ==========================================================================
     # EXIT PARAMETERS (Pine Strategy Alignment)
     # ==========================================================================
 
@@ -318,6 +344,7 @@ class SMCWithMLLuxAlgo(IStrategy):
         """
         logger.info(
             f"SMCWithMLLuxAlgo starting. use_ml_filter={self.use_ml_filter.value}, "
+            f"use_llm_filter={self.use_llm_filter.value}, "
             f"auto_train={self.enable_auto_training.value}"
         )
 
@@ -336,6 +363,46 @@ class SMCWithMLLuxAlgo(IStrategy):
 
         # Load ML model here (after params are loaded)
         self._load_ml_model()
+
+        # Load LLM Confluence Filter
+        self._llm_filter = None
+        if self.use_llm_filter.value or self.use_llm_shadow.value:
+            # Disable for backtest/hyperopt — API calls are not viable for historical data
+            if self.dp and self.dp.runmode.value in ("backtest", "hyperopt"):
+                logger.info("LLM filter disabled for backtest/hyperopt mode")
+            else:
+                api_key = os.environ.get("OPENROUTER_API_KEY", "")
+                if api_key:
+                    shadow = self.use_llm_shadow.value and not self.use_llm_filter.value
+                    log_dir = ""
+                    if shadow:
+                        log_dir = os.path.join(
+                            os.path.dirname(__file__), "..", "llm_shadow_logs"
+                        )
+                    try:
+                        self._llm_filter = LLMConfluenceFilter(
+                            api_key=api_key,
+                            model=self.llm_model_name.value,
+                            confidence_threshold=self.llm_confidence_threshold.value,
+                            timeout=25,
+                            max_retries=2,
+                            cache_ttl=900,
+                            shadow_mode=shadow,
+                            log_dir=log_dir,
+                        )
+                        mode_str = "SHADOW (log only)" if shadow else "FILTER (blocking)"
+                        logger.info(
+                            f"LLM Confluence Filter [{mode_str}]: "
+                            f"model={self.llm_model_name.value}, "
+                            f"threshold={self.llm_confidence_threshold.value:.2f}"
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to initialize LLM filter: {e}")
+                        self._llm_filter = None
+                else:
+                    logger.warning(
+                        "use_llm_filter=True but OPENROUTER_API_KEY not set. LLM filter disabled."
+                    )
 
         # 1. Get Leverage
         config_leverage = self.config.get("leverage", 1.0)
@@ -2012,6 +2079,30 @@ class SMCWithMLLuxAlgo(IStrategy):
                 logger.error(f"❌ ML Inference Failed for {metadata['pair']}: {e}")
                 pass
 
+        # ===== LLM CONFLUENCE FILTER =====
+        if self.use_llm_filter.value and self._llm_filter is not None:
+            try:
+                llm_long_ok, llm_short_ok, llm_stats = self._llm_filter.evaluate_entries(
+                    pair=metadata["pair"],
+                    dataframe=dataframe,
+                    long_mask=long_condition,
+                    short_mask=short_condition,
+                )
+                llm_blocked_long = long_condition.sum() - (long_condition & llm_long_ok).sum()
+                llm_blocked_short = short_condition.sum() - (short_condition & llm_short_ok).sum()
+                long_condition &= llm_long_ok
+                short_condition &= llm_short_ok
+                if llm_blocked_long > 0 or llm_blocked_short > 0:
+                    logger.info(
+                        f"LLM Filter ({metadata['pair']}) Blocked "
+                        f"{llm_blocked_long} Longs, {llm_blocked_short} Shorts. "
+                        f"Threshold: {self.llm_confidence_threshold.value:.2f}. "
+                        f"Cached: {llm_stats.get('cached', 0)}, "
+                        f"Errors: {llm_stats.get('errors', 0)}"
+                    )
+            except Exception as e:
+                logger.error(f"LLM Filter failed for {metadata['pair']}: {e}")
+
         # ===== MACRO REGIME FILTER (BTC Weekly EMA21) =====
         if self.use_macro_filter.value == "enabled":
             macro_long_ok  = dataframe["btc_macro_bias"] >= 0   # bull or neutral → longs allowed
@@ -2728,57 +2819,7 @@ class SMCWithMLLuxAlgo(IStrategy):
             except Exception:
                 pass
 
-        if not be_activated and self.use_dynamic_stoploss.value:
-            # Check if we already have the initial SL price stored
-            # This ensures we only read the dataframe ONCE at the start of the trade
-            initial_sl_price = trade.get_custom_data("initial_sl_price")
-
-            # If not stored, try to find it in the dataframe
-            if initial_sl_price is None:
-                try:
-                    dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
-
-                    # Prefer the exact entry candle; fall back to the last available
-                    # candle when the trade opened long ago and the entry bar rolled
-                    # out of the analyzed window (live trading edge case).
-                    candle = dataframe.loc[dataframe["date"] == trade.open_date_utc]
-                    if candle.empty:
-                        candle = dataframe.iloc[[-1]]
-                        logger.debug(
-                            f"Entry candle not in analyzed window for {pair}, "
-                            f"using latest candle for dynamic SL lookup."
-                        )
-
-                    if not candle.empty:
-                        row = candle.iloc[0]
-                        price_found = 0.0
-
-                        if trade.is_short:
-                            if "sl_short_price" in row and not pd.isna(row["sl_short_price"]):
-                                price_found = row["sl_short_price"]
-                        else:
-                            if "sl_long_price" in row and not pd.isna(row["sl_long_price"]):
-                                price_found = row["sl_long_price"]
-
-                        if price_found > 0:
-                            initial_sl_price = price_found
-                            trade.set_custom_data("initial_sl_price", initial_sl_price)
-                            logger.info(f"Initial Dynamic SL found for {pair}: {initial_sl_price}")
-                except Exception:
-                    pass
-
-            # If we have a valid initial SL price (either from storage or just found)
-            if initial_sl_price and initial_sl_price > 0:
-                logger.debug(
-                    f"Dynamic SL for {pair}: sl_price={initial_sl_price:.4f}, current_rate={current_rate:.4f}"
-                )
-                return stoploss_from_absolute(
-                    initial_sl_price, current_rate, is_short=trade.is_short, leverage=trade.leverage
-                )
-
-        # --- 2. BREAK EVEN LOGIC ---
-        # Check if BE was already activated (persistent across ticks)
-
+        # --- 2. BREAK EVEN LOGIC (BEFORE dynamic SL — priority once TP1 hit) ---
         # Calculate price movement to check if we should activate BE
         if trade.is_short:
             current_extremum = trade.min_rate if trade.min_rate is not None else current_rate
@@ -2813,12 +2854,8 @@ class SMCWithMLLuxAlgo(IStrategy):
             fee_buffer_pct = 0.001  # 0.1% price buffer to cover fees
 
             if trade.is_short:
-                # For SHORT: set stop slightly BELOW entry so if triggered, small profit covers fees
-                # e.g., entry=1.988, stop=1.986 -> if price rises to 1.986, exit with 0.1% profit
                 be_stop_price = trade.open_rate * (1 - fee_buffer_pct)
             else:
-                # For LONG: set stop slightly ABOVE entry so if triggered, small profit covers fees
-                # e.g., entry=100, stop=100.1 -> if price drops to 100.1, exit with 0.1% profit
                 be_stop_price = trade.open_rate * (1 + fee_buffer_pct)
 
             trade.set_custom_data("be_activated", True)
@@ -2829,12 +2866,10 @@ class SMCWithMLLuxAlgo(IStrategy):
                     f"BE activated for {pair} at price move {price_movement:.2%}. Stop set at {be_stop_price:.4f} (entry: {trade.open_rate:.4f})"
                 )
 
-        # If BE is activated, use the STORED stop price
+        # If BE is activated, use the STORED stop price — this takes priority over dynamic SL
         if be_activated:
-            # Retrieve the stored BE stop price (calculated once when BE activated)
             be_stop_price = trade.get_custom_data("be_stop_price", default=trade.open_rate)
 
-            # Use Freqtrade's official helper function for absolute price stoploss
             if self.enable_logging.value:
                 logger.info(
                     f"BE SL for {pair}: direction={'SHORT' if trade.is_short else 'LONG'}, "
@@ -2845,6 +2880,48 @@ class SMCWithMLLuxAlgo(IStrategy):
             return stoploss_from_absolute(
                 be_stop_price, current_rate, is_short=trade.is_short, leverage=trade.leverage
             )
+
+        # --- 1. INITIAL DYNAMIC STOPLOSS (fallback when BE not yet activated) ---
+        if not be_activated and self.use_dynamic_stoploss.value:
+            initial_sl_price = trade.get_custom_data("initial_sl_price")
+
+            if initial_sl_price is None:
+                try:
+                    dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+
+                    candle = dataframe.loc[dataframe["date"] == trade.open_date_utc]
+                    if candle.empty:
+                        candle = dataframe.iloc[[-1]]
+                        logger.debug(
+                            f"Entry candle not in analyzed window for {pair}, "
+                            f"using latest candle for dynamic SL lookup."
+                        )
+
+                    if not candle.empty:
+                        row = candle.iloc[0]
+                        price_found = 0.0
+
+                        if trade.is_short:
+                            if "sl_short_price" in row and not pd.isna(row["sl_short_price"]):
+                                price_found = row["sl_short_price"]
+                        else:
+                            if "sl_long_price" in row and not pd.isna(row["sl_long_price"]):
+                                price_found = row["sl_long_price"]
+
+                        if price_found > 0:
+                            initial_sl_price = price_found
+                            trade.set_custom_data("initial_sl_price", initial_sl_price)
+                            logger.info(f"Initial Dynamic SL found for {pair}: {initial_sl_price}")
+                except Exception:
+                    pass
+
+            if initial_sl_price and initial_sl_price > 0:
+                logger.debug(
+                    f"Dynamic SL for {pair}: sl_price={initial_sl_price:.4f}, current_rate={current_rate:.4f}"
+                )
+                return stoploss_from_absolute(
+                    initial_sl_price, current_rate, is_short=trade.is_short, leverage=trade.leverage
+                )
 
         return 1  # Use default stoploss
 
