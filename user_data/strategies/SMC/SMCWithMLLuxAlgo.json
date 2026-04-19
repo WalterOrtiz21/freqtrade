@@ -31,7 +31,7 @@
             "ml_threshold": 0.45,
             "use_llm_filter": false,
             "use_llm_shadow": true,
-            "llm_confidence_threshold": 0.60,
+            "llm_confidence_threshold": 0.35,
             "llm_model_name": "z-ai/glm-5-turbo",
             "htf_1": "1h",
             "htf_1_use_internal": true,

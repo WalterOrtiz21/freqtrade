@@ -27,7 +27,7 @@ Exit Logic:
 import logging
 import numpy as np
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from pandas import DataFrame
 from typing import Optional, Dict, List
@@ -550,9 +550,21 @@ class SMCWithMLLuxAlgo(IStrategy):
         shadow = self.use_llm_shadow.value and not self.use_llm_filter.value
         log_dir = ""
         if shadow:
-            log_dir = os.path.join(
-                os.path.dirname(__file__), "..", "llm_shadow_logs"
+            log_dir = os.path.abspath(
+                os.path.join(os.path.dirname(__file__), "..", "..", "logs", "llm_shadow")
             )
+            try:
+                os.makedirs(log_dir, exist_ok=True)
+                marker = os.path.join(log_dir, "_init.log")
+                with open(marker, "a") as f:
+                    f.write(
+                        f"{datetime.now(timezone.utc).isoformat()} "
+                        f"init model={self.llm_model_name.value} "
+                        f"threshold={self.llm_confidence_threshold.value:.2f} "
+                        f"runmode={self.dp.runmode.value if self.dp else 'unknown'}\n"
+                    )
+            except Exception as e:
+                logger.warning(f"LLM shadow log dir not writable ({log_dir}): {e}")
         try:
             self._llm_filter = LLMConfluenceFilter(
                 api_key=api_key,
@@ -568,7 +580,8 @@ class SMCWithMLLuxAlgo(IStrategy):
             logger.info(
                 f"LLM Confluence Filter [{mode_str}]: "
                 f"model={self.llm_model_name.value}, "
-                f"threshold={self.llm_confidence_threshold.value:.2f}"
+                f"threshold={self.llm_confidence_threshold.value:.2f}, "
+                f"log_dir={log_dir or 'N/A'}"
             )
         except Exception as e:
             logger.error(f"Failed to initialize LLM filter: {e}")
@@ -726,6 +739,7 @@ class SMCWithMLLuxAlgo(IStrategy):
         dataframe = self._add_pdh_pdl(dataframe, metadata)
         dataframe = self._add_premium_discount(dataframe)
         dataframe = self._add_session_context(dataframe)
+        dataframe = self._add_entry_context(dataframe)
 
         # --- 5. ML Features (only when ML filter is active) ─────────────
         if self.use_ml_filter.value:
@@ -1568,6 +1582,31 @@ class SMCWithMLLuxAlgo(IStrategy):
         dow = dt.dt.dayofweek
         dataframe["is_monday"] = (dow == 0).values
         dataframe["is_friday"] = (dow == 4).values
+
+        return dataframe
+
+    def _add_entry_context(self, dataframe: DataFrame) -> DataFrame:
+        """
+        Extra entry context for LLM filter / post-analysis:
+          - bars_since_{internal,swing}_choch_{bull,bear}: freshness of the structure break
+          - atr_pct_rank: percentile rank of ATR(14) over last 100 bars (0-1)
+        """
+        def bars_since(series: pd.Series) -> pd.Series:
+            grp = series.cumsum()
+            return grp.groupby(grp).cumcount()
+
+        for col in ("internal_choch_bullish", "internal_choch_bearish",
+                    "swing_choch_bullish", "swing_choch_bearish"):
+            if col in dataframe.columns:
+                out = f"bars_since_{col.replace('_bullish','_bull').replace('_bearish','_bear')}"
+                dataframe[out] = bars_since(dataframe[col].fillna(0).astype(int))
+
+        if "atr" in dataframe.columns:
+            atr = dataframe["atr"].astype(float)
+        else:
+            import talib.abstract as ta
+            atr = ta.ATR(dataframe, timeperiod=14)
+        dataframe["atr_pct_rank"] = atr.rolling(100, min_periods=20).rank(pct=True).fillna(0.5)
 
         return dataframe
 

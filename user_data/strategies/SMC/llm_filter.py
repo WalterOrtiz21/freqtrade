@@ -29,37 +29,54 @@ logger = logging.getLogger(__name__)
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 SYSTEM_PROMPT = (
-    "You are an institutional SMC/ICT trading analyst with these empirical rules from live backtesting:\n"
+    "You are an SMC filter calibrated on 358 backtested trades (baseline winrate 50.3%).\n"
+    "Score each signal 0.0-1.0 using ONLY the empirical rules below, derived from that backtest.\n"
     "\n"
-    "ENTRY QUALITY HIERARCHY (most to least important):\n"
-    "1. HTF TREND ALIGNMENT — if ANY higher timeframe (1H, 4H) conflicts with entry direction, "
-    "confidence drops DRAMATICALLY. A long against 4H bear is low-probability regardless of LTF structure.\n"
-    "2. PRICE LOCATION — entries at deep premium (swing_range >80%) against BTC macro bias are traps. "
-    "Perfect structure means nothing if price is at a distribution extreme against the dominant flow.\n"
-    "3. ZONE QUALITY — fresh OB (touches=0, mitigated=0, rvol>2.0, age<15) is strong. "
-    "Mitigated OB (mitigated=1), touched OB (touches>1), stale FVG (filled>50%) are weak zones.\n"
-    "4. STRUCTURAL CONFIRMATION — CHoCH must be present. A bounce without CHoCH is NOT a reversal, "
-    "just a retracement. Sweep without CHoCH = continuation trap.\n"
+    "SETUP:\n"
+    "Continuation pullback after CHoCH. Entry fires on the retracement candle (1-10 bars after CHoCH), not on CHoCH itself.\n"
+    "CHoCH flags will read 0 at entry — this is expected. The enter_tag already confirms CHoCH occurred.\n"
     "\n"
-    "EMPIRICAL RULES:\n"
-    "- SWEEP entries: 38.3% win rate — consistently below average. Treat sweep-only setups skeptically.\n"
-    "- OFF-session entries (22:00-00:00 UTC): lower win rate vs session entries.\n"
-    "- FVG_STALE + HTF_PART combo: 17 trades avg +0.15% — not worth risk.\n"
-    "- Deep premium longs (swing_range >85%) + BTC bearish bias = strong trap signal "
-    "even with perfect LTF structure.\n"
-    "- An entry can have OB_FRESH + CHoCH + Kill Zone and STILL be bad "
-    "if the higher timeframe context is against it.\n"
+    "EMPIRICAL RULES (WR = winrate in that subset):\n"
     "\n"
-    "SCORING GUIDELINES:\n"
-    "- 0.8-1.0: All timeframes aligned, fresh zone, discount/premium aligned, CHoCH present, kill zone active.\n"
-    "- 0.5-0.7: Good LTF structure but ONE conflicting signal "
-    "(e.g., one HTF against, or premium but BTC neutral).\n"
-    "- 0.2-0.5: Mixed signals, ambiguous zone, or conflicting HTF context. Borderline.\n"
-    "- 0.0-0.2: Trap setup. Structure looks OK but context is wrong "
-    "(against HTF, deep premium with bearish BTC, no CHoCH, sweep-only).\n"
+    "[HTF_ALIGN subsetup — baseline 50.6%, n=154]\n"
+    "  + bars_since_swing_choch 0-3  → 64% WR  (prime freshness, +14pp)\n"
+    "  - bars_since_swing_choch 4-7  → 40% WR  (edge decayed, -11pp)\n"
+    "  + bars_since_internal_choch 0-2 → 70% WR  (fresh internal break)\n"
+    "  - bars_since_internal_choch ≥6  → 36% WR  (stale internal, -15pp)\n"
+    "  - SHORT + btc_macro_bias = -1  → 35% WR  (BTC already bearish, reversion risk, -15pp)\n"
+    "  - is_monday = True             → 36% WR  (-15pp vs Tue-Sun 55%)\n"
     "\n"
-    'Respond ONLY with valid JSON: {"confidence": <0.0-1.0>, "reason": "<one line>"}\n'
-    "No other text, no markdown fences."
+    "[HTF_CONF subsetup — baseline 48.2%, n=199]\n"
+    "  ++ in_kill_zone = True          → 73% WR  (strongest single edge, n=15, +25pp)\n"
+    "  +  weekly_range_position 20-40%  → 62% WR  (+14pp)\n"
+    "  -  weekly_range_position <20%    → 30% WR  (-18pp)\n"
+    "  -  SHORT + bear_fvg_filled >20%  → 31% WR  (stale FVG, -17pp)\n"
+    "  +  SHORT + bear_fvg_filled <20%  → 52% WR\n"
+    "  -  SHORT + bear_ob_age >80 bars  → 35% WR  (stale OB, -13pp)\n"
+    "\n"
+    "[GLOBAL — all subsetups]\n"
+    "  -- is_monday + SHORT            → 26% WR  (worst cell, -24pp)\n"
+    "  -- is_monday + FVGBRK tag       → 26% WR  (-22pp)\n"
+    "  ++ in_kill_zone + FVGBRK tag    → 79% WR  (+31pp)\n"
+    "  +  weekly_range_position 20-40% → 62% WR  (+12pp global)\n"
+    "  -  weekly_range_position <20%   → 31% WR  (-19pp global)\n"
+    "\n"
+    "FEATURES WITH NO PROVEN SIGNAL (IGNORE if cited in the input):\n"
+    "  atr_pct_rank, OTE/Fibonacci, equilibrium levels, FVG-in-OB flag,\n"
+    "  zone density counts, volume_spike_at_choch, wick/body ratios,\n"
+    "  draw_to_opposite_zone, inducement sweep, daily/HTF/swing P/D labels,\n"
+    "  PDH/PDL/PWH/PWL distances, choch_displacement.\n"
+    "Do NOT invent justifications from these. If a rule above does not apply, stay near baseline 0.50.\n"
+    "\n"
+    "SCORING GUIDE:\n"
+    "  0.80-1.00 : 2+ strong positive rules hit (e.g. HTF_CONF + in_kill_zone, or HTF_ALIGN + bars_since_choch ≤3 with no adverse BTC/Monday)\n"
+    "  0.60-0.79 : 1 strong positive rule hit, no severe negatives\n"
+    "  0.40-0.59 : no clear rule applies, or mixed (1 positive + 1 negative) — baseline territory\n"
+    "  0.20-0.39 : 1 severe negative rule (stale CHoCH, Monday short, weekly Q1, stale FVG/OB)\n"
+    "  0.00-0.19 : 2+ severe negatives stacked (e.g. Monday + bear BTC + stale CHoCH)\n"
+    "\n"
+    'Respond ONLY with valid JSON: {"confidence": <0.0-1.0>, "reason": "<which empirical rules drove the score>"}\n'
+    "No markdown fences, no other text."
 )
 
 
@@ -211,96 +228,76 @@ class LLMConfluenceFilter:
             logger.warning(f"LLM shadow log write error: {e}")
 
     def _build_prompt(self, pair: str, row: pd.Series, direction: str) -> str:
-        """Build compact prompt from SMC context for a single entry signal."""
-        close = self._safe(row, "close", 0.0)
+        """Build compact prompt with only statistically-validated features."""
+        enter_tag = str(row.get("enter_tag", ""))
 
-        # Zone data — determine which zone the price is in
-        zone_parts = []
-        zone_type = "NoZone"
-        zone_bottom = 0.0
-        zone_top = 0.0
+        # Subsetup classification (drives which rule block applies)
+        if "HTF_ALIGN" in enter_tag:
+            subsetup = "HTF_ALIGN"
+        elif "HTF_CONF" in enter_tag:
+            subsetup = "HTF_CONF"
+        else:
+            subsetup = "OTHER"
 
-        for prefix, label in [("active_bullish_ob", "OB"), ("active_bullish_breaker", "BRK"),
-                              ("active_bullish_fvg", "FVG"), ("active_bull_fvg_breaker", "FVGBRK")]:
-            top = self._safe(row, f"{prefix}_top", 0.0)
-            btm = self._safe(row, f"{prefix}_bottom", 0.0)
-            if top > 0 and btm > 0 and direction == "LONG":
-                zone_type = label
-                zone_top = top
-                zone_bottom = btm
-                break
+        # Freshness — bars since CHoCH in setup direction
+        if direction == "LONG":
+            bs_int_choch = int(self._safe(row, "bars_since_internal_choch_bull", 999))
+            bs_sw_choch = int(self._safe(row, "bars_since_swing_choch_bull", 999))
+        else:
+            bs_int_choch = int(self._safe(row, "bars_since_internal_choch_bear", 999))
+            bs_sw_choch = int(self._safe(row, "bars_since_swing_choch_bear", 999))
 
-        for prefix, label in [("active_bearish_ob", "OB"), ("active_bearish_breaker", "BRK"),
-                              ("active_bearish_fvg", "FVG"), ("active_bear_fvg_breaker", "FVGBRK")]:
-            top = self._safe(row, f"{prefix}_top", 0.0)
-            btm = self._safe(row, f"{prefix}_bottom", 0.0)
-            if top > 0 and btm > 0 and direction == "SHORT":
-                zone_type = label
-                zone_top = top
-                zone_bottom = btm
-                break
-
-        # Zone quality
-        ob_prefix = "bull" if direction == "LONG" else "bear"
-        ob_rvol = self._safe(row, f"{ob_prefix}_ob_0_rvol", 0.0)
-        ob_age = self._safe(row, f"{ob_prefix}_ob_0_age", 99.0)
-        ob_touches = self._safe(row, f"{ob_prefix}_ob_0_touches", 0.0)
-        ob_mitigated = int(self._safe(row, f"{ob_prefix}_ob_0_mitigated", 0.0))
-
-        fvg_filled = self._safe(row, f"{ob_prefix}_fvg_0_filled_pct", 0.0)
-        fvg_rvol = self._safe(row, f"{ob_prefix}_fvg_0_rvol", 0.0)
-
-        # Trends
-        int_trend = int(self._safe(row, "internal_trend", 0))
-        swing_trend = int(self._safe(row, "swing_trend", 0))
-        htf_1h = int(self._safe(row, "1h_swing_trend", 0))
-        htf_4h = int(self._safe(row, "4h_swing_trend", 0))
-
-        trend_labels = {1: "Bull", -1: "Bear", 0: "Neutral"}
+        # Weekly range position (only HTF timeframe with proven signal)
+        weekly_range_pct = self._safe(row, "weekly_range_position_pct", 50.0)
 
         # Context
-        enter_tag = str(row.get("enter_tag", ""))
-        session = str(row.get("session", ""))
         in_kz = bool(self._safe(row, "in_kill_zone", 0.0))
         btc_macro = int(self._safe(row, "btc_macro_bias", 0))
-        pd_label = str(row.get("daily_prem_disc_label", ""))
-        swing_range_pct = self._safe(row, "swing_range_position_pct", 50.0)
+        session = str(row.get("session", ""))
 
-        # Structure
-        int_choch_bull = int(self._safe(row, "internal_choch_bullish", 0))
-        int_choch_bear = int(self._safe(row, "internal_choch_bearish", 0))
-        sw_choch_bull = int(self._safe(row, "swing_choch_bullish", 0))
-        sw_choch_bear = int(self._safe(row, "swing_choch_bearish", 0))
-        int_sweep_bull = int(self._safe(row, "internal_sweep_bullish", 0))
-        int_sweep_bear = int(self._safe(row, "internal_sweep_bearish", 0))
-        sw_sweep_bull = int(self._safe(row, "swing_sweep_bullish", 0))
-        sw_sweep_bear = int(self._safe(row, "swing_sweep_bearish", 0))
+        # is_monday — compute from row date if available
+        is_monday = False
+        date_val = row.get("date", None)
+        if date_val is None and hasattr(row, "name"):
+            date_val = row.name
+        try:
+            ts = pd.Timestamp(date_val) if date_val is not None else None
+            if ts is not None and not pd.isna(ts):
+                is_monday = ts.weekday() == 0
+        except (ValueError, TypeError):
+            pass
 
-        # Distance from zone
-        zone_dist = 0.0
-        if zone_top > 0 and close > 0:
-            zone_dist = ((close - zone_top) / close) * 100
+        # Zone staleness — only validated features
+        bear_ob_age = self._safe(row, "bear_ob_0_age", 0.0)
+        bull_ob_age = self._safe(row, "bull_ob_0_age", 0.0)
+        bear_fvg_filled = self._safe(row, "bear_fvg_0_filled_pct", 0.0)
+        bull_fvg_filled = self._safe(row, "bull_fvg_0_filled_pct", 0.0)
+
+        # Only emit the zone metrics relevant for the direction
+        if direction == "SHORT":
+            zone_line = (
+                f"  bear_ob_age: {bear_ob_age:.0f} bars | "
+                f"bear_fvg_filled: {bear_fvg_filled:.0%}\n"
+            )
+        else:
+            zone_line = (
+                f"  bull_ob_age: {bull_ob_age:.0f} bars | "
+                f"bull_fvg_filled: {bull_fvg_filled:.0%}\n"
+            )
 
         return (
             f"Pair: {pair} | Direction: {direction}\n"
-            f"Price: {close:.8f}\n"
-            f"\nTREND:\n"
-            f"  Internal: {trend_labels.get(int_trend, '?')} | Swing: {trend_labels.get(swing_trend, '?')}\n"
-            f"  HTF 1H: {trend_labels.get(htf_1h, '?')} | HTF 4H: {trend_labels.get(htf_4h, '?')}\n"
-            f"\nZONE:\n"
-            f"  Type: {zone_type} [{zone_bottom:.8f} - {zone_top:.8f}] (dist: {zone_dist:+.2f}%)\n"
-            f"  OB RVol: {ob_rvol:.2f} | Age: {ob_age:.0f} bars | Touches: {ob_touches:.0f} | Mitigated: {ob_mitigated}\n"
-            f"  FVG Fill: {fvg_filled:.0%} | FVG RVol: {fvg_rvol:.2f}\n"
-            f"\nCONTEXT:\n"
-            f"  Confluence: {enter_tag}\n"
-            f"  Session: {session} | Kill Zone: {in_kz}\n"
-            f"  BTC Bias: {btc_macro:+d} | P/D: {pd_label}\n"
-            f"  Swing Range Position: {swing_range_pct:.1f}%\n"
-            f"\nSTRUCTURE:\n"
-            f"  Int CHoCH Bull: {int_choch_bull} | Bear: {int_choch_bear}\n"
-            f"  Sw CHoCH Bull: {sw_choch_bull} | Bear: {sw_choch_bear}\n"
-            f"  Int Sweep Bull: {int_sweep_bull} | Bear: {int_sweep_bear}\n"
-            f"  Sw Sweep Bull: {sw_sweep_bull} | Bear: {sw_sweep_bear}\n"
+            f"enter_tag: {enter_tag}\n"
+            f"subsetup: {subsetup}\n"
+            f"\nFRESHNESS (bars since CHoCH in setup direction):\n"
+            f"  internal: {bs_int_choch} | swing: {bs_sw_choch}\n"
+            f"\nHTF BIAS:\n"
+            f"  weekly_range_position: {weekly_range_pct:.0f}%\n"
+            f"  btc_macro_bias: {btc_macro:+d}\n"
+            f"\nSESSION:\n"
+            f"  session: {session} | in_kill_zone: {in_kz} | is_monday: {is_monday}\n"
+            f"\nZONE STALENESS:\n"
+            + zone_line
         )
 
     def _call_api(self, messages: list[dict]) -> dict | None:
@@ -327,14 +324,12 @@ class LLMConfluenceFilter:
                 if resp.status_code == 200:
                     data = resp.json()
                     message = data["choices"][0]["message"]
-                    # Some models (GLM, DeepSeek-R1) put output in "reasoning" field
-                    content = message.get("content")
-                    if not content:
-                        reasoning = message.get("reasoning", "")
-                        if reasoning:
-                            # Try to extract JSON from reasoning text
-                            return reasoning
-                    return content
+                    content = message.get("content") or ""
+                    reasoning = message.get("reasoning") or ""
+                    # Prefer content; fall back to reasoning (DeepSeek-R1, GLM thinking models)
+                    # Combine both so _parse_response can find the JSON wherever it lands
+                    combined = (content + "\n" + reasoning).strip()
+                    return combined if combined else None
                 elif resp.status_code == 429:
                     wait = min(2 ** attempt * 2, 30)
                     logger.warning(f"LLM rate limited, retrying in {wait}s")
@@ -365,21 +360,37 @@ class LLMConfluenceFilter:
             lines = [l for l in lines if not l.startswith("```")]
             text = "\n".join(lines).strip()
 
-        start = text.find("{")
-        end = text.rfind("}")
-        if start == -1 or end == -1:
+        # Find the LAST valid JSON block — reasoning models put JSON at the end
+        last_end = text.rfind("}")
+        if last_end == -1:
             logger.warning(f"LLM response has no JSON: {text[:100]}")
             return None
 
+        # Walk backwards from last_end to find matching opening brace
+        depth = 0
+        start = -1
+        for i in range(last_end, -1, -1):
+            if text[i] == "}":
+                depth += 1
+            elif text[i] == "{":
+                depth -= 1
+                if depth == 0:
+                    start = i
+                    break
+
+        if start == -1:
+            logger.warning(f"LLM response has no valid JSON block: {text[:100]}")
+            return None
+
         try:
-            parsed = json.loads(text[start:end + 1])
+            parsed = json.loads(text[start:last_end + 1])
             confidence = float(parsed.get("confidence", 0))
             return {
                 "confidence": max(0.0, min(1.0, confidence)),
                 "reason": str(parsed.get("reason", ""))[:200],
             }
         except (json.JSONDecodeError, ValueError, TypeError) as e:
-            logger.warning(f"LLM JSON parse error: {e} | raw: {text[:100]}")
+            logger.warning(f"LLM JSON parse error: {e} | raw: {text[start:last_end+1][:100]}")
             return None
 
     def _get_cache_key(self, pair: str, row: pd.Series, direction: str) -> str:
