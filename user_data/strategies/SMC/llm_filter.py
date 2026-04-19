@@ -171,6 +171,48 @@ class LLMConfluenceFilter:
 
         return long_ok, short_ok, stats
 
+    def evaluate_trade(
+        self,
+        pair: str,
+        row: pd.Series,
+        direction: str,
+    ) -> tuple[bool, float | None, str]:
+        """
+        Evaluate a single trade about to be opened (use from confirm_trade_entry).
+
+        Runs LLM once per confirmed trade instead of per-candle. Handles cache,
+        shadow logging, and the allow/block decision.
+
+        Parameters
+        ----------
+        pair : str
+        row : pd.Series
+            The signal candle row (all indicators already populated).
+        direction : str
+            "LONG" or "SHORT".
+
+        Returns
+        -------
+        allow : bool
+            True = let the trade proceed. False = block it.
+            Always True in shadow mode or on API error (fail-open).
+        confidence : float | None
+            LLM confidence 0-1, None on API/parse error.
+        reason : str
+            LLM's short reasoning (empty on cache hit or error).
+        """
+        confidence, reason = self._evaluate_single(pair, row, direction)
+        if confidence is None:
+            return True, None, ""
+
+        would_block = confidence < self._threshold
+
+        if self._shadow_mode:
+            self._log_shadow(pair, row, direction, confidence, reason, would_block)
+            return True, confidence, reason
+
+        return (not would_block), confidence, reason
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------

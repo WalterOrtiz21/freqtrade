@@ -2140,39 +2140,8 @@ class SMCWithMLLuxAlgo(IStrategy):
                 pass
 
         # ===== LLM CONFLUENCE FILTER / SHADOW =====
-        if (self.use_llm_filter.value or self.use_llm_shadow.value) and self._llm_filter is not None:
-            try:
-                llm_long_ok, llm_short_ok, llm_stats = self._llm_filter.evaluate_entries(
-                    pair=metadata["pair"],
-                    dataframe=dataframe,
-                    long_mask=long_condition,
-                    short_mask=short_condition,
-                )
-                if self.use_llm_filter.value:
-                    llm_blocked_long = long_condition.sum() - (long_condition & llm_long_ok).sum()
-                    llm_blocked_short = short_condition.sum() - (short_condition & llm_short_ok).sum()
-                    long_condition &= llm_long_ok
-                    short_condition &= llm_short_ok
-                    if llm_blocked_long > 0 or llm_blocked_short > 0:
-                        logger.info(
-                            f"LLM Filter ({metadata['pair']}) Blocked "
-                            f"{llm_blocked_long} Longs, {llm_blocked_short} Shorts. "
-                            f"Threshold: {self.llm_confidence_threshold.value:.2f}. "
-                            f"Cached: {llm_stats.get('cached', 0)}, "
-                            f"Errors: {llm_stats.get('errors', 0)}"
-                        )
-                else:
-                    shadow_logged = llm_stats.get("shadow_logged", 0)
-                    would_block = llm_stats.get("blocked_long", 0) + llm_stats.get("blocked_short", 0)
-                    if shadow_logged > 0:
-                        logger.info(
-                            f"LLM Shadow ({metadata['pair']}) Evaluated {shadow_logged} signals, "
-                            f"would block {would_block}. "
-                            f"Cached: {llm_stats.get('cached', 0)}, "
-                            f"Errors: {llm_stats.get('errors', 0)}"
-                        )
-            except Exception as e:
-                logger.error(f"LLM Filter failed for {metadata['pair']}: {e}")
+        # Moved to confirm_trade_entry: LLM now runs once per confirmed trade
+        # instead of iterating every signal candle on every refresh cycle.
 
         # ===== MACRO REGIME FILTER (BTC Weekly EMA21) =====
         if self.use_macro_filter.value == "enabled":
@@ -2826,6 +2795,44 @@ class SMCWithMLLuxAlgo(IStrategy):
             if self.enable_logging.value:
                 logger.info(f"Entry blocked for {pair}: FVG_STALE+HTF_PART combo filter")
             return False
+
+        # ── LLM confluence filter (once per confirmed trade) ───────────────────
+        # Runs here instead of populate_entry_trend to avoid per-candle LLM calls.
+        # Fail-open: API/parse errors allow the trade through.
+        if (self.use_llm_filter.value or self.use_llm_shadow.value) and self._llm_filter is not None:
+            try:
+                df, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+                if df is not None and len(df) > 0:
+                    direction = "LONG" if side == "long" else "SHORT"
+                    signal_col = "enter_long" if side == "long" else "enter_short"
+
+                    # Signal may be up to `entry_signal_lookback` bars old.
+                    lookback = int(self.entry_signal_lookback.value)
+                    tail = df.tail(lookback + 2)
+                    signal_rows = tail[tail.get(signal_col, 0) == 1]
+                    row = signal_rows.iloc[-1] if not signal_rows.empty else df.iloc[-1]
+
+                    allow, confidence, reason = self._llm_filter.evaluate_trade(
+                        pair, row, direction
+                    )
+
+                    if confidence is not None:
+                        mode = "SHADOW" if self.use_llm_shadow.value else "FILTER"
+                        thr = self.llm_confidence_threshold.value
+                        if (not allow) and self.use_llm_filter.value:
+                            logger.info(
+                                f"⛔ LLM [{mode}] blocked {direction} {pair}: "
+                                f"conf={confidence:.2f} < {thr:.2f} | {reason[:120]}"
+                            )
+                            return False
+                        if self.enable_logging.value:
+                            logger.info(
+                                f"LLM [{mode}] {direction} {pair} tag={tag} "
+                                f"conf={confidence:.2f} thr={thr:.2f} | {reason[:100]}"
+                            )
+            except Exception as e:
+                logger.error(f"LLM filter failed in confirm_trade_entry for {pair}: {e}")
+                # fail-open
 
         return True
 
