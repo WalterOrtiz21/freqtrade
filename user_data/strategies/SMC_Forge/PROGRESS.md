@@ -29,27 +29,39 @@ Construimos `SMCForge`: strategy SMC canónica rules-puras sobre una arquitectur
 
 ## 2. Arquitectura final
 
-```
-SMC_Forge/
-├── forge_engine.py        ← kernel SMC (BoS/CHoCH/OB/FVG/Sweeps/Breakers, Numba)
-├── forge_quality.py       ← ATR Wilder + displacement score per evento
-├── forge_levels.py        ← Williams pivots + EQH/EQL cluster detection
-├── forge_inducement.py    ← dual-fractal IDM detector + sweep events
-├── smoke_test.py          ← validates engine+layers on real Bitget data
-├── tests/
-│   ├── test_displacement.py    (10 tests)
-│   ├── test_levels.py          (12 tests)
-│   └── test_inducement.py      (12 tests)
-├── AUDIT.md               ← diagnóstico del SMC original (no de este trabajo)
-├── PROGRESS.md            ← este archivo
-└── _quarantine/           ← ML + LLM + modelos viejos (referencia, no se usan)
+Cada strategy vive en su propia carpeta bajo `user_data/strategies/`:
 
+```
 user_data/strategies/
-├── SMCForge.py            ← strategy que orquesta los 4 layers
-└── SMCForge.json          ← params hyperoptable (defaults producción)
+├── SMCForge.py                     ← ★ activa: strategy SMC_Forge
+├── SMCForge.json                   ← ★ params hyperoptable
+├── SMC_Forge/                      ← ★ módulos + tests + docs
+│   ├── forge_engine.py             ← kernel SMC (Numba)
+│   ├── forge_quality.py            ← ATR Wilder + displacement
+│   ├── forge_levels.py             ← Williams pivots + EQH/EQL
+│   ├── forge_inducement.py         ← dual-fractal IDM + sweeps
+│   ├── smoke_test.py
+│   ├── tests/ (34 unit tests)
+│   ├── AUDIT.md / PROGRESS.md
+│   └── _quarantine/ (ML+LLM viejos del SMC original)
+│
+├── LorentzianSuperTrend/           ← legacy: strategy + ExitManager deps
+│   ├── LorentzianSuperTrend.py + .json
+│   ├── ExitManager.py
+│   └── train_exit_manager.py
+├── MFDivergenceStrategy/           ← legacy: .py + .json
+├── TrendlinesWithBreaks/           ← legacy: .py + .json
+├── SMC/                            ← legacy: SMCWithMLLuxAlgo (referencia)
+├── GaussianBands/                  ← legacy
+├── MoneyFlowProfile/               ← legacy
+├── SFP/                            ← legacy
+├── chhagansinghmeena/              ← legacy (MLCosineSimilarity)
+├── FundingMR/                      ← legacy
+├── NFI/                            ← legacy (submodule-like)
+└── models/                         ← legacy (exit_manager.pkl)
 
 ~/Desktop/freqtrade/
-└── config_smc_forge.json  ← config standalone (leverage=12, max_trades=5, pairs BTC/ETH/SOL)
+└── config_smc_forge.json           ← config standalone (lev=12, max=5, BTC/ETH/SOL)
 ```
 
 ## 3. Receta canónica (lo que entra)
