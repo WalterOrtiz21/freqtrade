@@ -1,0 +1,34 @@
+{
+  "feature_columns": [
+    "ml_volume_ratio",
+    "ml_atr_pct",
+    "ml_trend_strength",
+    "ml_above_ema50",
+    "ml_bars_since_bullish_choch",
+    "ml_bars_since_bearish_choch",
+    "ml_bars_since_bullish_bos",
+    "ml_bars_since_bearish_bos",
+    "ml_bullish_breaks_20",
+    "ml_bearish_breaks_20",
+    "ml_fvg_size_pct",
+    "ml_bullish_fvg_count",
+    "ml_bearish_fvg_count",
+    "ml_ob_strength",
+    "ml_ob_volume_ratio",
+    "ml_current_retracement",
+    "ml_deepest_retracement",
+    "ml_retrace_direction",
+    "ml_rsi",
+    "ml_macd_hist",
+    "ml_stoch_k",
+    "direction"
+  ],
+  "training_date": "2025-12-12T21:38:22.452317",
+  "training_start": "2020-01-01",
+  "training_end": "2024-01-01",
+  "pairs": [
+    "BTC_USDT_USDT",
+    "ETH_USDT_USDT"
+  ],
+  "profit_threshold": 0.02
+}

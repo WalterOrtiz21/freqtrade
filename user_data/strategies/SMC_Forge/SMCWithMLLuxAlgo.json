@@ -1,0 +1,94 @@
+{
+    "strategy_name": "SMCWithMLLuxAlgo",
+    "params": {
+        "roi": {
+            "0": 99
+        },
+        "stoploss": {
+            "stoploss": -0.02
+        },
+        "max_open_trades": {
+            "max_open_trades": 5
+        },
+        "buy": {
+            "enable_auto_training": false,
+            "internal_length": 5,
+            "swing_length": 100,
+            "entry_signal_type": "swing_only",
+            "require_choch": true,
+            "required_zone": "any",
+            "require_volumetric_ob": true,
+            "vol_sma_period": 20,
+            "ob_rvol_threshold": 1.8,
+            "fvg_atr_threshold": 0.15,
+            "trade_with_trend": true,
+            "use_sweep_bypass": false,
+            "sweep_lookback": 10,
+            "allow_immediate_entry": true,
+            "entry_signal_lookback": 10,
+            "use_ml_filter": false,
+            "use_per_symbol_models": false,
+            "ml_threshold": 0.45,
+            "use_llm_filter": false,
+            "use_llm_shadow": true,
+            "llm_confidence_threshold": 0.35,
+            "llm_model_name": "z-ai/glm-5-turbo",
+            "htf_1": "1h",
+            "htf_1_use_internal": true,
+            "htf_2": "none",
+            "htf_2_use_internal": false,
+            "require_htf_zone": "enabled",
+            "use_macro_filter": "enabled"
+        },
+        "sell": {
+            "use_dynamic_stoploss": true,
+            "tp1_enabled": true,
+            "tp1_pct": 0.02,
+            "tp1_amount": 50.0,
+            "move_be_at_tp1": true,
+            "be_trigger_pct": 0.02,
+            "use_dynamic_tp_adj": true,
+            "tp_adj_min_rvol": 2.0,
+            "tp_adj_margin": 0.8,
+            "_exit_trend_type": "[swing, internal, both, none]",
+            "exit_trend_type": "both"
+        },
+        "protection": {},
+        "trailing": {
+            "trailing_stop": false,
+            "trailing_stop_positive": 0.005,
+            "trailing_stop_positive_offset": 0.01,
+            "trailing_only_offset_is_reached": true
+        },
+        "custom": {
+            "enable_logging": true,
+            "circuit_breaker_enabled": true,
+            "circuit_breaker_window": 30,
+            "circuit_breaker_limit": 3,
+            "_comment": "Experiment with filters",
+            "filter_block_fvg_stale_htf_part": true,
+            "filter_block_kz_ldn": true,
+            "filter_block_off_hours": true,
+            "filter_block_sweep": true,
+            "filter_friday_reduce_stake": false,
+            "filter_friday_stake_ratio": 0.5,
+            "export_indicator_data": false
+        }
+    },
+    "ft_stratparam_v": 1,
+    "export_time": "2025-12-14 16:40:00.000000+00:00",
+    "notes": {
+        "stoploss": "Default -5% price movement (leverage applied separately)",
+        "require_choch": "True = Only Reversals (Pine Script default behavior)",
+        "signal_lookback": "1 = Immediate signals (Pine Script behavior)",
+        "tp1_pct": "1% price movement triggers TP1 and BE",
+        "tp1_amount": "50% position closed at TP1",
+        "filter_block_kz_ldn": "Block London kill zone (07:00-08:30 UTC). avg profit +1% vs +9.5% non-KZ.",
+        "filter_block_off_hours": "Block OFF session (22:00-00:00 UTC). Lower win rate vs SESSION.",
+        "filter_block_sweep": "Block entries tagged SWEEP. WR 38.3%, consistently below average.",
+        "filter_block_fvg_stale_htf_part": "Block FVG_STALE+HTF_PART combo. 17 trades avg +0.15%, not worth risk.",
+        "filter_friday_reduce_stake": "Reduce stake on Fridays to filter_friday_stake_ratio fraction.",
+        "filter_friday_stake_ratio": "Stake multiplier on Fridays (0.5 = half). WR 39.6%, avg +5.5%.",
+        "export_indicator_data": "Save per-pair parquet to analisis/ for deeper post-analysis. Off by default."
+    }
+}

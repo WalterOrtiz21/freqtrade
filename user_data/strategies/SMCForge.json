@@ -1,0 +1,38 @@
+{
+    "strategy_name": "SMCForge",
+    "params": {
+        "buy": {
+            "internal_length": 5,
+            "swing_length": 50,
+            "disp_threshold": 1.0,
+            "disp_lookback_bars": 3,
+            "fractal_n_major": 5,
+            "fractal_n_minor": 2,
+            "eqh_tolerance_atr": 0.1,
+            "idm_sweep_lookback": 5,
+            "use_choch_internal": true,
+            "use_choch_swing": true,
+            "require_poi": true,
+            "require_pd_alignment": false,
+            "macro_filter_mode": "self_htf",
+            "macro_smc_htf": "4h",
+            "macro_neutral_both_sides": true
+        },
+        "sell": {
+            "tp_mode": "atr",
+            "tp_atr_mult": 3.0,
+            "tp_structural_margin": 0.95,
+            "sl_mode": "fixed",
+            "sl_atr_mult": 2.5,
+            "stoploss_pct": -0.03,
+            "tp_pct": 0.05,
+            "tp1_enabled": true,
+            "tp1_mode": "atr",
+            "tp1_atr_mult": 3.0,
+            "tp1_pct": 0.015,
+            "tp1_amount_pct": 70,
+            "be_buffer_pct": 0.001
+        },
+        "protection": {}
+    }
+}
