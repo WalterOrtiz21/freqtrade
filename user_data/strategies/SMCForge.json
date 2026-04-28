@@ -25,7 +25,7 @@
             "tp_structural_margin": 0.95,
             "sl_mode": "fixed",
             "sl_atr_mult": 2.5,
-            "stoploss_pct": -0.02,
+            "stoploss_pct": -0.03,
             "tp_pct": 0.05,
             "tp1_enabled": false,
             "tp1_mode": "pct",
