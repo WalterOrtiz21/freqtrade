@@ -108,6 +108,10 @@ class SMCForge(IStrategy):
     use_choch_swing = BooleanParameter(default=True, space='buy', optimize=True)
     require_poi = BooleanParameter(default=True, space='buy', optimize=True)
     require_pd_alignment = BooleanParameter(default=False, space='buy', optimize=True)
+    # Extend POI beyond OB/FVG: also accept Breaker Blocks and FVG Breakers.
+    # Breakers = zones where a prior opposing OB/FVG flipped after a BoS —
+    # SMC canon treats them as high-probability re-entries ("double-validated").
+    use_breakers = BooleanParameter(default=False, space='buy', optimize=True)
 
     # =========================================================
     # Macro filter — HTF bias gate via SMC dogfooding
@@ -148,7 +152,7 @@ class SMCForge(IStrategy):
     #                hard-cap. Pairs well with TP1 > 0 that locks partial gain.
     # MODE (fixed — not hyperopted)
     tp_mode = CategoricalParameter(
-        ["structural", "atr", "fixed", "none"], default="atr",
+        ["structural", "atr", "fixed", "none"], default="fixed",
         space='sell', optimize=False,
     )
     sl_mode = CategoricalParameter(
@@ -182,7 +186,7 @@ class SMCForge(IStrategy):
     # risk-free.
     # =========================================================
     # MODE (fixed — not hyperopted)
-    tp1_enabled = BooleanParameter(default=True, space='sell', optimize=False)
+    tp1_enabled = BooleanParameter(default=False, space='sell', optimize=False)
     tp1_mode = CategoricalParameter(
         ["atr", "pct"], default="atr", space='sell', optimize=False,
     )
@@ -206,6 +210,14 @@ class SMCForge(IStrategy):
     # =========================================================
 
     def bot_start(self, **kwargs) -> None:
+        # Defer param-dependent configuration to bot_loop_start: in backtesting,
+        # JSON params are loaded AFTER bot_start fires, so reading self.<param>.value
+        # here returns defaults instead of the values from SMCForge.json.
+        self._configured = False
+
+    def bot_loop_start(self, current_time: datetime, **kwargs) -> None:
+        if self._configured:
+            return
         cfg_lev = float(self.config.get('leverage', 1.0))
         # Hard-cap safety: used only if custom_stoploss returns None
         self.stoploss = -0.10 * cfg_lev
@@ -225,11 +237,12 @@ class SMCForge(IStrategy):
             self.minimal_roi = {0: 100.0}
 
         logger.info(
-            'SMCForge starting. tf=%s  leverage=%.2fx  '
+            'SMCForge configured. tf=%s  leverage=%.2fx  '
             'SL=%s TP=%s | macro=%s htf=%s',
             self.timeframe, cfg_lev, sl_mode, tp_mode,
             self.macro_filter_mode.value, self.macro_smc_htf.value,
         )
+        self._configured = True
 
     def leverage(self, pair, current_time, current_rate, proposed_leverage,
                  max_leverage, entry_tag, side, **kwargs) -> float:
@@ -415,6 +428,18 @@ class SMCForge(IStrategy):
             (df['close'] >= df['active_bullish_fvg_bottom'])
         )
         in_bull_poi = in_bull_ob | in_bull_fvg
+        if self.use_breakers.value:
+            in_bull_breaker = (
+                (df['active_bullish_breaker_top'] > 0) &
+                (df['low'] <= df['active_bullish_breaker_top']) &
+                (df['close'] >= df['active_bullish_breaker_bottom'])
+            )
+            in_bull_fvg_breaker = (
+                (df['active_bullish_fvg_breaker_top'] > 0) &
+                (df['low'] <= df['active_bullish_fvg_breaker_top']) &
+                (df['close'] >= df['active_bullish_fvg_breaker_bottom'])
+            )
+            in_bull_poi = in_bull_poi | in_bull_breaker | in_bull_fvg_breaker
 
         long_cond = bull_sweep_recent & choch_bull_recent
         if self.require_poi.value:
@@ -455,6 +480,18 @@ class SMCForge(IStrategy):
             (df['close'] <= df['active_bearish_fvg_top'])
         )
         in_bear_poi = in_bear_ob | in_bear_fvg
+        if self.use_breakers.value:
+            in_bear_breaker = (
+                (df['active_bearish_breaker_top'] > 0) &
+                (df['high'] >= df['active_bearish_breaker_bottom']) &
+                (df['close'] <= df['active_bearish_breaker_top'])
+            )
+            in_bear_fvg_breaker = (
+                (df['active_bearish_fvg_breaker_top'] > 0) &
+                (df['high'] >= df['active_bearish_fvg_breaker_bottom']) &
+                (df['close'] <= df['active_bearish_fvg_breaker_top'])
+            )
+            in_bear_poi = in_bear_poi | in_bear_breaker | in_bear_fvg_breaker
 
         short_cond = bear_sweep_recent & choch_bear_recent
         if self.require_poi.value:

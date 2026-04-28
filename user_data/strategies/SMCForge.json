@@ -16,20 +16,21 @@
             "require_pd_alignment": false,
             "macro_filter_mode": "self_htf",
             "macro_smc_htf": "4h",
-            "macro_neutral_both_sides": true
+            "macro_neutral_both_sides": true,
+            "use_breakers": true
         },
         "sell": {
-            "tp_mode": "atr",
+            "tp_mode": "fixed",
             "tp_atr_mult": 3.0,
             "tp_structural_margin": 0.95,
             "sl_mode": "fixed",
             "sl_atr_mult": 2.5,
-            "stoploss_pct": -0.03,
+            "stoploss_pct": -0.02,
             "tp_pct": 0.05,
-            "tp1_enabled": true,
-            "tp1_mode": "atr",
+            "tp1_enabled": false,
+            "tp1_mode": "pct",
             "tp1_atr_mult": 3.0,
-            "tp1_pct": 0.015,
+            "tp1_pct": 0.03,
             "tp1_amount_pct": 70,
             "be_buffer_pct": 0.001
         },
