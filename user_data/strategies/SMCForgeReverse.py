@@ -78,8 +78,14 @@ _MTF_PROJECT_COLS = (
     'active_bearish_fvg_top', 'active_bearish_fvg_bottom',
     'active_bullish_breaker_top', 'active_bullish_breaker_bottom',
     'active_bearish_breaker_top', 'active_bearish_breaker_bottom',
-    'active_bullish_fvg_breaker_top', 'active_bullish_fvg_breaker_bottom',
-    'active_bearish_fvg_breaker_top', 'active_bearish_fvg_breaker_bottom',
+    # FVG-breaker columns intentionally excluded from MTF projection.
+    # The engine's fvg_breaker state at the truncated-dataset boundary
+    # diverges from the full-dataset state at the same bar, which
+    # lookahead-analysis flags as a bias. Since rank1 has
+    # `enable_fvg_breaker=false` AND `tier_min='A'` filters out tier B
+    # trades that would require fvg_breaker presence, projecting these
+    # columns adds risk without benefit. To re-enable, audit the engine
+    # boundary handling and re-run lookahead-analysis.
     'swing_sweep_bullish', 'swing_sweep_bearish',
     'internal_sweep_bullish', 'internal_sweep_bearish',
     'swing_trend',
@@ -198,7 +204,12 @@ class SMCForgeReverse(IStrategy):
         -0.05, -0.01, default=-0.025, decimals=3, space='sell', optimize=True,
     )
     tp_pct = DecimalParameter(
-        0.05, 0.20, default=0.10, decimals=3, space='sell', optimize=True,
+        0.05, 0.20, default=0.10, decimals=3, space='sell',
+        # DEAD under current setup: tp1_target='equilibrium' (optimize=False)
+        # makes custom_exit ignore tp_pct, and minimal_roi=100 in
+        # bot_loop_start disables ROI exits. Keeping tp_pct optimize=True
+        # would waste hyperopt epochs on a no-op dimension.
+        optimize=False,
     )
     tp1_target = CategoricalParameter(
         ['equilibrium', 'opposite_poi', 'fixed'], default='equilibrium',
