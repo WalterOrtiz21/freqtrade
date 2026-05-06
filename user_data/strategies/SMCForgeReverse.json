@@ -1,0 +1,58 @@
+{
+  "strategy_name": "SMCForgeReverse",
+  "params": {
+    "roi": {
+      "0": 100.0
+    },
+    "stoploss": {
+      "stoploss": -0.025
+    },
+    "trailing": {
+      "trailing_stop": false,
+      "trailing_stop_positive": null,
+      "trailing_stop_positive_offset": 0.0,
+      "trailing_only_offset_is_reached": false
+    },
+    "max_open_trades": {
+      "max_open_trades": 8
+    },
+    "buy": {
+      "internal_length": 5,
+      "swing_length": 50,
+      "fractal_n_major": 5,
+      "fractal_n_minor": 2,
+      "eqh_tolerance_atr": 0.1,
+      "disp_lookback_bars": 3,
+      "mtf_structure_tf": "4h",
+      "htf_bias_tf": "1d",
+      "enable_daily_bias": false,
+      "bias_mode": "pullback",
+      "tier_min": "A",
+      "enable_ob": true,
+      "enable_fvg": true,
+      "enable_breaker": true,
+      "enable_fvg_breaker": false,
+      "enable_longs": true,
+      "enable_shorts": false,
+      "require_sweep": true,
+      "require_pd_alignment": true,
+      "require_idm_swept": "off",
+      "require_choch_inside": false,
+      "approach_strength_thr": 0.55,
+      "approach_lookback": 7,
+      "sweep_lookback": 4,
+      "disp_threshold": 1.0,
+      "pd_discount_max": 38.0,
+      "pd_premium_min": 62.0
+    },
+    "sell": {
+      "sl_atr_buffer_mult": 0.3,
+      "stoploss_pct": -0.025,
+      "tp_pct": 0.1,
+      "tp1_target": "equilibrium",
+      "tp2_target": "opposite_poi"
+    }
+  },
+  "ft_stratparam_v": 1,
+  "export_time": "2026-05-05 22:00:00.000000+00:00"
+}
