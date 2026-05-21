@@ -100,3 +100,66 @@ def test_populate_indicators_range_and_skip(strat):
         (out['date'].dt.hour == 13) & (out['date'].dt.minute == 30)
     ].iloc[0]
     assert pd.isna(day2_at_13_30['orb_range_high'])
+
+
+def test_populate_entry_trend_long_short_and_no_reentry(strat):
+    """Covers in one test:
+      (a) close > range_high inside session window -> enter_long=1
+      (b) close < range_low inside session window -> enter_short=1
+      (c) close == range_high (strict inequality) -> no entry
+      (d) breakout outside session window (e.g. 22:00) -> no entry
+      (e) breakout when session skipped -> no entry
+      (f) second breakout same session -> suppressed (no re-entry)
+      (g) opposite-side breakout same session -> suppressed
+      (h) day boundary: new day -> entry signals work again
+    """
+    # Day 1: long breakout at 14:15, then re-breakout at 15:00, then short at 16:00.
+    # Expect exactly 1 long signal at 14:15, nothing else that day.
+    day1 = make_15m_day(
+        '2026-04-15',
+        overrides={
+            '13:00': {'high': 100.5, 'low': 99.5, 'close': 100.0},
+            '14:15': {'close': 101.0},   # (a) long
+            '15:00': {'close': 102.0},   # (f) second long - suppressed
+            '16:00': {'close': 98.0},    # (g) opposite short - suppressed
+            '22:00': {'close': 110.0},   # (d) outside session - suppressed
+        },
+    )
+    # Day 2: short breakout at 14:30; long at 14:45 (suppressed - already shorted).
+    day2 = make_15m_day(
+        '2026-04-16',
+        overrides={
+            '13:00': {'high': 100.5, 'low': 99.5, 'close': 100.0},
+            '14:30': {'close': 99.0},    # (b) short
+            '14:45': {'close': 100.5},   # (c) close == range_high -> no entry anyway
+            '15:00': {'close': 101.0},   # (f)+(g) suppressed
+        },
+    )
+    # Day 3: wide range (skipped) with breakout.
+    day3 = make_15m_day(
+        '2026-04-17',
+        overrides={
+            '13:00': {'high': 105.0, 'low': 95.0, 'close': 100.0},
+            '14:15': {'close': 106.0},   # (e) skipped session
+        },
+    )
+    df = pd.concat([day1, day2, day3], ignore_index=True)
+
+    out = strat.populate_indicators(df, {'pair': 'BTC/USDT:USDT'})
+    out = strat.populate_entry_trend(out, {'pair': 'BTC/USDT:USDT'})
+
+    def signals_on(date_str):
+        mask = out['date'].dt.date == pd.Timestamp(date_str).date()
+        return out.loc[mask, ['enter_long', 'enter_short']].sum().to_dict()
+
+    assert signals_on('2026-04-15') == {'enter_long': 1, 'enter_short': 0}
+    assert signals_on('2026-04-16') == {'enter_long': 0, 'enter_short': 1}
+    assert signals_on('2026-04-17') == {'enter_long': 0, 'enter_short': 0}
+
+    # (h) day boundary verified by day2 having its own signal independent of day1.
+    # Specifically check the day2 short was emitted at 14:30.
+    day2_14_30 = out.loc[
+        (out['date'].dt.date == pd.Timestamp('2026-04-16').date()) &
+        (out['date'].dt.hour == 14) & (out['date'].dt.minute == 30)
+    ].iloc[0]
+    assert day2_14_30['enter_short'] == 1

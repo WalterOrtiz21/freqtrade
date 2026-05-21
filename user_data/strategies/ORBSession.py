@@ -95,10 +95,27 @@ class ORBSession(IStrategy):
         return df
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        # Implemented in Task 3.
-        dataframe['enter_long'] = 0
-        dataframe['enter_short'] = 0
-        return dataframe
+        df = dataframe
+        in_session = (df['date'].dt.hour >= self.RANGE_END_HOUR) & \
+                     (df['date'].dt.hour < self.SESSION_END_HOUR)
+        not_skipped = ~df['orb_skipped'].fillna(False)
+        has_range = df['orb_range_high'].notna() & df['orb_range_low'].notna()
+
+        long_breakout = df['close'] > df['orb_range_high']
+        short_breakout = df['close'] < df['orb_range_low']
+
+        any_breakout = (long_breakout | short_breakout) & in_session & not_skipped & has_range
+
+        if not self.ALLOW_REENTRY:
+            session_date = df['date'].dt.date
+            cum_signals = any_breakout.groupby(session_date).cumsum()
+            first_signal_only = any_breakout & (cum_signals == 1)
+        else:
+            first_signal_only = any_breakout
+
+        df['enter_long'] = (first_signal_only & long_breakout).astype(int)
+        df['enter_short'] = (first_signal_only & short_breakout).astype(int)
+        return df
 
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         # Implemented in Task 5.
