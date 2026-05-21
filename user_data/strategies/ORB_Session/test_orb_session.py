@@ -143,7 +143,18 @@ def test_populate_entry_trend_long_short_and_no_reentry(strat):
             '14:15': {'close': 106.0},   # (e) skipped session
         },
     )
-    df = pd.concat([day1, day2, day3], ignore_index=True)
+    # Day 4: narrow range with first-of-session candle exactly at range_high.
+    # This isolates invariant (c): no prior signal, not skipped, in session —
+    # the ONLY thing preventing entry is strict inequality (close == range_high).
+    # If `>` were ever loosened to `>=` this assertion would catch the regression.
+    day4 = make_15m_day(
+        '2026-04-18',
+        overrides={
+            '13:00': {'high': 100.5, 'low': 99.5, 'close': 100.0},
+            '14:15': {'close': 100.5},   # (c) strict-inequality in isolation
+        },
+    )
+    df = pd.concat([day1, day2, day3, day4], ignore_index=True)
 
     out = strat.populate_indicators(df, {'pair': 'BTC/USDT:USDT'})
     out = strat.populate_entry_trend(out, {'pair': 'BTC/USDT:USDT'})
@@ -155,6 +166,7 @@ def test_populate_entry_trend_long_short_and_no_reentry(strat):
     assert signals_on('2026-04-15') == {'enter_long': 1, 'enter_short': 0}
     assert signals_on('2026-04-16') == {'enter_long': 0, 'enter_short': 1}
     assert signals_on('2026-04-17') == {'enter_long': 0, 'enter_short': 0}
+    assert signals_on('2026-04-18') == {'enter_long': 0, 'enter_short': 0}
 
     # (h) day boundary verified by day2 having its own signal independent of day1.
     # Specifically check the day2 short was emitted at 14:30.
