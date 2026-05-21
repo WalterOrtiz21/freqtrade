@@ -4,11 +4,11 @@
 
 **Goal:** Build `ORBSession` — a freqtrade Opening Range Breakout strategy on the US session (13:00-21:00 UTC) for BTC/USDT:USDT and ETH/USDT:USDT perps, with zero hyperopt parameters in v1, to diversify the LIVE `SMC_Forge` strategy.
 
-**Architecture:** Single-file `IStrategy` subclass (~150-200 LOC) at `user_data/strategies/ORBSession.py`. All session/range/breakout state lives in DataFrame columns (no external state). Range computed in `populate_indicators`, entries gated in `populate_entry_trend`, stop in `custom_stoploss`, forced exit in `populate_exit_trend`. Companion config + tests + analysis script in `user_data/strategies/ORBSession/`.
+**Architecture:** Single-file `IStrategy` subclass (~150-200 LOC) at `user_data/strategies/ORBSession.py`. All session/range/breakout state lives in DataFrame columns (no external state). Range computed in `populate_indicators`, entries gated in `populate_entry_trend`, stop in `custom_stoploss`, forced exit in `populate_exit_trend`. Companion config + tests + analysis script in `user_data/strategies/ORB_Session/`.
 
 **Tech Stack:** Python 3.11, freqtrade v3 (IStrategy INTERFACE_VERSION = 3), pandas, numpy, pytest.
 
-**Reference spec:** `user_data/strategies/ORBSession/2026-05-20-design.md`
+**Reference spec:** `user_data/strategies/ORB_Session/2026-05-20-design.md`
 
 **Testing approach:** Pragmatic TDD per Walter's preference. **3 dense unit tests** cover the only subtle logic (range calc with groupby/ffill, no-reentry suppression, custom_stoploss long/short asymmetry). Everything else is verified end-to-end by the integration backtest (Task 6) with visual chart-check of 3 random trades. No TDD for plumbing or obvious code.
 
@@ -18,15 +18,15 @@
 
 **To create:**
 - `user_data/strategies/ORBSession.py` — IStrategy class
-- `user_data/strategies/ORBSession/__init__.py` — empty marker
-- `user_data/strategies/ORBSession/test_helpers.py` — synthetic OHLCV builder
-- `user_data/strategies/ORBSession/test_orb_session.py` — 3 dense tests
-- `user_data/strategies/ORBSession/analyze_correlation.py` — diversification check vs SMC_Forge
-- `user_data/strategies/ORBSession/freqtrade-orb.service` — systemd template
+- `user_data/strategies/ORB_Session/__init__.py` — empty marker
+- `user_data/strategies/ORB_Session/test_helpers.py` — synthetic OHLCV builder
+- `user_data/strategies/ORB_Session/test_orb_session.py` — 3 dense tests
+- `user_data/strategies/ORB_Session/analyze_correlation.py` — diversification check vs SMC_Forge
+- `user_data/strategies/ORB_Session/freqtrade-orb.service` — systemd template
 - `ORBSession.json` — freqtrade run config (repo root)
 
 **Already exists:**
-- `user_data/strategies/ORBSession/2026-05-20-design.md` — spec (do not modify)
+- `user_data/strategies/ORB_Session/2026-05-20-design.md` — spec (do not modify)
 
 **Commit convention:** one commit per task. Use `git add <specific files>`, never `git add .` (the repo has unrelated SMC_Forge uncommitted changes).
 
@@ -36,16 +36,16 @@
 
 **Files:**
 - Create: `user_data/strategies/ORBSession.py` (full skeleton with all class attrs)
-- Create: `user_data/strategies/ORBSession/__init__.py` (empty)
-- Create: `user_data/strategies/ORBSession/test_helpers.py`
+- Create: `user_data/strategies/ORB_Session/__init__.py` (empty)
+- Create: `user_data/strategies/ORB_Session/test_helpers.py`
 
 - [ ] **Step 1.1: Create `__init__.py`**
 
-Create empty file at `user_data/strategies/ORBSession/__init__.py`.
+Create empty file at `user_data/strategies/ORB_Session/__init__.py`.
 
 - [ ] **Step 1.2: Create `test_helpers.py`**
 
-Create `user_data/strategies/ORBSession/test_helpers.py`:
+Create `user_data/strategies/ORB_Session/test_helpers.py`:
 
 ```python
 """Synthetic OHLCV builders for ORBSession unit tests."""
@@ -110,7 +110,7 @@ Exit: range stop OR forced close at 21:00 UTC.
 
 No hyperopt parameters in v1 (anti-curve-fit).
 
-See user_data/strategies/ORBSession/2026-05-20-design.md
+See user_data/strategies/ORB_Session/2026-05-20-design.md
 """
 
 import logging
@@ -191,8 +191,8 @@ Expected: prints `OK`.
 
 ```bash
 git add user_data/strategies/ORBSession.py \
-        user_data/strategies/ORBSession/__init__.py \
-        user_data/strategies/ORBSession/test_helpers.py
+        user_data/strategies/ORB_Session/__init__.py \
+        user_data/strategies/ORB_Session/test_helpers.py
 git commit -m "ORBSession: scaffold IStrategy class + test helpers"
 ```
 
@@ -204,17 +204,17 @@ This is the subtlest piece: groupby-cummax/cummin within session_date, then ffil
 
 **Files:**
 - Modify: `user_data/strategies/ORBSession.py`
-- Create: `user_data/strategies/ORBSession/test_orb_session.py`
+- Create: `user_data/strategies/ORB_Session/test_orb_session.py`
 
 - [ ] **Step 2.1: Write the failing test**
 
-Create `user_data/strategies/ORBSession/test_orb_session.py`:
+Create `user_data/strategies/ORB_Session/test_orb_session.py`:
 
 ```python
 """Dense unit tests for ORBSession. Each test covers multiple invariants.
 
 Run from /home/wortiz/Desktop/freqtrade:
-    pytest user_data/strategies/ORBSession/test_orb_session.py -v
+    pytest user_data/strategies/ORB_Session/test_orb_session.py -v
 """
 
 import sys
@@ -318,7 +318,7 @@ def test_populate_indicators_range_and_skip(strat):
 
 ```bash
 cd /home/wortiz/Desktop/freqtrade
-pytest user_data/strategies/ORBSession/test_orb_session.py -v
+pytest user_data/strategies/ORB_Session/test_orb_session.py -v
 ```
 Expected: 1 FAIL (KeyError on `orb_range_high`).
 
@@ -364,7 +364,7 @@ Replace the stub `populate_indicators` in `ORBSession.py` with:
 - [ ] **Step 2.4: Run, confirm pass**
 
 ```bash
-pytest user_data/strategies/ORBSession/test_orb_session.py -v
+pytest user_data/strategies/ORB_Session/test_orb_session.py -v
 ```
 Expected: 1 PASS.
 
@@ -372,7 +372,7 @@ Expected: 1 PASS.
 
 ```bash
 git add user_data/strategies/ORBSession.py \
-        user_data/strategies/ORBSession/test_orb_session.py
+        user_data/strategies/ORB_Session/test_orb_session.py
 git commit -m "ORBSession: populate_indicators computes range + skip filter"
 ```
 
@@ -384,7 +384,7 @@ The non-obvious bit is the no-reentry gate using `cumsum` over `any_breakout` pe
 
 **Files:**
 - Modify: `user_data/strategies/ORBSession.py`
-- Modify: `user_data/strategies/ORBSession/test_orb_session.py`
+- Modify: `user_data/strategies/ORB_Session/test_orb_session.py`
 
 - [ ] **Step 3.1: Write the failing test**
 
@@ -457,7 +457,7 @@ def test_populate_entry_trend_long_short_and_no_reentry(strat):
 - [ ] **Step 3.2: Run, confirm fail**
 
 ```bash
-pytest user_data/strategies/ORBSession/test_orb_session.py -v -k "entry_trend"
+pytest user_data/strategies/ORB_Session/test_orb_session.py -v -k "entry_trend"
 ```
 Expected: FAIL (all signals 0 because stub returns zeros).
 
@@ -493,7 +493,7 @@ Replace the stub in `ORBSession.py`:
 - [ ] **Step 3.4: Run, confirm pass**
 
 ```bash
-pytest user_data/strategies/ORBSession/test_orb_session.py -v
+pytest user_data/strategies/ORB_Session/test_orb_session.py -v
 ```
 Expected: 2 PASS.
 
@@ -501,7 +501,7 @@ Expected: 2 PASS.
 
 ```bash
 git add user_data/strategies/ORBSession.py \
-        user_data/strategies/ORBSession/test_orb_session.py
+        user_data/strategies/ORB_Session/test_orb_session.py
 git commit -m "ORBSession: populate_entry_trend with long/short + no-reentry"
 ```
 
@@ -513,7 +513,7 @@ freqtrade's `custom_stoploss` return convention differs subtly for shorts. **One
 
 **Files:**
 - Modify: `user_data/strategies/ORBSession.py`
-- Modify: `user_data/strategies/ORBSession/test_orb_session.py`
+- Modify: `user_data/strategies/ORB_Session/test_orb_session.py`
 
 - [ ] **Step 4.1: Write the failing test**
 
@@ -582,7 +582,7 @@ def test_custom_stoploss_long_and_short(strat):
 - [ ] **Step 4.2: Run, confirm fail**
 
 ```bash
-pytest user_data/strategies/ORBSession/test_orb_session.py -v -k "custom_stoploss"
+pytest user_data/strategies/ORB_Session/test_orb_session.py -v -k "custom_stoploss"
 ```
 Expected: FAIL (`custom_stoploss` not defined).
 
@@ -622,7 +622,7 @@ Append this method to `ORBSession` class:
 - [ ] **Step 4.4: Run, confirm pass**
 
 ```bash
-pytest user_data/strategies/ORBSession/test_orb_session.py -v
+pytest user_data/strategies/ORB_Session/test_orb_session.py -v
 ```
 Expected: 3 PASS.
 
@@ -630,7 +630,7 @@ Expected: 3 PASS.
 
 ```bash
 git add user_data/strategies/ORBSession.py \
-        user_data/strategies/ORBSession/test_orb_session.py
+        user_data/strategies/ORB_Session/test_orb_session.py
 git commit -m "ORBSession: custom_stoploss returns opposite-of-range (long+short)"
 ```
 
@@ -865,18 +865,18 @@ git commit -m "ORBSession: run config + April 2026 backtest baseline"
 The diversification thesis (spec §9) requires `|corr| < 0.4`. The script computes daily-return Pearson correlation between ORBSession and SMC_Forge backtest equity curves.
 
 **Files:**
-- Create: `user_data/strategies/ORBSession/analyze_correlation.py`
+- Create: `user_data/strategies/ORB_Session/analyze_correlation.py`
 
 - [ ] **Step 7.1: Create the script**
 
-Create `user_data/strategies/ORBSession/analyze_correlation.py`:
+Create `user_data/strategies/ORB_Session/analyze_correlation.py`:
 
 ```python
 """
 Diversification check: correlate ORBSession equity curve vs SMC_Forge equity curve.
 
 Usage:
-    python user_data/strategies/ORBSession/analyze_correlation.py \\
+    python user_data/strategies/ORB_Session/analyze_correlation.py \\
         --orb user_data/backtest_results/orb_april2026.json \\
         --smc user_data/backtest_results/smc_april2026.json
 
@@ -961,7 +961,7 @@ freqtrade backtesting --config config_smc_forge.json --strategy SMCForge \
 Then:
 
 ```bash
-python user_data/strategies/ORBSession/analyze_correlation.py \
+python user_data/strategies/ORB_Session/analyze_correlation.py \
     --orb user_data/backtest_results/orb_april2026.json \
     --smc user_data/backtest_results/smc_april2026.json
 ```
@@ -970,7 +970,7 @@ Expected: prints overlapping days, correlation, verdict. 1-month is too short fo
 - [ ] **Step 7.3: Commit**
 
 ```bash
-git add user_data/strategies/ORBSession/analyze_correlation.py
+git add user_data/strategies/ORB_Session/analyze_correlation.py
 git commit -m "ORBSession: correlation analysis script vs SMC_Forge"
 ```
 
@@ -979,11 +979,11 @@ git commit -m "ORBSession: correlation analysis script vs SMC_Forge"
 ## Task 8: systemd unit template
 
 **Files:**
-- Create: `user_data/strategies/ORBSession/freqtrade-orb.service`
+- Create: `user_data/strategies/ORB_Session/freqtrade-orb.service`
 
 - [ ] **Step 8.1: Create the unit file template**
 
-Create `user_data/strategies/ORBSession/freqtrade-orb.service`:
+Create `user_data/strategies/ORB_Session/freqtrade-orb.service`:
 
 ```ini
 [Unit]
@@ -1015,7 +1015,7 @@ WantedBy=multi-user.target
 **Do not auto-deploy.** Walter installs it manually under sudo:
 
 ```bash
-sudo cp user_data/strategies/ORBSession/freqtrade-orb.service /etc/systemd/system/
+sudo cp user_data/strategies/ORB_Session/freqtrade-orb.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now freqtrade-orb
 sudo systemctl status freqtrade-orb
@@ -1026,7 +1026,7 @@ Verify the venv path (`.venv/bin/freqtrade`) exists before enabling. Adjust unit
 - [ ] **Step 8.2: Commit**
 
 ```bash
-git add user_data/strategies/ORBSession/freqtrade-orb.service
+git add user_data/strategies/ORB_Session/freqtrade-orb.service
 git commit -m "ORBSession: systemd unit template (manual deploy)"
 ```
 
@@ -1038,7 +1038,7 @@ git commit -m "ORBSession: systemd unit template (manual deploy)"
 
 ```bash
 cd /home/wortiz/Desktop/freqtrade
-pytest user_data/strategies/ORBSession/test_orb_session.py -v
+pytest user_data/strategies/ORB_Session/test_orb_session.py -v
 ```
 Expected: 3 PASS.
 

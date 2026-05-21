@@ -9,12 +9,11 @@ Exit: range stop OR forced close at 21:00 UTC.
 
 No hyperopt parameters in v1 (anti-curve-fit).
 
-See user_data/strategies/ORBSession/2026-05-20-design.md
+See user_data/strategies/ORB_Session/2026-05-20-design.md
 """
 
 import logging
 
-import pandas as pd
 from pandas import DataFrame
 
 from freqtrade.strategy import IStrategy
