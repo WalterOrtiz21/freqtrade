@@ -5,7 +5,9 @@ Run from /home/wortiz/Desktop/freqtrade:
 """
 
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pandas as pd
 import pytest
@@ -175,10 +177,6 @@ def test_populate_entry_trend_long_short_and_no_reentry(strat):
         (out['date'].dt.hour == 14) & (out['date'].dt.minute == 30)
     ].iloc[0]
     assert day2_14_30['enter_short'] == 1
-
-
-from datetime import datetime, timezone
-from unittest.mock import MagicMock
 
 
 def _fake_trade(pair: str, is_short: bool, open_rate: float):

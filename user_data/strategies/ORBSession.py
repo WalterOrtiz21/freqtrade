@@ -117,6 +117,9 @@ class ORBSession(IStrategy):
         df['enter_short'] = (first_signal_only & short_breakout).astype(int)
         return df
 
+    # after_fill is absorbed by **kwargs intentionally — range stop is fixed at
+    # entry, not recomputed on fill events. Don't add after_fill explicitly: that
+    # would flip freqtrade's _ft_stop_uses_after_fill flag and change framework behavior.
     def custom_stoploss(self, pair, trade, current_time, current_rate, current_profit, **kwargs):
         """Stop at opposite end of opening range.
 
