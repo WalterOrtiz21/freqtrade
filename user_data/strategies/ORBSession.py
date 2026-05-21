@@ -14,6 +14,7 @@ See user_data/strategies/ORB_Session/2026-05-20-design.md
 
 import logging
 
+import pandas as pd
 from pandas import DataFrame
 
 from freqtrade.strategy import IStrategy
@@ -53,8 +54,45 @@ class ORBSession(IStrategy):
     stoploss = -0.99            # placeholder; real stop in custom_stoploss
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        # Implemented in Task 2.
-        return dataframe
+        df = dataframe.copy()
+        session_date = df['date'].dt.date
+
+        # 1. Mark candles inside the range-forming hour (13:00-13:45 UTC)
+        in_range_window = (df['date'].dt.hour == self.SESSION_START_HOUR)
+
+        # 2. cummax/cummin within each UTC day, only over range candles
+        range_high_seed = df['high'].where(in_range_window)
+        range_low_seed = df['low'].where(in_range_window)
+        df['orb_range_high'] = range_high_seed.groupby(session_date).cummax()
+        df['orb_range_low'] = range_low_seed.groupby(session_date).cummin()
+
+        # 3. Keep only the final (13:45) accumulated value; wipe all other pre-14:00 values.
+        #    Then ffill within each UTC day so the range carries forward from 14:00 onwards.
+        is_range_end_candle = (
+            (df['date'].dt.hour == self.SESSION_START_HOUR) &
+            (df['date'].dt.minute == 45)
+        )
+        post_range = df['date'].dt.hour >= self.RANGE_END_HOUR
+        keep = post_range | is_range_end_candle
+        df.loc[~keep, 'orb_range_high'] = pd.NA
+        df.loc[~keep, 'orb_range_low'] = pd.NA
+        df['orb_range_high'] = df.groupby(session_date)['orb_range_high'].ffill()
+        df['orb_range_low'] = df.groupby(session_date)['orb_range_low'].ffill()
+        # Now hide the 13:45 seed row itself (still pre-14:00 from strategy's perspective)
+        df.loc[is_range_end_candle & ~post_range, 'orb_range_high'] = pd.NA
+        df.loc[is_range_end_candle & ~post_range, 'orb_range_low'] = pd.NA
+
+        # 4. Skip filter: reference price = close of 13:45 candle.
+        ref_close = df['close'].where(
+            (df['date'].dt.hour == self.SESSION_START_HOUR) &
+            (df['date'].dt.minute == 45)
+        )
+        ref_close_filled = ref_close.groupby(session_date).bfill().ffill()
+        range_pct = (df['orb_range_high'] - df['orb_range_low']) / ref_close_filled
+        df['orb_range_pct'] = range_pct
+        df['orb_skipped'] = (range_pct > self.MAX_RANGE_PCT).fillna(False)
+
+        return df
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         # Implemented in Task 3.
