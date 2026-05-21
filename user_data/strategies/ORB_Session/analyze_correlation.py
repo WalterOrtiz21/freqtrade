@@ -46,7 +46,7 @@ def main() -> None:
     orb = equity_curve_from_backtest(args.orb, args.orb_strategy_name)
     smc = equity_curve_from_backtest(args.smc, args.smc_strategy_name)
 
-    aligned = pd.DataFrame({'orb': orb, 'smc': smc}).fillna(method='ffill').dropna()
+    aligned = pd.DataFrame({'orb': orb, 'smc': smc}).ffill().dropna()
     returns = aligned.diff().dropna()
 
     if len(returns) < 5:

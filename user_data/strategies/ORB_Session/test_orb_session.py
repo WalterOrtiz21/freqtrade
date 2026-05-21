@@ -156,7 +156,18 @@ def test_populate_entry_trend_long_short_and_no_reentry(strat):
             '14:15': {'close': 100.5},   # (c) strict-inequality in isolation
         },
     )
-    df = pd.concat([day1, day2, day3, day4], ignore_index=True)
+    # Day 5: only-breakout-candle is 20:45 (the same row as the forced-exit signal).
+    # Allowing entry here would open a trade at the next candle's open (21:00, OUT
+    # of session) and hold it until the NEXT day's 20:45 exit — a 24h trade.
+    # In-session window must exclude 20:45 to prevent this.
+    day5 = make_15m_day(
+        '2026-04-19',
+        overrides={
+            '13:00': {'high': 100.5, 'low': 99.5, 'close': 100.0},
+            '20:45': {'close': 101.0},   # (i) breakout on last candle - must be suppressed
+        },
+    )
+    df = pd.concat([day1, day2, day3, day4, day5], ignore_index=True)
 
     out = strat.populate_indicators(df, {'pair': 'BTC/USDT:USDT'})
     out = strat.populate_entry_trend(out, {'pair': 'BTC/USDT:USDT'})
@@ -169,6 +180,7 @@ def test_populate_entry_trend_long_short_and_no_reentry(strat):
     assert signals_on('2026-04-16') == {'enter_long': 0, 'enter_short': 1}
     assert signals_on('2026-04-17') == {'enter_long': 0, 'enter_short': 0}
     assert signals_on('2026-04-18') == {'enter_long': 0, 'enter_short': 0}
+    assert signals_on('2026-04-19') == {'enter_long': 0, 'enter_short': 0}
 
     # (h) day boundary verified by day2 having its own signal independent of day1.
     # Specifically check the day2 short was emitted at 14:30.

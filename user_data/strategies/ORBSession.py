@@ -96,8 +96,17 @@ class ORBSession(IStrategy):
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         df = dataframe
+        # Exclude the 20:45 candle from entries: it shares the timestamp with the
+        # forced-exit signal and a brand-new trade opening at 21:00 (next candle's
+        # open) would fall outside the session, holding overnight until the next
+        # day's 20:45 exit signal — a 24h "intraday" trade. Last valid entry = 20:30.
+        last_session_candle = (
+            (df['date'].dt.hour == (self.SESSION_END_HOUR - 1)) &
+            (df['date'].dt.minute == 45)
+        )
         in_session = (df['date'].dt.hour >= self.RANGE_END_HOUR) & \
-                     (df['date'].dt.hour < self.SESSION_END_HOUR)
+                     (df['date'].dt.hour < self.SESSION_END_HOUR) & \
+                     ~last_session_candle
         not_skipped = ~df['orb_skipped'].fillna(False)
         has_range = df['orb_range_high'].notna() & df['orb_range_low'].notna()
 
