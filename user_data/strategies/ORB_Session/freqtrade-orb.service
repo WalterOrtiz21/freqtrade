@@ -1,0 +1,24 @@
+[Unit]
+Description=Freqtrade ORBSession bot (paper / live)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wortiz
+Group=wortiz
+WorkingDirectory=/home/wortiz/Desktop/freqtrade
+Environment=PATH=/home/wortiz/Desktop/freqtrade/.venv/bin:/usr/bin:/bin
+ExecStart=/home/wortiz/Desktop/freqtrade/.venv/bin/freqtrade trade \
+    --config /home/wortiz/Desktop/freqtrade/ORBSession.json \
+    --strategy ORBSession \
+    --logfile /home/wortiz/Desktop/freqtrade/user_data/logs/orb.log
+Restart=on-failure
+RestartSec=15
+
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=false
+
+[Install]
+WantedBy=multi-user.target
