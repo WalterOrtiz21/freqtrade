@@ -117,6 +117,33 @@ class ORBSession(IStrategy):
         df['enter_short'] = (first_signal_only & short_breakout).astype(int)
         return df
 
+    def custom_stoploss(self, pair, trade, current_time, current_rate, current_profit, **kwargs):
+        """Stop at opposite end of opening range.
+
+        Long: stop = range_low  -> returns (range_low / open_rate) - 1   (negative)
+        Short: stop = range_high -> returns (open_rate - range_high) / open_rate  (negative)
+
+        If range data is missing (defensive), returns the class-level stoploss
+        (-0.99 placeholder; should never trigger in practice).
+        """
+        dataframe, _ = self.dp.get_analyzed_dataframe(pair=pair, timeframe=self.timeframe)
+        if dataframe is None or dataframe.empty:
+            return self.stoploss
+
+        trade_date = trade.open_date_utc.date()
+        same_day = dataframe['date'].dt.date == trade_date
+        candidates = dataframe.loc[same_day & dataframe['orb_range_high'].notna()]
+        if candidates.empty:
+            return self.stoploss
+
+        last = candidates.iloc[-1]
+        range_high = last['orb_range_high']
+        range_low = last['orb_range_low']
+
+        if trade.is_short:
+            return (trade.open_rate - range_high) / trade.open_rate
+        return (range_low / trade.open_rate) - 1
+
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         # Implemented in Task 5.
         dataframe['exit_long'] = 0

@@ -175,3 +175,62 @@ def test_populate_entry_trend_long_short_and_no_reentry(strat):
         (out['date'].dt.hour == 14) & (out['date'].dt.minute == 30)
     ].iloc[0]
     assert day2_14_30['enter_short'] == 1
+
+
+from datetime import datetime, timezone
+from unittest.mock import MagicMock
+
+
+def _fake_trade(pair: str, is_short: bool, open_rate: float):
+    t = MagicMock()
+    t.pair = pair
+    t.is_short = is_short
+    t.open_rate = open_rate
+    t.open_date_utc = datetime(2026, 4, 15, 14, 15, tzinfo=timezone.utc)
+    return t
+
+
+def test_custom_stoploss_long_and_short(strat):
+    """Covers in one test:
+      (a) Long: open_rate=101.0, range_low=99.5 -> sl = (99.5/101)-1 ≈ -0.01485
+      (b) Short: open_rate=99.0, range_high=100.5 -> sl = (99-100.5)/99 ≈ -0.01515
+      (c) If dataframe has no range data (defensive): falls back to class stoploss
+    """
+    df = make_15m_day(
+        '2026-04-15',
+        overrides={
+            '13:00': {'high': 100.5, 'low': 99.5, 'close': 100.0},
+            '14:15': {'close': 101.0},
+        },
+    )
+    df_with_range = strat.populate_indicators(df, {'pair': 'BTC/USDT:USDT'})
+
+    strat.dp = MagicMock()
+    strat.dp.get_analyzed_dataframe = MagicMock(return_value=(df_with_range, None))
+
+    # (a) Long
+    trade_long = _fake_trade('BTC/USDT:USDT', is_short=False, open_rate=101.0)
+    sl_long = strat.custom_stoploss(
+        pair='BTC/USDT:USDT', trade=trade_long,
+        current_time=datetime(2026, 4, 15, 14, 30, tzinfo=timezone.utc),
+        current_rate=101.0, current_profit=0.0,
+    )
+    assert sl_long == pytest.approx((99.5 / 101.0) - 1, abs=1e-5)
+
+    # (b) Short
+    trade_short = _fake_trade('ETH/USDT:USDT', is_short=True, open_rate=99.0)
+    sl_short = strat.custom_stoploss(
+        pair='ETH/USDT:USDT', trade=trade_short,
+        current_time=datetime(2026, 4, 15, 14, 30, tzinfo=timezone.utc),
+        current_rate=99.0, current_profit=0.0,
+    )
+    assert sl_short == pytest.approx((99.0 - 100.5) / 99.0, abs=1e-5)
+
+    # (c) Defensive fallback: pretend dataframe is empty
+    strat.dp.get_analyzed_dataframe = MagicMock(return_value=(pd.DataFrame(), None))
+    sl_fallback = strat.custom_stoploss(
+        pair='BTC/USDT:USDT', trade=trade_long,
+        current_time=datetime(2026, 4, 15, 14, 30, tzinfo=timezone.utc),
+        current_rate=101.0, current_profit=0.0,
+    )
+    assert sl_fallback == strat.stoploss
