@@ -148,7 +148,12 @@ class ORBSession(IStrategy):
         return (range_low / trade.open_rate) - 1
 
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        # Implemented in Task 5.
-        dataframe['exit_long'] = 0
-        dataframe['exit_short'] = 0
-        return dataframe
+        df = dataframe
+        # The 20:45 15m candle closes at 21:00 UTC -> emit exit signal there.
+        is_last_session_candle = (
+            (df['date'].dt.hour == (self.SESSION_END_HOUR - 1)) &
+            (df['date'].dt.minute == 45)
+        )
+        df['exit_long'] = is_last_session_candle.astype(int)
+        df['exit_short'] = is_last_session_candle.astype(int)
+        return df
