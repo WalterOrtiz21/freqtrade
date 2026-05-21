@@ -340,13 +340,22 @@ Replace the stub `populate_indicators` in `ORBSession.py` with:
         df['orb_range_high'] = range_high_seed.groupby(session_date).cummax()
         df['orb_range_low'] = range_low_seed.groupby(session_date).cummin()
 
-        # 3. Hide the partial values during 13:00-13:45 (range still forming).
-        #    Range is only "valid" from 14:00 onwards.
+        # 3. Keep only the final (13:45) accumulated value as a seed; wipe other
+        #    pre-14:00 partials. Then ffill within day so range carries from 14:00
+        #    onwards. Finally hide the 13:45 seed itself (range is "valid" only
+        #    from 14:00 from the strategy's perspective).
+        is_range_end_candle = (
+            (df['date'].dt.hour == self.SESSION_START_HOUR) &
+            (df['date'].dt.minute == 45)
+        )
         post_range = df['date'].dt.hour >= self.RANGE_END_HOUR
-        df.loc[~post_range, 'orb_range_high'] = pd.NA
-        df.loc[~post_range, 'orb_range_low'] = pd.NA
+        keep = post_range | is_range_end_candle
+        df.loc[~keep, 'orb_range_high'] = pd.NA
+        df.loc[~keep, 'orb_range_low'] = pd.NA
         df['orb_range_high'] = df.groupby(session_date)['orb_range_high'].ffill()
         df['orb_range_low'] = df.groupby(session_date)['orb_range_low'].ffill()
+        df.loc[is_range_end_candle, 'orb_range_high'] = pd.NA
+        df.loc[is_range_end_candle, 'orb_range_low'] = pd.NA
 
         # 4. Skip filter: reference price = close of 13:45 candle.
         ref_close = df['close'].where(
