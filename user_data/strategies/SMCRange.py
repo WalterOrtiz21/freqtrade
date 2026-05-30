@@ -68,6 +68,10 @@ class SMCRange(IStrategy):
     # Modos (fixed — no hyperopt para evitar conditional-param waste)
     range_mode = CategoricalParameter(['fade_only', 'breakout_only', 'hybrid'],
                                       default='fade_only', space='buy', optimize=False)
+    # Selección de TF del detector: adaptive=prefiere 4h donde activo / ltf_only=solo 1h
+    # / htf_only=solo 4h. Para caracterizar frecuencia vs calidad por TF.
+    range_tf_mode = CategoricalParameter(['adaptive', 'ltf_only', 'htf_only'],
+                                         default='ltf_only', space='buy', optimize=False)
     enable_longs = BooleanParameter(default=True, space='buy', optimize=False)
     enable_shorts = BooleanParameter(default=True, space='buy', optimize=False)
     require_reclaim = BooleanParameter(default=True, space='buy', optimize=False)
@@ -154,13 +158,25 @@ class SMCRange(IStrategy):
         # 2) Rango en HTF (4h) proyectado con shift(1)+merge_asof (anti-lookahead)
         df = self._project_htf_range(df, metadata)
 
-        # 3) Selección adaptativa de TF: preferir 4h si su rango está activo.
-        htf_active = df.get('range_active_htf', pd.Series(0, index=df.index)).fillna(0) == 1
-        for col in _RANGE_PROJECT_COLS:
-            htf_col = f'{col}_htf'
-            if htf_col in df.columns:
-                df[col] = np.where(htf_active, df[htf_col], df[col])
-        df['range_tf'] = np.where(htf_active, 4, 1)  # 4=4h ganó, 1=1h
+        # 3) Selección de TF según range_tf_mode.
+        tf_mode = str(self.range_tf_mode.value)
+        if tf_mode == 'ltf_only':
+            # range_* ya son los del 1h; nada que hacer.
+            df['range_tf'] = 1
+        elif tf_mode == 'htf_only':
+            # usar SOLO el rango 4h proyectado.
+            for col in _RANGE_PROJECT_COLS:
+                htf_col = f'{col}_htf'
+                if htf_col in df.columns:
+                    df[col] = df[htf_col]
+            df['range_tf'] = 4
+        else:  # adaptive: preferir 4h donde activo, si no 1h.
+            htf_active = df.get('range_active_htf', pd.Series(0, index=df.index)).fillna(0) == 1
+            for col in _RANGE_PROJECT_COLS:
+                htf_col = f'{col}_htf'
+                if htf_col in df.columns:
+                    df[col] = np.where(htf_active, df[htf_col], df[col])
+            df['range_tf'] = np.where(htf_active, 4, 1)
         df['range_active'] = pd.Series(df['range_active'], index=df.index).fillna(0).astype(int)
         return df
 
