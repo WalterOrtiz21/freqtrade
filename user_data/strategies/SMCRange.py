@@ -72,11 +72,16 @@ class SMCRange(IStrategy):
     enable_shorts = BooleanParameter(default=True, space='buy', optimize=False)
     require_reclaim = BooleanParameter(default=True, space='buy', optimize=False)
 
-    # Detector (tácticos)
-    bos_lookback = IntParameter(10, 40, default=20, space='buy', optimize=True)
-    width_min_pct = DecimalParameter(0.010, 0.050, default=0.015, decimals=3, space='buy', optimize=True)
-    width_max_pct = DecimalParameter(0.15, 0.40, default=0.30, decimals=2, space='buy', optimize=True)
-    containment_min = DecimalParameter(0.50, 0.90, default=0.70, decimals=2, space='buy', optimize=True)
+    # Detector: optimize=False OBLIGATORIO — se consumen en _engine_plus_range()
+    # llamado desde populate_indicators, que bajo hyperopt corre UNA sola vez
+    # (cacheado entre épocas). Marcarlos optimize=True = trap AP-1b silente: el
+    # buy-space sería un no-op que converge a ruido. Para hyperoptearlos de verdad
+    # habría que refactorear con .range (costoso). Mismo blindaje que SMCForge:135-137.
+    bos_lookback = IntParameter(10, 40, default=20, space='buy', optimize=False)
+    width_min_pct = DecimalParameter(0.010, 0.050, default=0.015, decimals=3, space='buy', optimize=False)
+    width_max_pct = DecimalParameter(0.15, 0.40, default=0.30, decimals=2, space='buy', optimize=False)
+    containment_min = DecimalParameter(0.50, 0.90, default=0.70, decimals=2, space='buy', optimize=False)
+    # reclaim_lookback SÍ es hyperopteable: se lee en populate_entry_trend (re-corre por época).
     reclaim_lookback = IntParameter(2, 6, default=3, space='buy', optimize=True)
 
     # Exits (tácticos)
