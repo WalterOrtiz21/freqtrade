@@ -11,17 +11,24 @@ import pandas as pd
 
 
 def fade_long(df: pd.DataFrame) -> pd.Series:
-    """Sweep del piso: mecha bajo range_bottom, close de vuelta adentro."""
+    """Liquidity grab (sweep del engine) en la mitad inferior de un rango activo → fade up.
+    Usa las señales de sweep validadas del engine (internal/swing): wick bajo un
+    pivote low + close por encima (mutuamente excluyente con un break). El filtro
+    close<range_mid asegura que el grab pasó en la zona discount del rango."""
     ra = df['range_active'] == 1
-    return (ra & (df['low'] < df['range_bottom'])
-            & (df['close'] >= df['range_bottom'])).fillna(False)
+    isw = df.get('internal_sweep_bullish', pd.Series(0.0, index=df.index)).fillna(0.0)
+    ssw = df.get('swing_sweep_bullish', pd.Series(0.0, index=df.index)).fillna(0.0)
+    sweep = (isw == 1) | (ssw == 1)
+    return (ra & sweep & (df['close'] < df['range_mid'])).fillna(False)
 
 
 def fade_short(df: pd.DataFrame) -> pd.Series:
-    """Sweep del techo: mecha sobre range_top, close de vuelta adentro."""
+    """Liquidity grab bearish en la mitad superior (premium) de un rango activo → fade down."""
     ra = df['range_active'] == 1
-    return (ra & (df['high'] > df['range_top'])
-            & (df['close'] <= df['range_top'])).fillna(False)
+    isw = df.get('internal_sweep_bearish', pd.Series(0.0, index=df.index)).fillna(0.0)
+    ssw = df.get('swing_sweep_bearish', pd.Series(0.0, index=df.index)).fillna(0.0)
+    sweep = (isw == 1) | (ssw == 1)
+    return (ra & sweep & (df['close'] > df['range_mid'])).fillna(False)
 
 
 def breakout_long(df: pd.DataFrame) -> pd.Series:
