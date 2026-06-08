@@ -1,8 +1,8 @@
 # ICTSilverBullet — Reescritura fiel del modelo ICT Silver Bullet
 
 - **Fecha:** 2026-06-08
-- **Estado:** Diseño aprobado (Walter) — pendiente review Sofia (quant) antes de implementar
-- **Autor:** Liz + experto SMC/ICT + ft-audit
+- **Estado:** Diseño aprobado (Walter) + review Sofia ✅ (⚠️ luz verde para codear, gates duros para concluir edge — incorporados a §4/§5) — pendiente review final de Walter del spec antes de pasar a plan de implementación
+- **Autor:** Liz + experto SMC/ICT + ft-audit + Sofia (quant)
 - **Reemplaza conceptualmente a:** `user_data/strategies/SMCForgeSilverBullet.py` (queda intacto para comparación)
 
 ---
@@ -107,17 +107,27 @@ no in_sb[i]: estado queda inactivo (no entries fuera de ventana)
 
 ---
 
-## 4. Plan de validación (post-implementación)
-1. **Backtest** 5m y 15m sobre los 14 stocks, ventanas DST-aware, lev1, rango sep25-may26.
-2. Si **PF>1 limpio** → **ronda forense (bt-forensics):** walk-forward + Monte Carlo + ablación (SB-windows on/off; AM-only vs AM+PM) para confirmar que el edge viene del time-boxing, no incidental.
-3. Solo si sobrevive el forense → considerar leverage modesto / hyperopt acotado / dry-run.
+## 4. Plan de validación (post-implementación) — gates de Sofia (quant)
+
+**Test primario declarado A PRIORI:** `5m AM+PM`. `AM-only` y `15m` son **secundarios** (con corrección de múltiples comparaciones). `15m` se corre **solo como sanity de la state machine**, NO como test de edge (4 velas/ventana → muestra inviable).
+
+1. **OOS reservado intocado:** apartar los **últimos ~2 meses** (o sep25) que NO entran en ninguna decisión hasta el veredicto final. Todo el diseño/tuning se hace sobre el resto.
+2. **Backtest** 5m y 15m sobre los 14 stocks, ventanas DST-aware, lev1, rango (sin OOS).
+3. **Umbral de avance (gate duro):** `≥150 trades` en 5m **Y** `PF>1 con borde inferior del CI >1.0` (no PF puntual). `<150 trades` ⇒ resultado **"no concluyente"**, NO "no viable" — no quemar la tesis por baja potencia.
+4. Si pasa el gate → **ronda forense (bt-forensics):**
+   - **Walk-forward** sobre el período no-OOS.
+   - **Monte Carlo por bloques temporales** (los 14 pares NO son independientes — beta común cripto/macro → N efectivo < nominal; samplear bloques, no trades individuales).
+   - **Ablación** SB-windows on/off + AM-only vs AM+PM (juzga si el edge viene del time-boxing o es incidental / si la tesis de sesión-en-tokenizado se sostiene).
+   - **Corrección por múltiples comparaciones:** Deflated Sharpe / Bonferroni sobre las 4 celdas (TF × window-config). Sin esto, probar 4 configs infla el falso positivo.
+5. **Veredicto final sobre el OOS reservado** (recién acá se toca). Solo si sobrevive → leverage modesto / hyperopt acotado / dry-run.
 
 ---
 
 ## 5. Riesgos
-- **Sample size bajo:** 2 ventanas de 1h/día × 14 pares puede dar <100-200 trades/año → baja potencia estadística. Es el precio de la pureza ICT. Se mide en el paso 1.
-- **Tesis de sesión en tokenizados:** asume que el perp tokenizado respeta la sesión del subyacente. Plausible pero no garantizado; la ablación SB-on/off lo prueba.
-- **15m con 4 velas/ventana:** la secuencia de 3 eventos puede no caber → pocos trades. Aceptable (5m es el canónico).
+- **🔴 Sample size bajo (predecible, no "se ve después"):** time-boxing a 2h/día + secuencia estricta de 3 eventos ⇒ Sofia estima **~60-150 trades en 5m** y **~25-60 en 15m** sobre 7.5 meses. Mínimo para conclusión separable de PF=1 con WR~40%: **≥150-200 trades**. El **15m nace muerto estadísticamente** (solo sanity), el 5m queda borderline. Gate del §4.3 lo gobierna.
+- **🔴 Data snooping / selección por backtest:** elegir **stocks DESPUÉS** de ver que crypto fallaba, + universo "14 líquidos" elegido a posteriori del exploratorio, es selección por backtest. Mitigación: **OOS reservado intocado** (§4.1) + **corrección de múltiples comparaciones** (§4.4). Sin esos dos, el resultado no es creíble por más PF>1 que dé.
+- **🔴 Tesis de sesión en tokenizados — no demostrada:** el perp tokenizado Bitget **NO es el subyacente** — tiene su propio order flow, sin los MM/dark-pools que generan el sweep institucional del modelo ICT. Plausible pero sin demostrar. La ablación SB-on/off (§4.4) es quien la juzga, no el PF agregado.
+- **15m con 4 velas/ventana:** la secuencia de 3 eventos casi no cabe → pocos trades. Por eso es sanity-only, no test de edge.
 
 ## 6. Preguntas abiertas
 Ninguna — todas las decisiones de diseño resueltas con Walter (archivo nuevo + motor, AM+PM, 5m+15m, salidas híbridas).
