@@ -1,0 +1,22 @@
+{
+    "strategy_name": "MomentumRider",
+    "params": {
+        "buy": {
+            "don_period": 20,
+            "adx_min": 22,
+            "vol_factor": 1.2,
+            "min_atr_pct": 0.004,
+            "max_atr_pct": 0.05,
+            "use_htf_filter": true,
+            "enable_short": true
+        },
+        "sell": {
+            "stop_pct": 0.03,
+            "max_candles_hold": 288
+        },
+        "protection": {
+            "max_consec_losses": 6,
+            "cooldown_h": 12
+        }
+    }
+}
