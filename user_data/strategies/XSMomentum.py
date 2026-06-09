@@ -354,7 +354,7 @@ class XSMomentum(IStrategy):
     def leverage(self, pair: str, current_time: datetime, current_rate: float,
                  proposed_leverage: float, max_leverage: float,
                  entry_tag: Optional[str], side: str, **kwargs) -> float:
-        return 1.0
+        return float(self.config.get('leverage', 1.0))
 
     # =========================================================================
     # LOG PARAMS AT START
