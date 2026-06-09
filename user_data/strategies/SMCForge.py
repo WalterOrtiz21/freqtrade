@@ -71,7 +71,7 @@ class SMCForge(IStrategy):
     use_exit_signal = True          # honor opposite-CHoCH from populate_exit_trend
     use_custom_stoploss = True      # v2: ATR-adaptive SL via custom_stoploss
     position_adjustment_enable = True   # v3: TP1 partial + BE
-    startup_candle_count: int = 200
+    startup_candle_count: int = 300
 
     # Hard-cap safety net: custom_stoploss usually returns tighter values.
     # This is the worst-case fallback if ATR is NaN or helper fails.
@@ -132,9 +132,11 @@ class SMCForge(IStrategy):
         ["off", "btc_htf", "self_htf"],
         default="self_htf", space='buy', optimize=False,
     )
-    # Active params inside the fixed mode
+    # FIXED — used in populate_indicators via _compute_macro_bias and
+    # _compute_htf_pools. Cannot be optimize=True (silent AP-1: hyperopt
+    # would not recalculate indicators between epochs).
     macro_smc_htf = CategoricalParameter(
-        ["1h", "4h", "1d"], default="4h", space='buy', optimize=True,
+        ["1h", "4h", "1d"], default="4h", space='buy', optimize=False,
     )
     macro_neutral_both_sides = BooleanParameter(
         default=True, space='buy', optimize=True,
@@ -152,7 +154,7 @@ class SMCForge(IStrategy):
     #                hard-cap. Pairs well with TP1 > 0 that locks partial gain.
     # MODE (fixed — not hyperopted)
     tp_mode = CategoricalParameter(
-        ["structural", "atr", "fixed", "none"], default="fixed",
+        ["structural", "structural_htf", "atr", "fixed", "none"], default="fixed",
         space='sell', optimize=False,
     )
     sl_mode = CategoricalParameter(
@@ -161,7 +163,7 @@ class SMCForge(IStrategy):
 
     # Active param inside tp_mode=atr
     tp_atr_mult = DecimalParameter(
-        1.5, 6.0, default=3.0, decimals=1, space='sell', optimize=True,
+        1.5, 6.0, default=3.0, decimals=1, space='sell', optimize=False,
     )
     # Active param inside sl_mode=fixed
     stoploss_pct = DecimalParameter(
@@ -176,7 +178,7 @@ class SMCForge(IStrategy):
         1.0, 4.0, default=2.0, decimals=1, space='sell', optimize=False,
     )
     tp_pct = DecimalParameter(
-        0.01, 0.10, default=0.05, decimals=3, space='sell', optimize=False,
+        0.01, 0.10, default=0.05, decimals=3, space='sell', optimize=True,
     )
 
     # =========================================================
@@ -192,13 +194,13 @@ class SMCForge(IStrategy):
     )
     # Active params under tp1_mode=atr
     tp1_atr_mult = DecimalParameter(
-        0.5, 4.0, default=3.0, decimals=1, space='sell', optimize=True,
+        0.5, 4.0, default=3.0, decimals=1, space='sell', optimize=False,
     )
     tp1_amount_pct = IntParameter(
-        20, 80, default=70, space='sell', optimize=True,
+        20, 80, default=70, space='sell', optimize=False,
     )
     be_buffer_pct = DecimalParameter(
-        0.0, 0.005, default=0.001, decimals=4, space='sell', optimize=True,
+        0.0, 0.005, default=0.001, decimals=4, space='sell', optimize=False,
     )
     # UNUSED under tp1_mode=atr
     tp1_pct = DecimalParameter(
@@ -229,11 +231,16 @@ class SMCForge(IStrategy):
         if sl_mode == 'fixed':
             self.stoploss = float(self.stoploss_pct.value) * cfg_lev
 
-        # TP fixed mode → minimal_roi dispatches TP
-        if tp_mode == 'fixed':
+        # TP dispatch via minimal_roi:
+        #   fixed          → minimal_roi = tp_pct × lev (sole TP mechanism)
+        #   structural_htf → minimal_roi = tp_pct × lev as FLOOR. custom_exit
+        #                    only fires when HTF pool is FURTHER than tp_pct;
+        #                    if pool is closer, minimal_roi closes at tp_pct
+        #                    (don't sacrifice the long tail when pool is near).
+        #   atr/structural/none → minimal_roi disabled (custom_exit owns TP)
+        if tp_mode in ('fixed', 'structural_htf'):
             self.minimal_roi = {0: float(self.tp_pct.value) * cfg_lev}
         else:
-            # atr / structural / none: minimal_roi disabled
             self.minimal_roi = {0: 100.0}
 
         logger.info(
@@ -383,7 +390,85 @@ class SMCForge(IStrategy):
         # Macro filter — HTF swing_trend on BTC or self (dogfooding engine)
         df = self._compute_macro_bias(df, metadata)
 
+        # HTF structural pools (for tp_mode=structural_htf — canon SMC)
+        df = self._compute_htf_pools(df, metadata)
+
         return df
+
+    # =========================================================
+    # HTF pools — TP targets at higher TF (canon SMC)
+    # =========================================================
+
+    # Columns from forge_engine + forge_levels we project onto the entry TF.
+    # Anti-lookahead: each column shift(1) so we read only the CLOSED HTF bar.
+    _HTF_POOL_COLS = (
+        'eqh_level',
+        'eql_level',
+        'active_bullish_ob_top', 'active_bullish_ob_bottom',
+        'active_bearish_ob_top', 'active_bearish_ob_bottom',
+        'active_bullish_fvg_top', 'active_bullish_fvg_bottom',
+        'active_bearish_fvg_top', 'active_bearish_fvg_bottom',
+    )
+
+    def _compute_htf_pools(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        """
+        Project HTF structural pools (EQH/EQL, active OBs/FVGs) onto the entry TF
+        as `*_htf` columns. Used by tp_mode=structural_htf.
+
+        Anti-lookahead: shift(1) on every HTF source column + merge_asof backward.
+        """
+        if not self.dp:
+            return dataframe
+
+        htf = str(self.macro_smc_htf.value)
+        try:
+            htf_df = self.dp.get_pair_dataframe(metadata['pair'], htf)
+            if htf_df is None or htf_df.empty:
+                return dataframe
+
+            htf_signals = SMCEngine(
+                htf_df,
+                internal_length=int(self.internal_length.value),
+                swing_length=int(self.swing_length.value),
+            ).get_signals()
+
+            htf_levels = annotate_eqh_eql(
+                htf_df,
+                atr_period=14,
+                fractal_n=int(self.fractal_n_major.value),
+                tolerance_atr=float(self.eqh_tolerance_atr.value),
+            )
+
+            # Build snapshot with shift(1) — read only CLOSED HTF bar
+            snap = pd.DataFrame({'date': htf_df['date'].values})
+            for col in self._HTF_POOL_COLS:
+                if col in htf_levels.columns:
+                    snap[f'{col}_htf'] = htf_levels[col].shift(1).values
+                elif col in htf_signals.columns:
+                    snap[f'{col}_htf'] = htf_signals[col].shift(1).values
+                else:
+                    snap[f'{col}_htf'] = 0.0
+
+            # tz-align before merge_asof
+            ref_tz = dataframe['date'].dt.tz
+            src_tz = snap['date'].dt.tz if hasattr(snap['date'].dt, 'tz') else None
+            if ref_tz is not None and src_tz is None:
+                snap['date'] = pd.to_datetime(snap['date']).dt.tz_localize('UTC')
+            elif ref_tz is None and src_tz is not None:
+                snap['date'] = pd.to_datetime(snap['date']).dt.tz_convert(None)
+
+            dataframe = pd.merge_asof(
+                dataframe.sort_values('date'),
+                snap.sort_values('date'),
+                on='date', direction='backward',
+            )
+        except Exception as e:
+            logger.warning(
+                'HTF pools calc failed for %s (htf=%s): %s',
+                metadata.get('pair', '?'), htf, e,
+            )
+
+        return dataframe
 
     # =========================================================
     # Entry — canonical A+ recipe
@@ -576,32 +661,79 @@ class SMCForge(IStrategy):
         'pivot_low_level',
     )
 
-    def _structural_tp_price(self, trade: Trade, row) -> float | None:
+    # HTF pool sets (canon SMC: TP at HTF structure, not entry-TF).
+    # Strong/weak swing distinction is NOT yet implemented → exclude swing/pivot
+    # to avoid targeting strong levels that the price respects rather than sweeps.
+    _LONG_TP_COLS_HTF = (
+        'eqh_level_htf',
+        'active_bearish_ob_top_htf',
+        'active_bearish_fvg_top_htf',
+    )
+    _SHORT_TP_COLS_HTF = (
+        'eql_level_htf',
+        'active_bullish_ob_bottom_htf',
+        'active_bullish_fvg_bottom_htf',
+    )
+
+    @staticmethod
+    def _pool_type_for_col(col: str) -> str:
+        """Classify a TP source column for margin selection."""
+        c = col.lower()
+        if 'eqh' in c or 'eql' in c:
+            return 'eqh'
+        if 'fvg' in c:
+            return 'fvg'
+        if '_ob_' in c or 'breaker' in c:
+            return 'ob'
+        return 'swing'  # swing_high/low or pivot
+
+    # Margin per pool type (where TP triggers within the pool):
+    #  EQH/EQL → 1.00 (exact magnet — stops live there)
+    #  OB/Breaker → 0.95 (top OB / bottom OB — before the rejection zone)
+    #  FVG → 0.50 (CE — consequent encroachment, where rebalance reacts)
+    #  swing/pivot → tp_structural_margin param (legacy)
+    _POOL_TYPE_MARGINS = {
+        'eqh': 1.00,
+        'ob': 0.95,
+        'fvg': 0.50,
+    }
+
+    def _structural_tp_price(self, trade: Trade, row,
+                             use_htf: bool = False) -> tuple[float, str] | None:
         """
         Nearest opposing liquidity pool past the entry price.
-        Returns None if no valid candidate exists.
+        Returns (price, pool_type) or None if no valid candidate exists.
+        pool_type ∈ {'eqh','ob','fvg','swing'} for margin selection.
         """
         entry = trade.open_rate
-        cols = self._SHORT_TP_COLS if trade.is_short else self._LONG_TP_COLS
+        if use_htf:
+            cols = self._SHORT_TP_COLS_HTF if trade.is_short else self._LONG_TP_COLS_HTF
+        else:
+            cols = self._SHORT_TP_COLS if trade.is_short else self._LONG_TP_COLS
 
         best: float | None = None
+        best_col: str | None = None
         for col in cols:
             val = self._safe_float(row, col)
             if val is None:
                 continue
             if trade.is_short:
-                # looking for pool BELOW entry; pick the HIGHEST (nearest)
                 if val < entry and (best is None or val > best):
-                    best = val
+                    best, best_col = val, col
             else:
-                # looking for pool ABOVE entry; pick the LOWEST (nearest)
                 if val > entry and (best is None or val < best):
-                    best = val
-        return best
+                    best, best_col = val, col
+        if best is None or best_col is None:
+            return None
+        return best, self._pool_type_for_col(best_col)
 
-    def _apply_margin(self, trade: Trade, target: float) -> float:
-        """Adjust target so TP triggers at `margin` fraction of distance."""
-        m = float(self.tp_structural_margin.value)
+    def _apply_margin(self, trade: Trade, target: float,
+                      pool_type: str = 'swing') -> float:
+        """Adjust target so TP triggers at margin fraction of distance.
+        Margin chosen per pool type (EQH=1.0, OB=0.95, FVG=0.5, swing=param)."""
+        m = self._POOL_TYPE_MARGINS.get(
+            pool_type, float(self.tp_structural_margin.value)
+        )
         if trade.is_short:
             return trade.open_rate - (trade.open_rate - target) * m
         return trade.open_rate + (target - trade.open_rate) * m
@@ -701,29 +833,42 @@ class SMCForge(IStrategy):
                     **kwargs) -> str | None:
         """
         TP dispatch by tp_mode:
-          fixed      → None (minimal_roi handles it)
-          atr        → N × ATR(entry)
-          structural → nearest opposing pool, with fallback to ATR if no pool
+          fixed          → None (minimal_roi handles it)
+          atr            → N × ATR(entry)
+          structural     → nearest opposing pool from entry-TF cols, fallback ATR
+          structural_htf → nearest opposing pool from HTF cols (canon SMC),
+                           margin per pool type (EQH=1.0, OB=0.95, FVG=0.5),
+                           fallback ATR
         """
         mode = str(self.tp_mode.value)
         if mode in ('fixed', 'none'):
-            # fixed → minimal_roi handles it. none → no hard TP, trade runs
-            # until CHoCH opposite, BE after TP1, or hard-cap SL.
             return None
 
         row = self._entry_row(trade, pair)
         tag = None
         tp_price = None
 
-        if mode == 'structural':
-            tp_price = self._structural_tp_price(trade, row)
-            if tp_price is not None:
-                tp_price = self._apply_margin(trade, tp_price)
-                tag = 'tp_structural'
-            else:
-                # fallback
+        if mode in ('structural', 'structural_htf'):
+            use_htf = (mode == 'structural_htf')
+            res = self._structural_tp_price(trade, row, use_htf=use_htf)
+            if res is not None:
+                target, pool_type = res
+                # Floor: if HTF pool is CLOSER than fixed tp_pct, defer to
+                # minimal_roi (don't cap upside on near pools). Only use the
+                # pool when it's further than the fixed TP, capturing extra
+                # cola larga driven by HTF liquidity.
+                if mode == 'structural_htf':
+                    pool_dist_pct = abs(target - trade.open_rate) / trade.open_rate
+                    if pool_dist_pct < float(self.tp_pct.value):
+                        return None  # let minimal_roi handle the +tp_pct close
+                tp_price = self._apply_margin(trade, target, pool_type)
+                tag = f'tp_{mode}_{pool_type}'
+            elif mode == 'structural':
                 tp_price = self._atr_tp_price(trade, row)
-                tag = 'tp_structural_fallback_atr' if tp_price is not None else None
+                tag = f'tp_{mode}_fallback_atr' if tp_price is not None else None
+            else:
+                # structural_htf with no pool found → defer to minimal_roi
+                return None
         elif mode == 'atr':
             tp_price = self._atr_tp_price(trade, row)
             tag = 'tp_atr' if tp_price is not None else None
@@ -738,6 +883,23 @@ class SMCForge(IStrategy):
             if current_rate >= tp_price:
                 return tag
         return None
+
+    def confirm_trade_exit(self, pair: str, trade: Trade, order_type: str,
+                           amount: float, rate: float, time_in_force: str,
+                           exit_reason: str, current_time: datetime,
+                           **kwargs) -> bool:
+        """
+        Block CHoCH-opposite exit_signal AFTER TP1 has been taken.
+        Rationale: pre-TP1 the CHoCH acts as implicit SL (canon, validated
+        in PROGRESS.md — without it the system loses 81%). Post-TP1 the
+        BE-from-custom_stoploss already protects downside; letting CHoCH
+        close the runner sacrifices the +tp_pct cola larga.
+        """
+        if (exit_reason == 'exit_signal'
+                and self.tp1_enabled.value
+                and trade.get_custom_data('tp1_taken', False)):
+            return False
+        return True
 
     # =========================================================
     # Exit — opposite CHoCH (canon SMC)
@@ -754,3 +916,17 @@ class SMCForge(IStrategy):
             'exit_short',
         ] = 1
         return df
+
+    # =========================================================
+    # Hyperopt sampler override — TPE en lugar del default NSGA-III
+    # =========================================================
+    class HyperOpt:
+        """Override del sampler default (NSGA-III) a TPE para mejor
+        convergencia en single-objective (CalmarHyperOptLoss).
+        Freqtrade construye el TPESampler con seed=random_state y
+        n_startup_trials=INITIAL_POINTS automáticamente.
+        """
+
+        @staticmethod
+        def generate_estimator(dimensions, **kwargs):
+            return "TPESampler"
