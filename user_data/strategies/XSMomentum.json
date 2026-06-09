@@ -1,0 +1,12 @@
+{
+    "strategy_name": "XSMomentum",
+    "params": {
+        "buy": {
+            "lookback_days": 14,
+            "book_n": 3
+        },
+        "sell": {
+            "stop_pct": 0.12
+        }
+    }
+}
