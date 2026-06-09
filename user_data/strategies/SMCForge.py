@@ -408,6 +408,9 @@ class SMCForge(IStrategy):
         'active_bearish_ob_top', 'active_bearish_ob_bottom',
         'active_bullish_fvg_top', 'active_bullish_fvg_bottom',
         'active_bearish_fvg_top', 'active_bearish_fvg_bottom',
+        # Swing levels (used to derive weak-swing TP targets; see _compute_htf_pools)
+        'swing_high', 'swing_low',
+        'swing_high_is_weak', 'swing_low_is_weak',
     )
 
     def _compute_htf_pools(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
@@ -448,6 +451,24 @@ class SMCForge(IStrategy):
                     snap[f'{col}_htf'] = htf_signals[col].shift(1).values
                 else:
                     snap[f'{col}_htf'] = 0.0
+
+            # Derive weak-swing TP columns:
+            #   swing_high_weak_htf = HTF swing high level ONLY when classified as weak
+            #                         (likely to be swept → valid TP target for longs)
+            #   swing_low_weak_htf  = HTF swing low level ONLY when classified as weak
+            #                         (likely to be swept → valid TP target for shorts)
+            # When the pivot is STRONG (is_weak == 0) we return 0.0 so that
+            # _safe_float filters it out (val <= 0 → skip).
+            snap['swing_high_weak_htf'] = np.where(
+                snap['swing_high_is_weak_htf'] == 1,
+                snap['swing_high_htf'],
+                0.0,
+            )
+            snap['swing_low_weak_htf'] = np.where(
+                snap['swing_low_is_weak_htf'] == 1,
+                snap['swing_low_htf'],
+                0.0,
+            )
 
             # tz-align before merge_asof
             ref_tz = dataframe['date'].dt.tz
@@ -662,17 +683,20 @@ class SMCForge(IStrategy):
     )
 
     # HTF pool sets (canon SMC: TP at HTF structure, not entry-TF).
-    # Strong/weak swing distinction is NOT yet implemented → exclude swing/pivot
-    # to avoid targeting strong levels that the price respects rather than sweeps.
+    # Experiment C: strong/weak swing distinction now implemented.
+    # swing_high_weak_htf = HTF swing high that is classified as WEAK (liquidity target).
+    # Strong swings are excluded — price is expected to RESPECT those, not sweep them.
     _LONG_TP_COLS_HTF = (
         'eqh_level_htf',
         'active_bearish_ob_top_htf',
         'active_bearish_fvg_top_htf',
+        'swing_high_weak_htf',        # Exp C: weak HTF swing high = likely sweep target
     )
     _SHORT_TP_COLS_HTF = (
         'eql_level_htf',
         'active_bullish_ob_bottom_htf',
         'active_bullish_fvg_bottom_htf',
+        'swing_low_weak_htf',         # Exp C: weak HTF swing low = likely sweep target
     )
 
     @staticmethod
@@ -685,6 +709,10 @@ class SMCForge(IStrategy):
             return 'fvg'
         if '_ob_' in c or 'breaker' in c:
             return 'ob'
+        # swing_high_weak_htf / swing_low_weak_htf → treat as eqh (1.0 margin,
+        # same as EQH/EQL since weak swings are liquidity magnets like equal highs/lows)
+        if 'swing' in c and 'weak' in c:
+            return 'eqh'
         return 'swing'  # swing_high/low or pivot
 
     # Margin per pool type (where TP triggers within the pool):

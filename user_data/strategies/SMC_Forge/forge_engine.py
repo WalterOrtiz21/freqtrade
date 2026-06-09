@@ -46,7 +46,8 @@ def _smc_signals_kernel(
     np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, # OB Top/Bottom/Vol
     np.ndarray, np.ndarray, np.ndarray, np.ndarray, # FVG Top/Bottom
     np.ndarray, np.ndarray, # Swing High, Swing Low (Current Range)
-    np.ndarray, np.ndarray, np.ndarray, np.ndarray  # Liquidity Sweeps (Int/Sw Bull/Bear)
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray, # Liquidity Sweeps (Int/Sw Bull/Bear)
+    np.ndarray, np.ndarray  # Strong/Weak swing classification (1=weak, 0=strong)
 ]:
     # Output Arrays
     int_bos_bull = np.zeros(n, dtype=int8)
@@ -86,6 +87,23 @@ def _smc_signals_kernel(
     sw_sweep_bull = np.zeros(n, dtype=int8)
     sw_sweep_bear = np.zeros(n, dtype=int8)
 
+    # Strong/Weak swing classification output arrays.
+    # 1 = WEAK (liquidity target — likely to be swept; use as TP).
+    # 0 = STRONG (structural pivot — price respects it; NOT a TP target).
+    # Classification logic (SMC canon, no lookahead):
+    #   - A swing high/low that has already been swept (wick through, close on same
+    #     side) is definitively WEAK — it is a known liquidity pool.
+    #   - A swing high/low that has NOT yet been broken (pending) starts as WEAK by
+    #     default (conservative), because the expected SMC move is that pending
+    #     swing extremes will be swept before a real structural break.
+    #   - A swing high/low that directly caused a BoS or CHoCH (i.e., its break
+    #     was the structural event) is classified as STRONG — it demonstrated
+    #     structural importance. At the moment the new pivot forms (after the break),
+    #     the PREVIOUS pivot is re-labelled STRONG retroactively via shift(1) in
+    #     the strategy layer (no lookahead: we label bar i based on bar i-1 state).
+    sw_high_is_weak = np.ones(n, dtype=int8)   # default: weak
+    sw_low_is_weak = np.ones(n, dtype=int8)    # default: weak
+
     # State Variables
     # Internal Pivot
     ip_high_level = np.nan
@@ -110,6 +128,13 @@ def _smc_signals_kernel(
     
     sw_leg = 0
     curr_sw_trend = 0
+
+    # Strong/Weak pivot state:
+    # Tracks whether the CURRENT pending swing pivot has been swept (thus weak),
+    # or whether it caused a structural break (thus strong).
+    # Default = weak (1) until proven strong (0) by a BoS/CHoCH on that level.
+    sp_high_is_weak = int8(1)   # current swing high weak flag
+    sp_low_is_weak = int8(1)    # current swing low weak flag
 
     for i in range(2, n):
         curr_high = high[i]
@@ -177,10 +202,14 @@ def _smc_signals_kernel(
                 sp_low_level = low[pivot_idx]
                 sp_low_idx = pivot_idx
                 sp_low_crossed = False
+                # New low pivot is unproven — default to weak until it causes a break
+                sp_low_is_weak = int8(1)
             else: # New Swing High -> Top of Range
                 sp_high_level = high[pivot_idx]
                 sp_high_idx = pivot_idx
                 sp_high_crossed = False
+                # New high pivot is unproven — default to weak until it causes a break
+                sp_high_is_weak = int8(1)
                 
         # Update Output Arrays for Swing Levels (Repeatedly write current known levels)
         # This gives us the "Current Trading Range" at any point in time.
@@ -240,17 +269,21 @@ def _smc_signals_kernel(
         int_trend[i] = curr_int_trend
 
         # --- 3. SWING STRUCTURE ---
-        
+
         if not sp_high_crossed and not np.isnan(sp_high_level):
             if prev_close <= sp_high_level and curr_close > sp_high_level:
                 sp_high_crossed = True
+                # This swing high caused a structural break → classify as STRONG.
+                # We mark it strong BEFORE it is replaced by a new pivot so that
+                # the output at bar i captures the correct "strong" classification.
+                sp_high_is_weak = int8(0)
                 if curr_sw_trend == -1:
                     sw_choch_bull[i] = 1
                     curr_sw_trend = 1
                 else:
                     sw_bos_bull[i] = 1
                     curr_sw_trend = 1
-                
+
                 if sp_high_idx < i:
                     ob_idx = _find_lowest_low(low, sp_high_idx, i)
                     if ob_idx != -1:
@@ -262,13 +295,15 @@ def _smc_signals_kernel(
         if not sp_low_crossed and not np.isnan(sp_low_level):
             if prev_close >= sp_low_level and curr_close < sp_low_level:
                 sp_low_crossed = True
+                # This swing low caused a structural break → classify as STRONG.
+                sp_low_is_weak = int8(0)
                 if curr_sw_trend == 1:
                     sw_choch_bear[i] = 1
                     curr_sw_trend = -1
                 else:
                     sw_bos_bear[i] = 1
                     curr_sw_trend = -1
-                
+
                 if sp_low_idx < i:
                     ob_idx = _find_highest_high(high, sp_low_idx, i)
                     if ob_idx != -1:
@@ -276,19 +311,30 @@ def _smc_signals_kernel(
                         ob_bear_top[i] = high[ob_idx]
                         ob_bear_btm[i] = low[ob_idx]
                         ob_bear_vol[i] = volume[ob_idx]
-        
+
         # --- SWING LIQUIDITY SWEEPS ---
         # Bullish Sweep: Wick below swing pivot low, close above
         if not sp_low_crossed and not np.isnan(sp_low_level):
             if curr_low <= sp_low_level and curr_close >= sp_low_level:
                 sw_sweep_bull[i] = 1
-        
+                # Wick-and-recover confirms this low as a liquidity level → WEAK.
+                sp_low_is_weak = int8(1)
+
         # Bearish Sweep: Wick above swing pivot high, close below
         if not sp_high_crossed and not np.isnan(sp_high_level):
             if curr_high >= sp_high_level and curr_close <= sp_high_level:
                 sw_sweep_bear[i] = 1
+                # Wick-and-reject confirms this high as a liquidity level → WEAK.
+                sp_high_is_weak = int8(1)
 
         sw_trend[i] = curr_sw_trend
+
+        # Write strong/weak classification for current active swing pivots.
+        # Strategy reads these columns at trade entry time to determine TP targets.
+        # Anti-lookahead: these reflect the state of the pivot as of bar i, using
+        # only information available up to and including bar i (no future data).
+        sw_high_is_weak[i] = sp_high_is_weak
+        sw_low_is_weak[i] = sp_low_is_weak
         
         # --- 4. FVG DETECTION ---
         if low[i] > high[i-2]:
@@ -306,7 +352,8 @@ def _smc_signals_kernel(
         ob_bull_top, ob_bull_btm, ob_bear_top, ob_bear_btm, ob_bull_vol, ob_bear_vol,
         fvg_bull_top, fvg_bull_btm, fvg_bear_top, fvg_bear_btm,
         out_sw_high, out_sw_low,
-        int_sweep_bull, int_sweep_bear, sw_sweep_bull, sw_sweep_bear
+        int_sweep_bull, int_sweep_bear, sw_sweep_bull, sw_sweep_bear,
+        sw_high_is_weak, sw_low_is_weak
     )
 
 @jit(nopython=True, cache=True)
@@ -620,7 +667,8 @@ class SMCEngine:
             ob_bt_raw, ob_bb_raw, ob_bet_raw, ob_beb_raw, ob_bull_vol_raw, ob_bear_vol_raw,
             fvg_bt_raw, fvg_bb_raw, fvg_bet_raw, fvg_beb_raw,
             sw_high, sw_low,
-            int_sweep_bull, int_sweep_bear, sw_sweep_bull, sw_sweep_bear
+            int_sweep_bull, int_sweep_bear, sw_sweep_bull, sw_sweep_bear,
+            sw_high_is_weak_arr, sw_low_is_weak_arr
         ) = _smc_signals_kernel(
             self.high, self.low, self.close, self.volume, self.n,
             self.internal_length, self.swing_length
@@ -696,6 +744,16 @@ class SMCEngine:
         df['internal_sweep_bearish'] = int_sweep_bear
         df['swing_sweep_bullish'] = sw_sweep_bull
         df['swing_sweep_bearish'] = sw_sweep_bear
+
+        # Strong/Weak swing pivot classification (1=weak liquidity target, 0=strong structural level).
+        # Anti-lookahead: shift(1) so the strategy sees yesterday's classification,
+        # not the same bar where a break or sweep may have updated the flag.
+        df['swing_high_is_weak'] = pd.array(sw_high_is_weak_arr, dtype='int8')
+        df['swing_low_is_weak'] = pd.array(sw_low_is_weak_arr, dtype='int8')
+        # Shift by 1: a pivot's strength/weakness as seen from the NEXT bar onwards
+        # (prevents using bar-i break info to decide on bar-i entry).
+        df['swing_high_is_weak'] = df['swing_high_is_weak'].shift(1).fillna(1).astype('int8')
+        df['swing_low_is_weak'] = df['swing_low_is_weak'].shift(1).fillna(1).astype('int8')
 
         # ── Raw event arrays (for multi-zone tracking in strategy layer) ──
         # These mark the bar where each new zone was CONFIRMED.
