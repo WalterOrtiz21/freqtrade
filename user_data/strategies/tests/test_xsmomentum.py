@@ -14,7 +14,7 @@ Coverage targets (edge-protecting, not ceremonial):
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, PropertyMock
 
 import numpy as np
 import pandas as pd
@@ -503,3 +503,85 @@ class TestTimezoneRegression:
         # Aware lookup on naive series → raises TypeError or KeyError
         with pytest.raises((KeyError, TypeError)):
             _ = s_naive.loc[ts_aware]
+
+
+# ---------------------------------------------------------------------------
+# 6. Live cache invalidation — regression for the dry/live freeze bug
+# ---------------------------------------------------------------------------
+
+class TestLiveCacheInvalidation:
+    """
+    Regression tests for the live/dry cache-freeze bug.
+
+    In live/dry the cache key includes latest_ts so the matrix is recomputed
+    on each new candle cycle.  In backtest latest_ts=None keeps the original
+    single-compute behaviour.
+
+    (a) Calling _get_score_matrix with a NEW latest_ts must produce a cache
+        miss (recompute — returned object is different).
+    (b) Calling _get_score_matrix with the SAME latest_ts must hit the cache
+        (same object returned, dp.get_pair_dataframe not called again).
+    """
+
+    def _build_live_strat(self, pairs=None, n_bars=200):
+        """Return a strategy whose dp reports runmode=dry_run."""
+        if pairs is None:
+            pairs = ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT"]
+        pair_dfs = {p: _make_dataframe(n_bars, pair=p, seed=i) for i, p in enumerate(pairs)}
+
+        strat = _fresh_strategy()
+
+        dp = _mock_dp(pair_dfs)
+        # Simulate live/dry runmode so the strategy picks up latest_ts
+        from freqtrade.enums import RunMode
+        dp.runmode = RunMode.DRY_RUN
+
+        strat.dp = dp
+        return strat
+
+    def test_new_latest_ts_causes_cache_miss(self):
+        """
+        (a) When latest_ts advances (new candle), the matrix must be
+            recomputed — the returned object must be a *different* dict.
+        """
+        strat = self._build_live_strat()
+        L = 84
+
+        ts_old = pd.Timestamp("2025-01-01 00:00:00", tz="UTC")
+        ts_new = pd.Timestamp("2025-01-01 04:00:00", tz="UTC")  # one 4h bar later
+
+        m1 = strat._get_score_matrix(L, latest_ts=ts_old)
+        call_count_after_first = strat.dp.get_pair_dataframe.call_count
+
+        m2 = strat._get_score_matrix(L, latest_ts=ts_new)
+        call_count_after_second = strat.dp.get_pair_dataframe.call_count
+
+        assert m1 is not m2, (
+            "Expected a NEW matrix object when latest_ts changed — cache should have missed"
+        )
+        assert call_count_after_second > call_count_after_first, (
+            "dp.get_pair_dataframe was not called again after latest_ts changed"
+        )
+
+    def test_same_latest_ts_returns_cached_object(self):
+        """
+        (b) Calling with the same latest_ts twice must return the same dict
+            object (cache hit) without calling dp.get_pair_dataframe again.
+        """
+        strat = self._build_live_strat()
+        L = 84
+
+        ts = pd.Timestamp("2025-01-01 00:00:00", tz="UTC")
+
+        m1 = strat._get_score_matrix(L, latest_ts=ts)
+        call_count_after_first = strat.dp.get_pair_dataframe.call_count
+
+        m2 = strat._get_score_matrix(L, latest_ts=ts)
+        call_count_after_second = strat.dp.get_pair_dataframe.call_count
+
+        assert m1 is m2, (
+            "Expected the SAME cached object on second call with identical latest_ts"
+        )
+        assert call_count_after_first == call_count_after_second, (
+            "dp.get_pair_dataframe was called again on cache hit — recompute is happening"
+        )

@@ -53,6 +53,7 @@ import numpy as np
 import pandas as pd
 from pandas import DataFrame
 
+from freqtrade.enums import RunMode
 from freqtrade.strategy import (
     IStrategy, CategoricalParameter,
     stoploss_from_absolute,
@@ -100,8 +101,14 @@ class XSMomentum(IStrategy):
     # SCORE MATRIX CACHE
     # =========================================================================
     # Full score matrix: Dict[pair -> pd.Series of scores indexed by timestamp]
-    # Keyed by (L_candles, universe_tuple) — computed once, valid for the full
-    # backtest run since populate_indicators is called once per pair.
+    # Keyed by (L_candles, universe_tuple) in backtest (latest_ts=None) —
+    # computed once for the full run since populate_indicators is called once
+    # per pair.
+    # In live/dry the key also includes latest_ts (the calling pair's last
+    # candle timestamp).  The first pair of each new 4h bar recomputes the
+    # matrix; subsequent pairs in the same cycle hit the cache.  If pairs have
+    # slightly different last-candle timestamps the key changes and recomputes —
+    # acceptable; correctness is the priority.
     _score_matrix_cache: Dict[str, pd.Series] = {}
     _score_matrix_cache_key: Optional[Tuple] = None
 
@@ -140,23 +147,29 @@ class XSMomentum(IStrategy):
     # =========================================================================
     # SCORE MATRIX (computed once for the full universe)
     # =========================================================================
-    def _get_score_matrix(self, L_candles: int) -> Dict[str, pd.Series]:
+    def _get_score_matrix(
+        self, L_candles: int, latest_ts: Optional[pd.Timestamp] = None
+    ) -> Dict[str, pd.Series]:
         """
         Returns the full score matrix {pair: score_series} for the universe.
 
-        Cache is keyed by (L_candles, universe_tuple). In backtest this is
-        computed once when the first pair in the universe is processed.
-        All subsequent pairs find it in cache → O(1).
+        In backtest/hyperopt, latest_ts is None and the cache key is
+        (L_candles, universe_tuple).  populate_indicators is called once per
+        pair with the full history, so the matrix is built once and reused for
+        the entire run — O(1) for every pair after the first.
 
-        In live/dry, dp.get_pair_dataframe returns live OHLCV — the cache
-        invalidates naturally because the universe tuple changes only when the
-        whitelist changes (rare), and L_candles is fixed per run.
+        In live/dry, latest_ts is the calling pair's last candle timestamp.
+        The cache key becomes (L_candles, universe_tuple, latest_ts), so the
+        matrix is recomputed the first time any pair is processed on a new
+        candle.  Subsequent pairs on the same candle cycle hit the cache.
+        This prevents the live freeze bug where stale score series caused
+        KeyError lookups → rank_pct=0.5 / xs_score=NaN for every row.
         """
         if not self.dp:
             return {}
 
         universe = tuple(sorted(self.dp.current_whitelist()))
-        cache_key = (L_candles, universe)
+        cache_key = (L_candles, universe, latest_ts)
 
         if self._score_matrix_cache_key == cache_key:
             return self._score_matrix_cache
@@ -251,8 +264,14 @@ class XSMomentum(IStrategy):
         L_candles = int(self.lookback_days.value) * 6  # 4h candles per day
         N = int(self.book_n.value)
 
+        # In live/dry, pass the last candle timestamp so the cache invalidates
+        # each new bar cycle.  In backtest/hyperopt use None (single compute
+        # for the full historical run — preserves backtest equivalence).
+        is_live = self.dp and self.dp.runmode.value in ('live', 'dry_run')
+        latest_ts = pd.Timestamp(dataframe['date'].iloc[-1]) if is_live else None
+
         # Build/retrieve the full cross-sectional score matrix (O(1) after first pair)
-        score_matrix = self._get_score_matrix(L_candles)
+        score_matrix = self._get_score_matrix(L_candles, latest_ts=latest_ts)
 
         # Compute rank time series for this pair
         # Use timezone-aware DatetimeIndex to match the score_matrix index.
@@ -318,14 +337,30 @@ class XSMomentum(IStrategy):
         dataframe['exit_short'] = 0
         dataframe['exit_tag'] = ''
 
+        # Gate: only fire exit signals when rank data is reliable.
+        # Without this guard, stale/missing scores (NaN xs_score or empty
+        # universe) would trigger mass exits on every row.
+        has_valid_rank = (
+            dataframe['xs_score'].notna()
+            & (dataframe['xs_universe_size'] >= 3)
+        )
+
         # Exit long when pair falls out of top-2N (hysteresis zone)
-        exit_long = ~dataframe['xs_long_hold']
+        exit_long = has_valid_rank & ~dataframe['xs_long_hold']
 
         # Exit short when pair rises above bottom-2N (hysteresis zone, mirror)
-        exit_short = ~dataframe['xs_short_hold']
+        exit_short = has_valid_rank & ~dataframe['xs_short_hold']
 
-        dataframe.loc[exit_long, ['exit_long', 'exit_tag']] = (1, 'rank_exit_long')
-        dataframe.loc[exit_short, ['exit_short', 'exit_tag']] = (1, 'rank_exit_short')
+        # Set FLAGS for both exits (unchanged from pre-fix: both can be 1 on the
+        # same row when the pair is in neither hold zone, i.e. the middle zone).
+        dataframe.loc[exit_long, 'exit_long'] = 1
+        dataframe.loc[exit_short, 'exit_short'] = 1
+
+        # Set TAGs without overwriting: long tag is written first, short tag is
+        # written only on rows where exit_long did NOT also fire.  A long trade
+        # on a row where both flags are 1 keeps its 'rank_exit_long' tag.
+        dataframe.loc[exit_long, 'exit_tag'] = 'rank_exit_long'
+        dataframe.loc[exit_short & ~exit_long, 'exit_tag'] = 'rank_exit_short'
 
         return dataframe
 
