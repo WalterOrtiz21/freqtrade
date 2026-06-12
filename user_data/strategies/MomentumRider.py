@@ -219,7 +219,7 @@ class MomentumRider(IStrategy):
         # Trades cerrados ordenados por fecha de cierre, más reciente primero.
         closed = sorted(
             [t for t in closed if t.close_date is not None],
-            key=lambda t: t.close_date, reverse=True)
+            key=lambda t: t.close_date_utc, reverse=True)
         streak = 0
         for t in closed:
             if (t.close_profit or 0) < 0:
@@ -228,7 +228,10 @@ class MomentumRider(IStrategy):
                 break
         if streak >= int(self.max_consec_losses.value):
             # En cooldown si la última pérdida cerró hace < cooldown_h horas.
-            last_close = closed[0].close_date
+            # close_date_utc (tz-aware): close_date crudo de la DB live es naive y
+            # rompe la resta contra current_time (aware) — el wrapper de freqtrade
+            # tragaba el TypeError y el breaker quedaba fail-open.
+            last_close = closed[0].close_date_utc
             if (current_time - last_close).total_seconds() < int(self.cooldown_h.value) * 3600:
                 return False
         return True
