@@ -1,91 +1,80 @@
 {
   "strategy_name": "LorentzianSuperTrend",
   "params": {
+    "roi": {
+      "0": 100
+    },
+    "stoploss": {
+      "stoploss": -0.5
+    },
+    "trailing": {
+      "trailing_stop": false,
+      "trailing_stop_positive": null,
+      "trailing_stop_positive_offset": 0.0,
+      "trailing_only_offset_is_reached": false
+    },
     "max_open_trades": {
-      "max_open_trades": 7
+      "max_open_trades": 5
     },
     "buy": {
-      "_source_type": "['close', 'hlc3', 'ohlc4', 'hl2', 'open', 'high', 'low']",
-      "source_type": "close",
-      "__comment_ml": "=== ML CORE SETTINGS ===",
-      "neighbors_count": 8,
-      "max_bars_back": 500,
+      "adx_threshold": 20,
       "f1_period": 14,
       "f1_smoothing": 1,
-      "f2_ch_len": 10,
       "f2_avg_len": 11,
+      "f2_ch_len": 10,
       "f3_period": 20,
       "f3_smoothing": 1,
       "f4_period": 20,
       "f4_smoothing": 2,
       "f5_period": 9,
       "f5_smoothing": 1,
-      "__comment_kernel": "=== KERNEL REGRESSION SETTINGS ===",
-      "use_kernel_filter": true,
-      "use_kernel_smoothing": false,
+      "htf_1": "none",
+      "htf_2": "4h",
       "kernel_h": 8,
+      "kernel_lag": 2,
       "kernel_r": 8.0,
       "kernel_x": 25,
-      "kernel_lag": 2,
-      "__comment_filters_global": "=== GLOBAL FILTERS (Sistema de Filtros para Predicción ML) ===",
-      "use_volatility_filter": true,
-      "use_regime_filter": true,
-      "regime_threshold": 0.1,
-      "use_adx_filter": false,
-      "adx_threshold": 20,
-      "__comment_filters_system1": "=== SISTEMA 1: ML SIGNAL FILTERS (Pine: useEmaFilter, useSmaFilter) ===",
-      "__note_system1": "Se aplican a las señales ML (isNewBuySignal). Default: FALSE en Pine",
-      "use_ml_ema_filter": false,
-      "use_ml_sma_filter": false,
+      "max_bars_back": 500,
       "ml_ema_period": 200,
       "ml_sma_period": 200,
-      "__comment_filters_system2": "=== SISTEMA 2: POSITION FILTERS (Pine: ema_filter_long/short, bullish/bearish) ===",
-      "__note_system2": "Se aplican en strategy.entry() para filtrar posiciones. Default: TRUE en Pine",
-      "use_ema_filter_long": true,
-      "use_ema_filter_short": true,
+      "neighbors_count": 8,
       "position_ema_period": 200,
-      "__comment_supertrend": "=== SUPERTREND SETTINGS ===",
+      "regime_threshold": 0.1,
+      "source_type": "close",
       "st_atr_period": 9,
       "st_factor": 2.5,
+      "use_adx_filter": false,
+      "use_ema_filter_long": true,
+      "use_ema_filter_short": true,
       "use_htf_filter": true,
-      "htf_1": "none",
-      "htf_2": "4h"
-    },
-    "sell": {
-      "__comment_exits": "=== EXIT SETTINGS ===",
-      "use_exit_manager": false,
-      "use_dynamic_exits": true,
-      "close_with_supertrend": true,
-      "close_only_tp": false,
-      "__note_exits": "close_only_tp=true desactiva salidas por señal opuesta/SuperTrend (solo TP/SL)"
+      "use_kernel_filter": true,
+      "use_kernel_smoothing": false,
+      "use_ml_ema_filter": false,
+      "use_ml_sma_filter": false,
+      "use_regime_filter": true,
+      "use_volatility_filter": true
     },
     "protection": {
       "analysis_logging": false,
-      "__comment_stoploss": "=== STOP LOSS SOURCE ===",
-      "stoploss_type": "atr",
-      "__comment_atr_sl": "=== ATR Stop Settings ===",
       "atr_stop_len": 16,
-      "atr_stop_mult": 1.5,
-      "__comment_swing_sl": "=== Swing High/Low Settings ===",
-      "swing_bars": 11,
-      "__comment_risk_management": "=== RISK MANAGEMENT (R:R Ratios) ===",
-      "__note_breakeven": "Mueve SL a breakeven cuando alcanza be_rr * sl_distance",
+      "atr_stop_mult": 2.0,
+      "be_rr_long": 2.5,
+      "be_rr_short": 2.2,
+      "close_only_tp": false,
+      "stoploss_type": "atr",
+      "swing_bars": 17,
+      "tp_percent": 59.0,
+      "tp_rr_long": 1.2,
+      "tp_rr_short": 1.9,
       "use_breakeven": true,
-      "be_rr_long": 2.0,
-      "be_rr_short": 2.0,
-      "__note_takeprofit": "Take profit parcial (tp_percent%) a tp_rr * sl_distance",
-      "use_takeprofit": true,
-      "tp_rr_long": 2.0,
-      "tp_rr_short": 2.0,
-      "tp_percent": 50.0
+      "use_takeprofit": true
     },
-    "roi": {
-      "0": 100
-    },
-    "stoploss": {
-      "stoploss": -0.5
+    "sell": {
+      "use_exit_manager": false,
+      "close_with_supertrend": true,
+      "use_dynamic_exits": false
     }
   },
   "ft_stratparam_v": 1,
-  "export_time": "2025-12-10 22:44:58.851000+00:00"
+  "export_time": "2026-06-30 00:36:42.119748+00:00"
 }
