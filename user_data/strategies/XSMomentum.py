@@ -82,6 +82,11 @@ class XSMomentum(IStrategy):
     stoploss = -0.25
 
     # ROI disabled: rank exit and backstop stop are the only exits.
+    # Binance revalidation (2026-07-13, topic project/xsmomentum_binance_revalidation_2026_07_13):
+    # a take-profit grid {price 20/30/40/60%} x {lev 1x,2x} was tested on the
+    # vol-filtered live universe. Every TP variant REDUCED profit factor and
+    # robustness vs no-TP (PF 1.65 no-TP vs 1.28-1.53 with TP). TP truncates the
+    # cross-sectional momentum right tail that IS the edge. Decision: NO TP.
     minimal_roi = {"0": 10.0}
 
     # =========================================================================
@@ -356,11 +361,15 @@ class XSMomentum(IStrategy):
         dataframe.loc[exit_long, 'exit_long'] = 1
         dataframe.loc[exit_short, 'exit_short'] = 1
 
-        # Set TAGs without overwriting: long tag is written first, short tag is
-        # written only on rows where exit_long did NOT also fire.  A long trade
-        # on a row where both flags are 1 keeps its 'rank_exit_long' tag.
-        dataframe.loc[exit_long, 'exit_tag'] = 'rank_exit_long'
+        # Direction-correct exit tags. A single exit_tag column is shared by
+        # long and short exits, so on middle-zone rows where BOTH flags fire we
+        # cannot carry two directional tags — using 'rank_exit_long' there
+        # mislabeled short exits (cosmetic bug). Fix: tag only unambiguous rows
+        # directionally; ambiguous both-fire rows get a neutral 'rank_exit'.
+        both = exit_long & exit_short
+        dataframe.loc[exit_long & ~exit_short, 'exit_tag'] = 'rank_exit_long'
         dataframe.loc[exit_short & ~exit_long, 'exit_tag'] = 'rank_exit_short'
+        dataframe.loc[both, 'exit_tag'] = 'rank_exit'
 
         return dataframe
 
