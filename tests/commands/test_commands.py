@@ -83,6 +83,30 @@ def test_setup_utils_configuration():
     assert config["dry_run"] is False
 
 
+def test_setup_utils_configuration_download_convert_flag():
+    args = [
+        "download-data",
+        "--exchange",
+        "kraken",
+        "--pairs",
+        "ETH/USDT",
+        "--dl-trades",
+        "--convert",
+        "-t",
+        "1m",
+        "--timerange",
+        "20260101-",
+        "--config",
+        "tests/testdata/testconfigs/main_test_config.json",
+    ]
+
+    config = setup_utils_configuration(get_args(args), RunMode.UTIL_EXCHANGE)
+
+    assert config["download_trades"] is True
+    assert config["convert_trades"] is True
+    assert config["timeframes"] == ["1m"]
+
+
 def test_start_trading_fail(mocker, caplog):
     mocker.patch("freqtrade.worker.Worker.run", MagicMock(side_effect=OperationalException))
 
@@ -186,7 +210,8 @@ def test_list_exchanges(capsys):
     captured = capsys.readouterr()
     assert re.search(r"Exchanges available for Freqtrade.*", captured.out)
     assert re.search(r".*binance.*", captured.out)
-    assert not re.search(r".*kraken.*", captured.out)
+    assert re.search(r"\bkrakenfutures\b", captured.out)
+    assert not re.search(r"\bmyokx\b", captured.out)
 
 
 def test_list_timeframes(mocker, capsys):
@@ -786,6 +811,24 @@ def test_download_and_install_ui(mocker, tmp_path):
     assert read_ui_version(folder) == "22"
 
 
+@pytest.mark.parametrize("dangerous_path", ["../../dangerous.txt", "/etc/passwd", "../foo"])
+def test_download_and_install_ui_dangerous_paths(mocker, tmp_path, dangerous_path):
+    requests_mock = MagicMock()
+    file_like_object = BytesIO()
+    with ZipFile(file_like_object, mode="w") as zipfile:
+        zipfile.writestr(dangerous_path, "content")
+    file_like_object.seek(0)
+    requests_mock.content = file_like_object.read()
+
+    mocker.patch("freqtrade.commands.deploy_ui.requests.get", return_value=requests_mock)
+
+    folder = tmp_path / "uitests_dl_dangerous"
+    folder.mkdir(exist_ok=True)
+
+    with pytest.raises(OperationalException, match="Dangerous path in zipfile"):
+        download_and_install_ui(folder, "http://whatever.xxx/download/file.zip", "22")
+
+
 def test_get_ui_download_url(mocker):
     response = MagicMock()
     responses = [
@@ -853,7 +896,7 @@ def test_get_ui_download_url_direct(mocker):
     assert last_version == "0.0.1"
     assert x == "http://download1.zip"
 
-    with pytest.raises(ValueError, match=r"UI-Version not found\."):
+    with pytest.raises(OperationalException, match=r"UI-Version not found\."):
         x, last_version = get_ui_download_url("0.0.3", False)
 
 

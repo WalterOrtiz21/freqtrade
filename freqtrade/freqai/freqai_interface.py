@@ -227,6 +227,10 @@ class IFreqaiModel(ABC):
         """
         while not self._stop_event.is_set():
             time.sleep(1)
+
+            if not self.train_queue:
+                continue
+
             pair = self.train_queue[0]
 
             # ensure pair is available in dp
@@ -672,7 +676,7 @@ class IFreqaiModel(ABC):
         self.set_start_dry_live_date(strat_df)
 
         for label in hist_preds_df.columns:
-            if hist_preds_df[label].dtype == object:
+            if pd.api.types.is_string_dtype(hist_preds_df[label].dtype):
                 continue
             hist_preds_df[f"{label}_mean"] = 0
             hist_preds_df[f"{label}_std"] = 0
@@ -702,7 +706,7 @@ class IFreqaiModel(ABC):
         num_candles = self.freqai_info.get("fit_live_predictions_candles", 100)
         dk.data["labels_mean"], dk.data["labels_std"] = {}, {}
         for label in full_labels:
-            if self.dd.historic_predictions[dk.pair][label].dtype == object:
+            if pd.api.types.is_string_dtype(self.dd.historic_predictions[dk.pair][label].dtype):
                 continue
             f = spy.stats.norm.fit(self.dd.historic_predictions[dk.pair][label].tail(num_candles))
             dk.data["labels_mean"][label], dk.data["labels_std"][label] = f[0], f[1]
@@ -892,7 +896,7 @@ class IFreqaiModel(ABC):
                     ]
                     self.fit_live_predictions(self.dk, self.dk.pair)
                     for label in label_columns:
-                        if dk.full_df[label].dtype == object:
+                        if pd.api.types.is_string_dtype(dk.full_df[label].dtype):
                             continue
                         if "labels_mean" in self.dk.data:
                             dk.full_df.at[index, f"{label}_mean"] = self.dk.data["labels_mean"][

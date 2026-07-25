@@ -7,8 +7,10 @@ import logging
 import time
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
+from io import BytesIO
 from pathlib import Path
-from unittest.mock import ANY, MagicMock, PropertyMock
+from unittest.mock import ANY, MagicMock, PropertyMock, patch
+from zipfile import ZipFile
 
 import pandas as pd
 import pytest
@@ -22,7 +24,12 @@ from sqlalchemy import select
 
 from freqtrade.__init__ import __version__
 from freqtrade.enums import CandleType, RunMode, State, TradingMode
-from freqtrade.exceptions import DependencyException, ExchangeError, OperationalException
+from freqtrade.exceptions import (
+    ConfigurationError,
+    DependencyException,
+    ExchangeError,
+    OperationalException,
+)
 from freqtrade.loggers import setup_logging, setup_logging_pre
 from freqtrade.optimize.backtesting import Backtesting
 from freqtrade.persistence import CustomDataWrapper, Trade
@@ -50,6 +57,7 @@ BASE_URI = "/api/v1"
 _TEST_USER = "FreqTrader"
 _TEST_PASS = "SuperSecurePassword1!"
 _TEST_WS_TOKEN = "secret_Ws_t0ken"
+_JWT_SECRET_KEY = "99980ff8fcf77f21ef610adb46b788c505b8483897bc26203b5591eefe0d15"
 
 
 @pytest.fixture
@@ -64,6 +72,7 @@ def botclient(default_conf, mocker):
                 "listen_ip_address": "127.0.0.1",
                 "listen_port": 8080,
                 "CORS_origins": ["http://example.com"],
+                "jwt_secret_key": _JWT_SECRET_KEY,
                 "username": _TEST_USER,
                 "password": _TEST_PASS,
                 "ws_token": _TEST_WS_TOKEN,
@@ -178,11 +187,12 @@ def test_api_ui_fallback(botclient, mocker):
     # Allow both fallback or real UI
     assert "`freqtrade install-ui`" in rc.text or "<!DOCTYPE html>" in rc.text
 
-    mocker.patch.object(Path, "is_file", MagicMock(side_effect=[True, False]))
-    rc = client_get(client, "%2F%2F%2Fetc/passwd")
-    assert rc.status_code == 200
+    for test_string in ["%2F%2F%2Fetc/passwd", "assets%2F..%2F..%2F..%2Fdeps.py"]:
+        with patch.object(Path, "is_file", MagicMock(side_effect=[True, False])):
+            rc = client_get(client, test_string)
+            assert rc.status_code == 200
 
-    assert "`freqtrade install-ui`" in rc.text
+            assert "`freqtrade install-ui`" in rc.text
 
 
 def test_api_ui_version(botclient, mocker):
@@ -196,22 +206,22 @@ def test_api_ui_version(botclient, mocker):
 
 def test_api_auth():
     with pytest.raises(ValueError):
-        create_token({"identity": {"u": "Freqtrade"}}, "secret1234", token_type="NotATokenType")
+        create_token({"identity": {"u": "Freqtrade"}}, _JWT_SECRET_KEY, token_type="NotATokenType")
 
-    token = create_token({"identity": {"u": "Freqtrade"}}, "secret1234")
+    token = create_token({"identity": {"u": "Freqtrade"}}, _JWT_SECRET_KEY)
     assert isinstance(token, str)
 
-    u = get_user_from_token(token, "secret1234")
+    u = get_user_from_token(token, _JWT_SECRET_KEY)
     assert u == "Freqtrade"
     with pytest.raises(HTTPException):
-        get_user_from_token(token, "secret1234", token_type="refresh")
+        get_user_from_token(token, _JWT_SECRET_KEY, token_type="refresh")
     # Create invalid token
-    token = create_token({"identity": {"u1": "Freqrade"}}, "secret1234")
+    token = create_token({"identity": {"u1": "Freqrade"}}, _JWT_SECRET_KEY)
     with pytest.raises(HTTPException):
-        get_user_from_token(token, "secret1234")
+        get_user_from_token(token, _JWT_SECRET_KEY)
 
     with pytest.raises(HTTPException):
-        get_user_from_token(b"not_a_token", "secret1234")
+        get_user_from_token(b"not_a_token", _JWT_SECRET_KEY)
 
 
 def test_api_ws_auth(botclient):
@@ -229,7 +239,7 @@ def test_api_ws_auth(botclient):
     with client.websocket_connect(url(good_token)):
         pass
 
-    jwt_secret = ftbot.config["api_server"].get("jwt_secret_key", "super-secret")
+    jwt_secret = ftbot.config["api_server"]["jwt_secret_key"]
     jwt_token = create_token({"identity": {"u": "Freqtrade"}}, jwt_secret)
     with client.websocket_connect(url(jwt_token)):
         pass
@@ -450,6 +460,7 @@ def test_api_run(default_conf, mocker, caplog):
                 "listen_ip_address": "0.0.0.0",
                 "listen_port": 8089,
                 "password": "",
+                "jwt_secret_key": "super-secret",
             }
         }
     )
@@ -1199,6 +1210,11 @@ def test_api_logs(botclient):
                 "winrate": 0.0,
                 "expectancy": -0.0033695635,
                 "expectancy_ratio": -1.0,
+                "cagr": -0.0024567404889381805,
+                "calmar": -1910.497317469542,
+                "sharpe": -58.138247358830355,
+                "sortino": -58.138247358830355,
+                "sqn": -1.5215,
                 "trading_volume": 75.945,
             },
         ),
@@ -1231,6 +1247,11 @@ def test_api_logs(botclient):
                 "winrate": 1.0,
                 "expectancy": 0.0003695635,
                 "expectancy_ratio": 100,
+                "cagr": 0.0002698167695580622,
+                "calmar": -100.0,
+                "sharpe": 65.81269184917424,
+                "sortino": -100.0,
+                "sqn": 1.7224,
                 "trading_volume": 75.945,
             },
         ),
@@ -1263,6 +1284,11 @@ def test_api_logs(botclient):
                 "winrate": 0.5,
                 "expectancy": -0.0027145635000000003,
                 "expectancy_ratio": -0.48612137582114445,
+                "cagr": -0.0019796559404918757,
+                "calmar": -1857.4671689202785,
+                "sharpe": -36.14602907243071,
+                "sortino": -100.0,
+                "sqn": -0.946,
                 "trading_volume": 75.945,
             },
         ),
@@ -1326,6 +1352,11 @@ def test_api_profit(botclient, mocker, ticker, fee, markets, is_short, expected)
         "winrate": expected["winrate"],
         "expectancy": expected["expectancy"],
         "expectancy_ratio": expected["expectancy_ratio"],
+        "sharpe": expected["sharpe"],
+        "sortino": expected["sortino"],
+        "sqn": expected["sqn"],
+        "calmar": expected["calmar"],
+        "cagr": expected["cagr"],
         "max_drawdown": ANY,
         "max_drawdown_abs": ANY,
         "max_drawdown_start": ANY,
@@ -1408,6 +1439,79 @@ def test_api_stats(botclient, mocker, ticker, fee, markets, is_short):
     assert "wins" in rc.json()["durations"]
     assert "losses" in rc.json()["durations"]
     assert "draws" in rc.json()["durations"]
+
+
+@pytest.mark.parametrize("is_short", [True, False])
+def test_api_historic_balance(botclient, mocker, ticker, fee, markets, is_short):
+    ftbot, client = botclient
+    patch_get_signal(ftbot, enter_long=not is_short, enter_short=is_short)
+    mocker.patch.multiple(
+        EXMS,
+        get_balances=MagicMock(return_value=ticker),
+        fetch_ticker=ticker,
+        get_fee=fee,
+        markets=PropertyMock(return_value=markets),
+    )
+
+    rc = client_get(client, f"{BASE_URI}/historic_balance")
+    assert_response(rc, 200)
+    resp = rc.json()
+    assert "columns" in resp
+    assert "data" in resp
+    assert "length" in resp
+    assert "capture_start_ts" in resp
+    assert resp["length"] == 0
+
+    ftbot.wallets.record_wallet_state()
+
+    rc = client_get(client, f"{BASE_URI}/historic_balance")
+    assert_response(rc, 200)
+    resp1 = rc.json()
+    assert "columns" in resp1
+    assert "data" in resp1
+    assert "length" in resp1
+    assert "capture_start_ts" in resp1
+    assert resp1["length"] == 1
+    assert "__date_ts" in resp1["columns"]
+    assert "total_quote" in resp1["columns"]
+
+
+def test_api_historic_balance_int_bot_managed(botclient, mocker):
+    """
+    read_sql may return the wallet_history `bot_managed` column as an
+    integer (e.g. MySQL/MariaDB TINYINT)
+    """
+    _, client = botclient
+
+    # Single row: with an int64 `bot_managed`
+    one_row = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-01"]),
+            "total_quote": [100.0],
+            "bot_managed": [1],
+        }
+    ).astype({"bot_managed": "int64"})
+    mocker.patch("freqtrade.rpc.rpc.read_sql", return_value=one_row)
+    rc = client_get(client, f"{BASE_URI}/historic_balance")
+    assert_response(rc, 200)
+    assert rc.json()["length"] == 1
+    assert rc.json()["data"][0][0] == "2024-01-01T00:00:00"
+    assert rc.json()["data"][0][2] == 100.0
+
+    # Mixed rows: the non-bot-managed row (bot_managed=0) must be excluded.
+    two_rows = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-01", "2024-01-02"]),
+            "total_quote": [100.0, 200.0],
+            "bot_managed": [0, 1],
+        }
+    ).astype({"bot_managed": "int64"})
+    mocker.patch("freqtrade.rpc.rpc.read_sql", return_value=two_rows)
+    rc = client_get(client, f"{BASE_URI}/historic_balance")
+    assert_response(rc, 200)
+    assert rc.json()["length"] == 1
+    assert rc.json()["data"][0][0] == "2024-01-02T00:00:00"
+    assert rc.json()["data"][0][2] == 200.0
 
 
 def test_api_performance(botclient, fee):
@@ -1911,16 +2015,34 @@ def gen_annotation_params():
         "width": 2,
         "line_style": "dashed",
     }
+    point_annotation = {
+        "type": "point",
+        "x": "2024-01-01 15:30:00",
+        "y": 97000,
+        "color": "",
+        "label": "some label",
+        "size": 10,
+        "shape": "circle",
+    }
 
     line_wrong = deepcopy(line_annotation)
     line_wrong["line_style"] = "dashed2222"
+    point_wrong = deepcopy(point_annotation)
+    point_wrong["shape"] = "circle2222"
+    # annotations / expected
     return [
         ([area_annotation], [area_annotation]),  # Only area
         ([line_annotation], [line_annotation]),  # Only line
-        ([area_annotation, line_annotation], [area_annotation, line_annotation]),  # Both together
+        ([point_annotation], [point_annotation]),  # Only point
+        ([area_annotation, line_annotation], [area_annotation, line_annotation]),  # mark and line
+        (
+            [area_annotation, line_annotation, point_annotation],
+            [area_annotation, line_annotation, point_annotation],
+        ),  # all together
         ([], []),  # Empty
         ([line_wrong], []),  # Invalid line
         ([area_annotation, line_wrong], [area_annotation]),  # Invalid line
+        ([point_wrong], []),  # Invalid point
     ]
 
 
@@ -2380,6 +2502,31 @@ def test_api_pair_history(botclient, tmp_path, mocker):
     assert "enter_long" not in result["columns"]
     assert result["columns"] == ["date", "open", "high", "low", "close", "volume", "__date_ts"]
 
+    # Disallow base64 strategies
+    base64_dummy = "xx:cHJpbnQoImhlbGxvIHdvcmxkIik="
+    rc = client_post(
+        client,
+        f"{BASE_URI}/pair_history",
+        data={
+            "pair": "UNITTEST/BTC",
+            "timeframe": timeframe,
+            "timerange": "20180111-20180112",
+            "strategy": base64_dummy,
+            "columns": ["rsi", "fastd", "fastk"],
+        },
+    )
+    assert_response(rc, 422)
+    assert rc.json()["detail"] == "base64 encoded strategies are not allowed."
+
+    # Disallow base64 strategies
+    rc = client_get(
+        client,
+        f"{BASE_URI}/pair_history?pair=UNITTEST%2FBTC&timeframe={timeframe}"
+        f"&timerange=20200111-20200112&strategy={base64_dummy}",
+    )
+    assert_response(rc, 422)
+    assert rc.json()["detail"] == "base64 encoded strategies are not allowed."
+
 
 def test_api_pair_history_live_mode(botclient, tmp_path, mocker):
     _ftbot, client = botclient
@@ -2488,6 +2635,7 @@ def test_api_plot_config(botclient, mocker, tmp_path):
 def test_api_strategies(botclient, tmp_path):
     ftbot, client = botclient
     ftbot.config["user_data_dir"] = tmp_path
+    ftbot.config["runmode"] = RunMode.WEBSERVER
 
     rc = client_get(client, f"{BASE_URI}/strategies")
 
@@ -2513,23 +2661,57 @@ def test_api_strategies(botclient, tmp_path):
 
 
 def test_api_strategy(botclient, tmp_path, mocker):
-    _ftbot, client = botclient
-    _ftbot.config["user_data_dir"] = tmp_path
+    ftbot, client = botclient
+    ftbot.config["user_data_dir"] = tmp_path
+    ftbot.config["runmode"] = RunMode.WEBSERVER
 
     rc = client_get(client, f"{BASE_URI}/strategy/{CURRENT_TEST_STRATEGY}")
 
     assert_response(rc)
-    assert rc.json()["strategy"] == CURRENT_TEST_STRATEGY
+    response = rc.json()
+    assert response["strategy"] == CURRENT_TEST_STRATEGY
 
-    data = (Path(__file__).parents[1] / "strategy/strats/strategy_test_v3.py").read_text()
-    assert rc.json()["code"] == data
+    data = (Path(__file__).parents[1] / "strategy/strats/strategy_test_v3.py").read_text(
+        encoding="utf-8"
+    )
+    assert response["code"] == data
+    assert "params" in response
+    assert isinstance(response["params"], list)
+    assert len(response["params"]) >= 6
+    buy_rsi = next(p for p in response["params"] if p["name"] == "buy_rsi")
+    assert buy_rsi == {
+        "param_type": "IntParameter",
+        "name": "buy_rsi",
+        "space": "buy",
+        "load": True,
+        "optimize": True,
+        "value": 35,  # Parameter from buy_params
+        "low": 0,
+        "high": 50,
+    }
+
+    rc = client_get(client, f"{BASE_URI}/strategy/HyperoptableStrategy")
+    assert_response(rc)
+    response2 = rc.json()
+    assert len(response2["params"]) >= 8
+    param_exitaaa = next(p for p in response2["params"] if p["name"] == "exitaaa")
+    assert param_exitaaa == {
+        "param_type": "IntParameter",
+        "name": "exitaaa",
+        "space": "exitaspace",
+        "load": True,
+        "optimize": True,
+        "value": 5,
+        "low": 0,
+        "high": 10,
+    }
 
     rc = client_get(client, f"{BASE_URI}/strategy/NoStrat")
     assert_response(rc, 404)
 
     # Disallow base64 strategies
     rc = client_get(client, f"{BASE_URI}/strategy/xx:cHJpbnQoImhlbGxvIHdvcmxkIik=")
-    assert_response(rc, 500)
+    assert_response(rc, 422)
     mocker.patch(
         "freqtrade.resolvers.strategy_resolver.StrategyResolver._load_strategy",
         side_effect=Exception("Test"),
@@ -2539,8 +2721,43 @@ def test_api_strategy(botclient, tmp_path, mocker):
     assert_response(rc, 502)
 
 
+def test_api_strategy_trade_mode(botclient, tmp_path, mocker):
+    ftbot, client = botclient
+    ftbot.config["user_data_dir"] = tmp_path
+
+    rc = client_get(client, f"{BASE_URI}/strategy/{CURRENT_TEST_STRATEGY}")
+
+    assert_response(rc)
+    response = rc.json()
+    assert response["strategy"] == CURRENT_TEST_STRATEGY
+
+    data = (Path(__file__).parents[1] / "strategy/strats/strategy_test_v3.py").read_text(
+        encoding="utf-8"
+    )
+    assert response["code"] == data
+    assert "params" in response
+    assert isinstance(response["params"], list)
+    assert len(response["params"]) >= 6
+    buy_rsi = next(p for p in response["params"] if p["name"] == "buy_rsi")
+    assert buy_rsi == {
+        "param_type": "IntParameter",
+        "name": "buy_rsi",
+        "space": "buy",
+        "load": True,
+        "optimize": True,
+        "value": 35,  # Parameter from buy_params
+        "low": 0,
+        "high": 50,
+    }
+
+    rc = client_get(client, f"{BASE_URI}/strategy/HyperoptableStrategy")
+    assert_response(rc, 404)
+    assert rc.json()["detail"] == "Only the currently active strategy is available in trade mode"
+
+
 def test_api_exchanges(botclient):
     _ftbot, client = botclient
+    _ftbot.config["runmode"] = RunMode.WEBSERVER
 
     rc = client_get(client, f"{BASE_URI}/exchanges")
     assert_response(rc)
@@ -2554,6 +2771,7 @@ def test_api_exchanges(botclient):
         "valid": True,
         "supported": True,
         "comment": "",
+        "comment_futures": ANY,
         "dex": False,
         "is_alias": False,
         "alias_for": None,
@@ -2571,18 +2789,20 @@ def test_api_exchanges(botclient):
         "supported": False,
         "dex": False,
         "comment": "",
+        "comment_futures": ANY,
         "is_alias": False,
         "alias_for": None,
         "trade_modes": [{"trading_mode": "spot", "margin_mode": ""}],
     }
-    waves = next(x for x in response["exchanges"] if x["classname"] == "wavesexchange")
+    waves = next(x for x in response["exchanges"] if x["classname"] == "aster")
     assert waves == {
-        "classname": "wavesexchange",
-        "name": "Waves.Exchange",
+        "classname": "aster",
+        "name": "Aster",
         "valid": True,
         "supported": False,
         "dex": True,
         "comment": ANY,
+        "comment_futures": ANY,
         "is_alias": False,
         "alias_for": None,
         "trade_modes": [{"trading_mode": "spot", "margin_mode": ""}],
@@ -2592,6 +2812,7 @@ def test_api_exchanges(botclient):
 def test_list_hyperoptloss(botclient, tmp_path):
     ftbot, client = botclient
     ftbot.config["user_data_dir"] = tmp_path
+    ftbot.config["runmode"] = RunMode.WEBSERVER
 
     rc = client_get(client, f"{BASE_URI}/hyperoptloss")
     assert_response(rc)
@@ -2608,6 +2829,8 @@ def test_list_hyperoptloss(botclient, tmp_path):
 def test_api_freqaimodels(botclient, tmp_path, mocker):
     ftbot, client = botclient
     ftbot.config["user_data_dir"] = tmp_path
+    ftbot.config["runmode"] = RunMode.WEBSERVER
+
     mocker.patch(
         "freqtrade.resolvers.freqaimodel_resolver.FreqaiModelResolver.search_all_objects",
         return_value=[
@@ -2729,15 +2952,29 @@ def test_api_pairlists_evaluate(botclient, tmp_path, mocker):
     # Get individual job
     rc = client_get(client, f"{BASE_URI}/background/{job_id}")
     assert_response(rc)
-    response = rc.json()
-    assert response["job_id"] == job_id
-    assert response["job_category"] == "pairlist"
+    response_get = rc.json()
+    assert response_get["job_id"] == job_id
+    assert response_get["job_category"] == "pairlist"
 
     rc = client_get(client, f"{BASE_URI}/pairlists/evaluate/{job_id}")
     assert_response(rc)
     response = rc.json()
     assert response["result"]["whitelist"] == ["ETH/BTC", "LTC/BTC", "XRP/BTC", "NEO/BTC"]
     assert response["result"]["length"] == 4
+    assert len(ApiBG.jobs) == 1
+
+    # Test background job deletion
+    rc = client_delete(client, f"{BASE_URI}/background/RandomJob")
+    assert_response(rc, 404)
+    assert rc.json()["detail"] == "Job not found."
+
+    rc = client_delete(client, f"{BASE_URI}/background/{job_id}")
+    assert_response(rc)
+    response_del = rc.json()
+    assert response_del["job_id"] == job_id
+    assert response_del["job_category"] == "pairlist"
+    assert response_del == response_get
+    assert len(ApiBG.jobs) == 0
 
     # Restart with additional filter, reducing the list to 2
     body["pairlists"].append({"method": "OffsetFilter", "number_assets": 2})
@@ -2779,6 +3016,7 @@ def test_api_pairlists_evaluate(botclient, tmp_path, mocker):
 
 def test_list_available_pairs(botclient):
     ftbot, client = botclient
+    ftbot.config["runmode"] = RunMode.WEBSERVER
 
     rc = client_get(client, f"{BASE_URI}/available_pairs")
 
@@ -2815,6 +3053,91 @@ def test_list_available_pairs(botclient):
     assert len(rc.json()["pair_interval"]) == 2
 
 
+def test_api_background_jobs(botclient):
+    ftbot, client = botclient
+    rc = client_get(client, f"{BASE_URI}/background")
+    assert_response(rc, 503)
+
+    ftbot.config["runmode"] = RunMode.WEBSERVER
+
+    rc = client_get(client, f"{BASE_URI}/background")
+    assert_response(rc)
+    response = rc.json()
+    assert isinstance(response, list)
+    assert len(response) == 0
+
+    # Fake a job
+    job_id = "RandomExistingJob"
+    ApiBG.jobs[job_id] = {
+        "category": "pairlist",
+        "status": "running",
+        "is_running": True,
+        "result": None,
+    }
+    rc = client_get(client, f"{BASE_URI}/background")
+    assert_response(rc)
+    response = rc.json()
+    assert isinstance(response, list)
+    assert len(response) == 1
+    assert response[0]["job_id"] == job_id
+
+    rc = client_get(client, f"{BASE_URI}/background/{job_id}")
+    assert_response(rc)
+    response = rc.json()
+    assert response["job_id"] == job_id
+
+    # Attempt deletion
+    rc = client_delete(client, f"{BASE_URI}/background/{job_id}")
+    assert_response(rc, 400)
+    assert rc.json()["detail"] == "Job is still running."
+
+    # Attempt deleting a non-existing job
+    rc = client_delete(client, f"{BASE_URI}/background/NonExistingJob")
+    assert_response(rc, 404)
+    assert rc.json()["detail"] == "Job not found."
+
+    ApiBG.jobs[job_id]["is_running"] = False
+    rc = client_delete(client, f"{BASE_URI}/background/{job_id}")
+    assert_response(rc, 200)
+    response = rc.json()
+    assert response["job_id"] == job_id
+    assert len(ApiBG.jobs) == 0
+
+    # Reinsert job for testing
+    ApiBG.jobs.update(
+        {
+            job_id: {
+                "category": "pairlist",
+                "status": "ended",
+                "is_running": False,
+                "result": None,
+            },
+            "randomJob2": {
+                "category": "download_data",
+                "status": "running",
+                "is_running": True,
+                "result": None,
+            },
+            "randomJob3": {
+                "category": "download_data",
+                "status": "failed",
+                "is_running": False,
+                "result": None,
+            },
+        }
+    )
+    assert len(ApiBG.jobs) == 3
+
+    rc = client_delete(client, f"{BASE_URI}/background/clear")
+    assert_response(rc)
+    assert len(ApiBG.jobs) == 1
+    response = rc.json()
+    assert isinstance(response, list)
+    assert len(response) == 1
+    # The not deleted job should still be there
+    assert response[0]["job_id"] == "randomJob2"
+
+
 def test_sysinfo(botclient):
     _ftbot, client = botclient
 
@@ -2823,6 +3146,15 @@ def test_sysinfo(botclient):
     result = rc.json()
     assert "cpu_pct" in result
     assert "ram_pct" in result
+    assert "cpu_load" in result
+    assert "cpu_count" in result
+    assert "cpu_load_avg" in result
+    assert "1m" in result["cpu_load_avg"]
+    assert "5m" in result["cpu_load_avg"]
+    assert "15m" in result["cpu_load_avg"]
+
+    assert isinstance(result["cpu_load"], list)
+    assert isinstance(result["cpu_load"][0], dict)
 
 
 def test_api_backtesting(botclient, mocker, fee, caplog, tmp_path):
@@ -2896,7 +3228,7 @@ def test_api_backtesting(botclient, mocker, fee, caplog, tmp_path):
         assert result["status_msg"] == "Backtest ended"
 
         # Simulate running backtest
-        ApiBG.bgtask_running = True
+        ApiBG.analysis_running = True
         rc = client_get(client, f"{BASE_URI}/backtest/abort")
         assert_response(rc)
         result = rc.json()
@@ -2925,7 +3257,7 @@ def test_api_backtesting(botclient, mocker, fee, caplog, tmp_path):
         result = rc.json()
         assert "Bot Background task already running" in result["error"]
 
-        ApiBG.bgtask_running = False
+        ApiBG.analysis_running = False
 
         # Rerun backtest (should get previous result)
         rc = client_post(client, f"{BASE_URI}/backtest", data=data)
@@ -2935,6 +3267,14 @@ def test_api_backtesting(botclient, mocker, fee, caplog, tmp_path):
 
         data["stake_amount"] = 101
 
+        mocker.patch(
+            "freqtrade.optimize.backtesting.Backtesting.backtest_one_strategy",
+            side_effect=ConfigurationError("DeadBeef22"),
+        )
+        rc = client_post(client, f"{BASE_URI}/backtest", data=data)
+        assert log_has("Backtesting encountered a configuration Error: DeadBeef22", caplog)
+
+        data["stake_amount"] = 102
         mocker.patch(
             "freqtrade.optimize.backtesting.Backtesting.backtest_one_strategy",
             side_effect=DependencyException("DeadBeef"),
@@ -2960,7 +3300,7 @@ def test_api_backtesting(botclient, mocker, fee, caplog, tmp_path):
         # Disallow base64 strategies
         data["strategy"] = "xx:cHJpbnQoImhlbGxvIHdvcmxkIik="
         rc = client_post(client, f"{BASE_URI}/backtest", data=data)
-        assert_response(rc, 500)
+        assert_response(rc, 422)
     finally:
         Backtesting.cleanup()
 
@@ -3122,7 +3462,7 @@ def test_api_patch_backtest_history_entry(botclient, tmp_path: Path):
     assert fileres[CURRENT_TEST_STRATEGY]["notes"] == "FooBar"
 
 
-def test_api_patch_backtest_market_change(botclient, tmp_path: Path):
+def test_api_backtest_market_change(botclient, tmp_path: Path):
     ftbot, client = botclient
 
     # Create a temporary directory and file
@@ -3157,6 +3497,55 @@ def test_api_patch_backtest_market_change(botclient, tmp_path: Path):
     assert result["data"] == [
         ["2018-01-01T00:00:00Z", 2, 2555, 0.0, 1514764800000],
         ["2018-01-01T00:05:00Z", 4, 2556, 0.022, 1514765100000],
+    ]
+
+
+def test_api_backtest_wallets(botclient, tmp_path: Path):
+    ftbot, client = botclient
+
+    # Create a temporary directory and file
+    bt_results_base = tmp_path / "backtest_results"
+    bt_results_base.mkdir()
+    zip_file = bt_results_base / "backtest_15.zip"
+    with ZipFile(zip_file, "w") as zipf:
+        wallet_df = pd.DataFrame(
+            {
+                "date": [
+                    "2018-01-01T00:00:00Z",
+                    "2018-01-01T00:00:00Z",
+                    "2018-01-01T00:05:00Z",
+                    "2018-01-01T00:05:00Z",
+                ],
+                "currency": ["ETH", "BTC", "ETH", "BTC"],
+                "rate": [2000, 60_000, 2001, 60_001],
+                "balance": [0.5, 0.25, 0.5, 0.25],
+            }
+        )
+        wallet_df["date"] = pd.to_datetime(wallet_df["date"])
+        wallet_buf = BytesIO()
+        wallet_df.reset_index().to_feather(wallet_buf, compression_level=9, compression="lz4")
+        wallet_buf.seek(0)
+        zipf.writestr("backtest_15_SampleStrategy_wallet.feather", wallet_buf.read())
+
+    # Wrong basedirectory
+    rc = client_get(client, f"{BASE_URI}/backtest/history/randomFile.json/SampleStrategy/wallet")
+    assert_response(rc, 503)
+
+    ftbot.config["user_data_dir"] = tmp_path
+    ftbot.config["runmode"] = RunMode.WEBSERVER
+
+    # Nonexisting file - fails "is_file_in_dir" check
+    rc = client_get(client, f"{BASE_URI}/backtest/history/randomFile.json/SampleStrategy/wallet")
+    assert_response(rc, 400)
+
+    rc = client_get(client, f"{BASE_URI}/backtest/history/backtest_15/SampleStrategy/wallet")
+    assert_response(rc, 200)
+    result = rc.json()
+    assert result["length"] == 2
+    assert result["columns"] == ["date", "__date_ts", "total_quote"]
+    assert result["data"] == [
+        ["2018-01-01T00:00:00Z", 1514764800000, 16000.0],
+        ["2018-01-01T00:05:00Z", 1514765100000, 16000.75],
     ]
 
 
@@ -3222,6 +3611,18 @@ def test_api_ws_requests(botclient, caplog):
 
     assert log_has_re(r"Request of type analyzed_df from.+", caplog)
     assert response["type"] == "analyzed_df"
+
+
+def test_channel_reader_handles_freqtrade_exception(botclient):
+    _ftbot, client = botclient
+    ws_url = f"/api/v1/message/ws?token={_TEST_WS_TOKEN}"
+
+    # Test with wrong request -> wrong_type is not a valid type
+    with client.websocket_connect(ws_url) as ws:
+        ws.send_json({"type": "wrong_type", "data": ["test"]})
+        response = ws.receive_json()
+
+        assert response["data"] == "Invalid request type: wrong_type"
 
 
 def test_api_ws_send_msg(default_conf, mocker, caplog):
@@ -3335,6 +3736,157 @@ def test_api_download_data(botclient, mocker, tmp_path):
     assert response["error"] == "Download error"
 
 
+def test_api_lookahead_analysis(botclient, mocker, tmp_path):
+    from types import SimpleNamespace
+
+    ftbot, client = botclient
+
+    body = {
+        "strategy": CURRENT_TEST_STRATEGY,
+        "timerange": "20180110-20180112",
+        "minimum_trade_amount": 10,
+        "targeted_trade_amount": 20,
+    }
+
+    # Fail - not in webserver mode
+    rc = client_post(client, f"{BASE_URI}/lookahead_analysis", data=body)
+    assert_response(rc, 503)
+    assert rc.json()["detail"] == "Bot is not in the correct state."
+
+    ftbot.config["runmode"] = RunMode.WEBSERVER
+    ftbot.config["user_data_dir"] = tmp_path
+
+    # Fail, already running
+    ApiBG.analysis_running = True
+    rc = client_post(client, f"{BASE_URI}/lookahead_analysis", data=body)
+    assert_response(rc, 400)
+    assert rc.json()["detail"] == "Analysis is already running."
+    ApiBG.analysis_running = False
+
+    fake_instance = SimpleNamespace(
+        strategy_obj={"name": CURRENT_TEST_STRATEGY},
+        current_analysis=SimpleNamespace(
+            has_bias=True,
+            total_signals=25,
+            false_entry_signals=2,
+            false_exit_signals=1,
+            false_indicators=["rsi", "ema"],
+        ),
+    )
+    mocker.patch(
+        "freqtrade.optimize.analysis.lookahead_helpers."
+        "LookaheadAnalysisSubFunctions.initialize_single_lookahead_analysis",
+        return_value=fake_instance,
+    )
+
+    rc = client_post(client, f"{BASE_URI}/lookahead_analysis", data=body)
+    assert_response(rc)
+    assert rc.json()["status"] == "Lookahead analysis started in background."
+    job_id = rc.json()["job_id"]
+
+    # Job finished immediately (BackgroundTask runs synchronously in TestClient)
+    rc = client_get(client, f"{BASE_URI}/background/{job_id}")
+    assert_response(rc)
+    assert rc.json()["job_category"] == "lookahead_analysis"
+    assert rc.json()["status"] == "success"
+
+    rc = client_get(client, f"{BASE_URI}/lookahead_analysis/{job_id}")
+    assert_response(rc)
+    response = rc.json()
+    assert response["status"] == "ended"
+    assert response["running"] is False
+    assert response["result"]["strategy"] == CURRENT_TEST_STRATEGY
+    assert response["result"]["has_bias"] is True
+    assert response["result"]["total_signals"] == 25
+    assert response["result"]["biased_entry_signals"] == 2
+    assert response["result"]["biased_exit_signals"] == 1
+    assert response["result"]["biased_indicators"] == ["rsi", "ema"]
+
+    # Unknown job
+    rc = client_get(client, f"{BASE_URI}/lookahead_analysis/RandomJob")
+    assert_response(rc, 404)
+
+    # Error case
+    ApiBG.analysis_running = False
+    mocker.patch(
+        "freqtrade.optimize.analysis.lookahead_helpers."
+        "LookaheadAnalysisSubFunctions.initialize_single_lookahead_analysis",
+        side_effect=OperationalException("Analysis error"),
+    )
+    rc = client_post(client, f"{BASE_URI}/lookahead_analysis", data=body)
+    assert_response(rc)
+    job_id = rc.json()["job_id"]
+    rc = client_get(client, f"{BASE_URI}/lookahead_analysis/{job_id}")
+    assert_response(rc)
+    assert rc.json()["status"] == "error"
+    assert "Analysis error" in rc.json()["status_msg"]
+
+    rc = client_get(client, f"{BASE_URI}/recursive_analysis/NonExistingJob")
+    assert_response(rc, 404)
+    assert rc.json()["detail"] == "Job not found."
+
+
+def test_api_recursive_analysis(botclient, mocker, tmp_path):
+    from types import SimpleNamespace
+
+    ftbot, client = botclient
+
+    body = {
+        "strategy": CURRENT_TEST_STRATEGY,
+        "timerange": "20180110-20180112",
+    }
+
+    # Fail - not in webserver mode
+    rc = client_post(client, f"{BASE_URI}/recursive_analysis", data=body)
+    assert_response(rc, 503)
+    assert rc.json()["detail"] == "Bot is not in the correct state."
+
+    ftbot.config["runmode"] = RunMode.WEBSERVER
+    ftbot.config["user_data_dir"] = tmp_path
+
+    # Fail, already running
+    ApiBG.analysis_running = True
+    rc = client_post(client, f"{BASE_URI}/recursive_analysis", data=body)
+    assert_response(rc, 400)
+    assert rc.json()["detail"] == "Analysis is already running."
+    ApiBG.analysis_running = False
+
+    fake_instance = SimpleNamespace(
+        strategy_obj={"name": CURRENT_TEST_STRATEGY},
+        _startup_candle=[199, 399],
+        _strat_scc=300,
+        dict_recursive={"rsi": {"199": 0.01234, "399": 0.0}},
+    )
+    mocker.patch(
+        "freqtrade.optimize.analysis.recursive_helpers."
+        "RecursiveAnalysisSubFunctions.initialize_single_recursive_analysis",
+        return_value=fake_instance,
+    )
+
+    rc = client_post(client, f"{BASE_URI}/recursive_analysis", data=body)
+    assert_response(rc)
+    assert rc.json()["status"] == "Recursive analysis started in background."
+    job_id = rc.json()["job_id"]
+
+    rc = client_get(client, f"{BASE_URI}/background/{job_id}")
+    assert_response(rc)
+    assert rc.json()["job_category"] == "recursive_analysis"
+    assert rc.json()["status"] == "success"
+
+    rc = client_get(client, f"{BASE_URI}/recursive_analysis/{job_id}")
+    assert_response(rc)
+    response = rc.json()
+    assert response["status"] == "ended"
+    assert response["result"]["strategy"] == CURRENT_TEST_STRATEGY
+    assert response["result"]["startup_candles"] == [199, 399]
+    assert response["result"]["strategy_scc"] == 300
+    assert response["result"]["results"] == {"rsi": {"199": 0.01234, "399": 0.0}}
+
+    rc = client_get(client, f"{BASE_URI}/recursive_analysis/NonExistingJob")
+    assert_response(rc, 404)
+    assert rc.json()["detail"] == "Job not found."
+
+
 def test_api_markets_live(botclient):
     _ftbot, client = botclient
 
@@ -3349,6 +3901,7 @@ def test_api_markets_live(botclient):
         "symbol": "XRP/USDT",
         "spot": True,
         "swap": False,
+        "active": True,
     }
 
     assert "BTC/USDT" in response["markets"]

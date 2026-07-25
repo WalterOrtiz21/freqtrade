@@ -189,8 +189,8 @@ class Order(ModelBase):
     def __repr__(self):
         return (
             f"Order(id={self.id}, trade={self.ft_trade_id}, order_id={self.order_id}, "
-            f"side={self.side}, filled={self.safe_filled}, price={self.safe_price}, "
-            f"amount={self.amount}, "
+            f"side={self.side or self.ft_order_side}, filled={self.safe_filled}, "
+            f"price={self.safe_price}, amount={self.amount}, "
             f"status={self.status}, date={self.order_date_utc:{DATETIME_PRINT_FORMAT}})"
         )
 
@@ -858,9 +858,9 @@ class LocalTrade:
             higher_stop = stop_loss_norm > self.stop_loss
             lower_stop = stop_loss_norm < self.stop_loss
 
-            # stop losses only walk up, never down!,
-            #   ? But adding more to a leveraged trade would create a lower liquidation price,
-            #   ? decreasing the minimum stoploss
+            # stop losses only walk up, never down!
+            # but adding more to a leveraged trade would create a lower liquidation price,
+            # decreasing the minimum stoploss
             if (
                 allow_refresh
                 or (higher_stop and not self.is_short)
@@ -1208,6 +1208,35 @@ class LocalTrade:
 
         return float(f"{profit_ratio:.8f}")
 
+    def calc_close_rate_for_roi(self, target_roi: float) -> float:
+        """
+        Calculate the required close price to reach a target ROI.
+        Must match the logic used in `calc_profit_ratio()`.
+
+        :param target_roi: The desired return on investment (as a decimal, e.g., 0.05 for 5%)
+        :return: Close price (rate) required to achieve the target ROI
+        """
+        leverage = float(self.leverage or 1.0)
+        deleveraged_roi = float(target_roi) / leverage
+
+        open_value = self._calc_open_trade_value(self.amount, self.open_rate)
+
+        # The ROI formula uses close_value(rate), which depends on trading mode:
+        # - SPOT: linear in rate, adjusted by close fee
+        # - MARGIN: same, but long subtracts interest, short increases amount
+        # - FUTURES: adds/subtracts funding to/from close value
+        # All cases are affine in rate:
+        #     close_value(rate) = a * rate + b
+        # We extract a and b by probing close_value at rate = 0 and 1.
+        value_at_0 = self.calc_close_trade_value(0.0)
+        value_at_1 = self.calc_close_trade_value(1.0)
+        alpha = value_at_1 - value_at_0
+        beta = value_at_0
+
+        s = -1.0 if self.is_short else 1.0
+        adj = 1.0 + (deleveraged_roi / s)
+        return (adj * open_value - beta) / alpha
+
     def recalc_trade_from_orders(self, *, is_closing: bool = False):
         ZERO = FtPrecise(0.0)
         current_amount = FtPrecise(0.0)
@@ -1219,12 +1248,16 @@ class LocalTrade:
         close_profit_abs = 0.0
         # Reset funding fees
         self.funding_fees = 0.0
-        funding_fees = 0.0
-        ordercount = len(self.orders) - 1
+        # Total funding fees - cumulated over all orders
+        total_funding_fees = 0.0
+        # current funding fees - resetting on every exit to be aligned with profit calculation,
+        # as funding fees are part of the profit
+        current_funding_fee = 0.0
         for i, o in enumerate(self.orders):
             if o.ft_is_open or not o.filled:
                 continue
-            funding_fees += o.funding_fee or 0.0
+            current_funding_fee += o.funding_fee or 0.0
+            total_funding_fees += o.funding_fee or 0.0
             tmp_amount = FtPrecise(o.safe_amount_after_fee)
             tmp_price = FtPrecise(o.safe_price)
 
@@ -1239,11 +1272,8 @@ class LocalTrade:
                     avg_price = current_stake / current_amount
 
             if is_exit:
-                # Process exits
-                if i == ordercount and is_closing:
-                    # Apply funding fees only to the last closing order
-                    self.funding_fees = funding_fees
-
+                # Intermediate funding fees for profit calculation
+                self.funding_fees = current_funding_fee
                 exit_rate = o.safe_price
                 exit_amount = o.safe_amount_after_fee
                 prof = self.calculate_profit(exit_rate, exit_amount, float(avg_price))
@@ -1252,10 +1282,12 @@ class LocalTrade:
                     # This needs to be calculated based on the last occurring exit to be aligned
                     # with realized_profit.
                     close_profit = (close_profit_abs / total_stake) * self.leverage
+                current_funding_fee = 0.0
             else:
                 total_stake += self._calc_open_trade_value(tmp_amount, price)
                 max_stake_amount += tmp_amount * price
-        self.funding_fees = funding_fees
+        # Assign cumulated funding fees after all orders have been processed
+        self.funding_fees = total_funding_fees
         self.max_stake_amount = float(max_stake_amount) / (self.leverage or 1.0)
 
         if close_profit:

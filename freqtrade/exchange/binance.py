@@ -46,8 +46,13 @@ class Binance(Exchange):
         "l2_limit_range": [5, 10, 20, 50, 100, 500, 1000],
         "ws_enabled": True,
         "has_delisting": True,
+        # Demo trading
+        # https://www.binance.com/en/support/faq/detail/9be58f73e5e14338809e3b705b9687dd
+        # Intentionally Disabled as it's a separate market - not a simulated live market.
+        "supports_demo_trading": False,
     }
     _ft_has_futures: FtHas = {
+        "ohlcv_candle_limit": 499,
         "funding_fee_candle_limit": 1000,
         "stoploss_order_types": {"limit": "stop", "market": "stop_market"},
         "stoploss_blocks_assets": False,  # Stoploss orders do not block assets
@@ -68,6 +73,7 @@ class Binance(Exchange):
             "BFUSD": "USDT",
         },
     }
+    _can_use_data_download_fast = True
 
     _supported_trading_mode_margin_pairs: list[tuple[TradingMode, MarginMode]] = [
         (TradingMode.SPOT, MarginMode.NONE),
@@ -181,7 +187,8 @@ class Binance(Exchange):
                     return DataFrame(columns=DEFAULT_DATAFRAME_COLUMNS)
 
         if (
-            self._config["exchange"].get("only_from_ccxt", False)
+            not self._can_use_data_download_fast
+            or self._config["exchange"].get("only_from_ccxt", False)
             or
             # only download timeframes with significant improvements,
             # otherwise fall back to rest API
@@ -405,7 +412,10 @@ class Binance(Exchange):
     ) -> tuple[str, list[list]]:
         logger.info(f"Fetching trades for {pair} from Binance, {from_id=}, {since=}, {until=}")
 
-        if not self._config["exchange"].get("only_from_ccxt", False):
+        if (
+            not self._config["exchange"].get("only_from_ccxt", False)
+            and self._can_use_data_download_fast
+        ):
             if from_id is None or not since:
                 trades = await self._api_async.fetch_trades(
                     pair,
@@ -549,7 +559,7 @@ class Binance(Exchange):
 
 
 class Binanceusdm(Binance):
-    """Binacne USDM Exchange
+    """Binance USDM Exchange
     Same as Binance - only futures trading is supported (via ccxt).
 
     Not actually necessary, binance should be preferred.
@@ -569,3 +579,5 @@ class Binanceus(Binance):
     _supported_trading_mode_margin_pairs: list[tuple[TradingMode, MarginMode]] = [
         (TradingMode.SPOT, MarginMode.NONE),
     ]
+    # binance vision does not have data for binanceus
+    _can_use_data_download_fast = False

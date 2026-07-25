@@ -17,7 +17,7 @@ Sample configuration:
         "listen_port": 8080,
         "verbosity": "error",
         "enable_openapi": false,
-        "jwt_secret_key": "somethingrandom",
+        "jwt_secret_key": "somethingRandomSomethingRandom123",
         "CORS_origins": [],
         "username": "Freqtrader",
         "password": "SuperSecret1!",
@@ -56,7 +56,7 @@ secrets.token_hex()
 
 !!! Danger "Password selection"
     Please make sure to select a very strong, unique password to protect your bot from unauthorized access.
-    Also change `jwt_secret_key` to something random (no need to remember this, but it'll be used to encrypt your session, so it better be something unique!).
+    Also change `jwt_secret_key` to something random (no need to remember this, but it'll be used to encrypt your session, so it better be something unique!). This value should also be 32 characters or longer to be safe.
 
 ### Configuration with docker
 
@@ -202,20 +202,20 @@ All endpoints in the below table need to be prefixed with the base URL of the AP
 | `/blacklist` | GET | Show the current blacklist.
 | `/blacklist` | POST | Adds the specified pair to the blacklist.<br/>*Params:*<br/>- `blacklist` (`str`)
 | `/blacklist` | DELETE | Deletes the specified list of pairs from the blacklist.<br/>*Params:*<br/>- `[pair,pair]` (`list[str]`)
-| `/pair_candles` | GET | Returns dataframe for a pair / timeframe combination while the bot is running. **Alpha**
-| `/pair_candles` | POST | Returns dataframe for a pair / timeframe combination while the bot is running, filtered by a provided list of columns to return. **Alpha**<br/>*Params:*<br/>- `<column_list>` (`list[str]`)
-| `/pair_history` | GET | Returns an analyzed dataframe for a given timerange, analyzed by a given strategy. **Alpha**
-| `/pair_history` | POST | Returns an analyzed dataframe for a given timerange, analyzed by a given strategy, filtered by a provided list of columns to return. **Alpha**<br/>*Params:*<br/>- `<column_list>` (`list[str]`)
-| `/plot_config` | GET | Get plot config from the strategy (or nothing if not configured). **Alpha**
-| `/strategies` | GET | List strategies in strategy directory. **Alpha**
-| `/strategy/<strategy>` | GET | Get specific Strategy content by strategy class name. **Alpha**<br/>*Params:*<br/>- `<strategy>` (`str`)
-| `/available_pairs` | GET | List available backtest data. **Alpha**
+| `/pair_candles` | GET | Returns dataframe for a pair / timeframe combination while the bot is running.
+| `/pair_candles` | POST | Returns dataframe for a pair / timeframe combination while the bot is running, filtered by a provided list of columns to return.<br/>*Params:*<br/>- `<column_list>` (`list[str]`)
+| `/pair_history` | GET | Returns an analyzed dataframe for a given timerange, analyzed by a given strategy.
+| `/pair_history` | POST | Returns an analyzed dataframe for a given timerange, analyzed by a given strategy, filtered by a provided list of columns to return.<br/>*Params:*<br/>- `<column_list>` (`list[str]`)
+| `/plot_config` | GET | Get plot config from the strategy (or nothing if not configured).
+| `/strategies` | GET | List strategies in strategy directory.
+| `/strategy/<strategy>` | GET | Get specific Strategy content by strategy class name.<br/>*Params:*<br/>- `<strategy>` (`str`)
+| `/available_pairs` | GET | List available backtest data.
 | `/version` | GET | Show version.
 | `/sysinfo` | GET | Show information about the system load.
 | `/health` | GET | Show bot health (last bot loop).
 
 !!! Warning "Alpha status"
-    Endpoints labeled with *Alpha status* above may change at any time without notice.
+    Endpoints labeled with *Alpha status* or *Beta status* above may change at any time without notice.
 
 ### Message WebSocket
 
@@ -245,7 +245,7 @@ You would then add that token under `ws_token` in your `api_server` config. Like
     "listen_port": 8080,
     "verbosity": "error",
     "enable_openapi": false,
-    "jwt_secret_key": "somethingrandom",
+    "jwt_secret_key": "somethingRandomSomethingRandom123",
     "CORS_origins": [],
     "username": "Freqtrader",
     "password": "SuperSecret1!",
