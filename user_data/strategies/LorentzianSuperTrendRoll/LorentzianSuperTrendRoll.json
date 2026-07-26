@@ -1,5 +1,5 @@
 {
-  "strategy_name": "LorentzianSuperTrend",
+  "strategy_name": "LorentzianSuperTrendRoll",
   "params": {
     "roi": {
       "0": 100
