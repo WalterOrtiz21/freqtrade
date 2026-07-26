@@ -9,7 +9,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from freqtrade.constants import Config
-from freqtrade.exceptions import OperationalException
+from freqtrade.exceptions import DependencyException, OperationalException
 from freqtrade.misc import deep_merge_dicts
 from freqtrade.optimize.hyperopt_tools import HyperoptTools
 from freqtrade.strategy.parameters import BaseParameter
@@ -51,9 +51,10 @@ class HyperStrategyMixin:
             for par in self._ft_hyper_params[space].values():
                 yield par.name, par
 
-    def ft_load_params_from_file(self) -> None:
+    def ft_set_special_params_from_file(self) -> None:
         """
-        Load Parameters from parameter file
+        Sets special parameters (stoploss, roi, trailing, max_open_trades) from the
+        previously loaded file.
         Should/must run before config values are loaded in strategy_resolver.
         """
         if self._ft_params_from_file:
@@ -96,7 +97,7 @@ class HyperStrategyMixin:
             params_values = deep_merge_dicts(
                 self._ft_params_from_file.get(space, {}), getattr(self, f"{space}_params", {})
             )
-            self._ft_load_params(self._ft_hyper_params[space], params_values, space, hyperopt)
+            self._ft_set_param(self._ft_hyper_params[space], params_values, space, hyperopt)
 
     def load_params_from_file(self) -> dict:
         filename_str = getattr(self, "__file__", "")
@@ -118,12 +119,15 @@ class HyperStrategyMixin:
 
         return {}
 
-    def _ft_load_params(
+    def _ft_set_param(
         self, params: SpaceParams, param_values: dict, space: str, hyperopt: bool = False
     ) -> None:
         """
         Set optimizable parameter values.
         :param params: Dictionary with new parameter values.
+        :param param_values: Dictionary with values to set.
+        :param space: The space to which the parameters belong.
+        :param hyperopt: Flag indicating if we are in hyperopt mode.
         """
         if not param_values:
             logger.info(f"No params for {space} found, using default values.")
@@ -179,10 +183,10 @@ def detect_all_parameters(
                     attr.space = space
                     break
         if attr.space is None:
-            raise OperationalException(f"Cannot determine parameter space for {attr_name}.")
+            raise DependencyException(f"Cannot determine parameter space for {attr_name}.")
 
         if attr.space in ("all", "default") or attr.space.isidentifier() is False:
-            raise OperationalException(
+            raise DependencyException(
                 f"'{attr.space}' is not a valid space. Parameter: {attr_name}."
             )
         attr.name = attr_name

@@ -11,15 +11,24 @@ from typing import TYPE_CHECKING, Any
 import psutil
 from dateutil.relativedelta import relativedelta
 from dateutil.tz import tzlocal
-from numpy import inf, int64, isnan, mean, nan
-from pandas import DataFrame, NaT
+from numpy import inf, isnan, mean, nan
+from pandas import DataFrame, NaT, read_sql
 from sqlalchemy import func, select
 
 from freqtrade import __version__
 from freqtrade.configuration.timerange import TimeRange
 from freqtrade.constants import CANCEL_REASON, DEFAULT_DATAFRAME_COLUMNS, Config
 from freqtrade.data.history import load_data
-from freqtrade.data.metrics import DrawDownResult, calculate_expectancy, calculate_max_drawdown
+from freqtrade.data.metrics import (
+    DrawDownResult,
+    calculate_cagr,
+    calculate_calmar,
+    calculate_expectancy,
+    calculate_max_drawdown,
+    calculate_sharpe,
+    calculate_sortino,
+    calculate_sqn,
+)
 from freqtrade.enums import (
     CandleType,
     ExitCheckTuple,
@@ -167,6 +176,7 @@ class RPC:
                 timeframe_to_minutes(config["timeframe"]) if "timeframe" in config else 0
             ),
             "exchange": config["exchange"]["name"],
+            "demo_trading": config["exchange"].get("demo_trading", False),
             "strategy": config["strategy"],
             "force_entry_enable": config.get("force_entry_enable", False),
             "exit_pricing": config.get("exit_pricing", {}),
@@ -689,6 +699,34 @@ class RPC:
         last_date = trades[-1].open_date_utc if trades else None
         num = float(len(durations) or 1)
         bot_start = KeyValueStore.get_datetime_value("bot_start_time")
+
+        sharpe = calculate_sharpe(
+            trades=trades_df,
+            min_date=first_date,
+            max_date=last_date,
+            starting_balance=starting_balance,
+        )
+        sortino = calculate_sortino(
+            trades=trades_df,
+            min_date=first_date,
+            max_date=last_date,
+            starting_balance=starting_balance,
+        )
+        sqn = calculate_sqn(trades=trades_df, starting_balance=starting_balance)
+        calmar = calculate_calmar(
+            trades=trades_df,
+            min_date=first_date,
+            max_date=last_date,
+            starting_balance=starting_balance,
+        )
+        current_balance = self._freqtrade.wallets.get_total_stake_amount()
+        days_passed = max(1, (last_date - first_date).days) if first_date and last_date else 1
+        cagr = calculate_cagr(
+            starting_balance=starting_balance,
+            final_balance=current_balance,
+            days_passed=days_passed,
+        )
+
         return {
             "profit_closed_coin": profit_closed_coin_sum,
             "profit_closed_percent_mean": round(profit_closed_ratio_mean * 100, 2),
@@ -725,6 +763,11 @@ class RPC:
             "winrate": winrate,
             "expectancy": expectancy,
             "expectancy_ratio": expectancy_ratio,
+            "sharpe": sharpe,
+            "sortino": sortino,
+            "sqn": sqn,
+            "calmar": calmar,
+            "cagr": cagr,
             "max_drawdown": drawdown.relative_account_drawdown,
             "max_drawdown_abs": drawdown.drawdown_abs,
             "max_drawdown_start": format_date(drawdown.high_date),
@@ -742,6 +785,26 @@ class RPC:
             "bot_start_timestamp": dt_ts_def(bot_start, 0),
             "bot_start_date": format_date(bot_start),
         }
+
+    def _rpc_get_historic_balance(self) -> tuple[DataFrame, int]:
+        """
+        Returns the historic balance of the bot
+        :return: DataFrame with the balance history and the timestamp of the migration
+        """
+        results = read_sql("wallet_history", con=Trade.session.bind, parse_dates=["timestamp"])
+
+        results = results.rename({"timestamp": "date"}, axis=1)
+        results.loc[:, "__date_ts"] = results.loc[:, "date"].dt.as_unit("ms").astype("int64")
+        # Exclude non-bot managed for now
+        results_filtered = results.loc[results["bot_managed"].astype(bool)]
+
+        results_final = (
+            results_filtered.groupby(["date", "__date_ts"])
+            .agg({"total_quote": "sum"})
+            .reset_index()
+        )
+        hist = KeyValueStore.get_datetime_value("wallet_history_migration_date")
+        return results_final, dt_ts_def(hist, 0)
 
     def __balance_get_est_stake(
         self, coin: str, stake_currency: str, amount: float, balance: Wallet
@@ -804,12 +867,9 @@ class RPC:
             if is_stake_currency:
                 trade_amount = self._freqtrade.wallets.get_available_stake_amount()
 
-            try:
-                est_stake, est_stake_bot = self.__balance_get_est_stake(
-                    coin, stake_currency, trade_amount, balance
-                )
-            except ValueError:
-                continue
+            est_stake, est_stake_bot = self.__balance_get_est_stake(
+                coin, stake_currency, trade_amount, balance
+            )
 
             total += est_stake
 
@@ -832,10 +892,33 @@ class RPC:
                 }
             )
         symbol: str
-        position: PositionWallet
-        for symbol, position in self._freqtrade.wallets.get_all_positions().items():
-            total += position.collateral
-            total_bot += position.collateral
+        pos: PositionWallet
+        for symbol, pos in self._freqtrade.wallets.get_all_positions().items():
+            est_stake = pos.collateral
+            pos_base = self._freqtrade.exchange.get_pair_base_currency(symbol)
+            if pos.leverage and pos.position:
+                try:
+                    rate = self._freqtrade.exchange.get_conversion_rate(pos_base, stake_currency)
+                    if rate:
+                        # For a leveraged position, equity (what we want as est_stake) is:
+                        #   equity = collateral + unlevered PnL
+                        # For longs: unlevered PnL = current_value - open_value
+                        #   est_stake = rate * pos.position - pos.collateral * (pos.leverage - 1)
+                        # For shorts: unlevered PnL = open_value - current_value
+                        #   est_stake = collateral + (open_value - current_value)
+                        #            = collateral + (pos.collateral * pos.leverage)
+                        #              - rate * pos.position
+                        if pos.side == "long":
+                            est_stake = rate * pos.position - pos.collateral * (pos.leverage - 1)
+                        else:
+                            est_stake = pos.collateral * (1 + pos.leverage) - rate * pos.position
+                except (ExchangeError, PricingError) as e:
+                    logger.warning(f"Error {e} getting rate for futures {symbol} / {pos_base}")
+                    pass
+
+            # Add the estimated stake (collateral + unlevered PnL) to totals
+            total += est_stake
+            total_bot += est_stake
 
             currencies.append(
                 {
@@ -843,12 +926,12 @@ class RPC:
                     "free": 0,
                     "balance": 0,
                     "used": 0,
-                    "position": position.position,
-                    "est_stake": position.collateral,
-                    "est_stake_bot": position.collateral,
+                    "position": pos.position,
+                    "est_stake": est_stake,
+                    "est_stake_bot": est_stake,
                     "stake": stake_currency,
-                    "side": position.side,
-                    "is_bot_managed": True,
+                    "side": pos.side,
+                    "is_bot_managed": pos_base in open_assets,
                     "is_position": True,
                 }
             )
@@ -1324,7 +1407,7 @@ class RPC:
         }
 
     def _rpc_locks(self) -> dict[str, Any]:
-        """Returns the  current locks"""
+        """Returns the current locks"""
 
         locks = PairLocks.get_pair_locks(None)
         return {"lock_count": len(locks), "locks": [lock.to_json() for lock in locks]}
@@ -1453,7 +1536,9 @@ class RPC:
                 df_cols = [col for col in dataframe_columns if col in cols_set]
                 dataframe = dataframe.loc[:, df_cols]
 
-            dataframe.loc[:, "__date_ts"] = dataframe.loc[:, "date"].astype(int64) // 1000 // 1000
+            dataframe.loc[:, "__date_ts"] = (
+                dataframe.loc[:, "date"].dt.as_unit("ms").astype("int64")
+            )
             # Move signal close to separate column when signal for easy plotting
             for sig_type in signals.keys():
                 if sig_type in dataframe.columns:
@@ -1463,8 +1548,7 @@ class RPC:
 
             # band-aid until this is fixed:
             # https://github.com/pandas-dev/pandas/issues/45836
-            datetime_types = ["datetime", "datetime64", "datetime64[ns, UTC]"]
-            date_columns = dataframe.select_dtypes(include=datetime_types)
+            date_columns = dataframe.select_dtypes(include=["datetime", "datetime64", "datetimetz"])
             for date_column in date_columns:
                 # replace NaT with `None`
                 dataframe[date_column] = dataframe[date_column].astype(object).replace({NaT: None})
@@ -1610,8 +1694,11 @@ class RPC:
                     else dt_ts(dt_now() - timedelta(days=30)),
                     is_new_pair=True,  # history is never available - so always treat as new pair
                     candle_type=config.get("candle_type_def", CandleType.SPOT),
-                    until_ms=timerange_parsed.stopts,
+                    until_ms=timerange_parsed.stopts * 1000 if timerange_parsed.stopts else None,
                 )
+                if timerange_parsed.stopts and len(data) > 1:
+                    # trim last candle if it is newer than the stop time
+                    data = data.loc[data["date"] <= timerange_parsed.stopdt]
             else:
                 _data = load_data(
                     datadir=config["datadir"],
@@ -1674,8 +1761,24 @@ class RPC:
 
     @staticmethod
     def _rpc_sysinfo() -> dict[str, Any]:
+        cpu_pct = psutil.cpu_percent(interval=0.1, percpu=True)
+        load_avg = psutil.getloadavg()
         return {
-            "cpu_pct": psutil.cpu_percent(interval=1, percpu=True),
+            "cpu_pct": cpu_pct,  # Deprecated, use cpu_load instead
+            "cpu_load": [
+                {
+                    "cpu": idx,
+                    "pct": pct,
+                }
+                for idx, pct in enumerate(cpu_pct)
+            ],
+            "cpu_avg": sum(cpu_pct) / len(cpu_pct) if cpu_pct else 0.0,
+            "cpu_load_avg": {
+                "1m": load_avg[0],
+                "5m": load_avg[1],
+                "15m": load_avg[2],
+            },
+            "cpu_count": len(cpu_pct),
             "ram_pct": psutil.virtual_memory().percent,
         }
 

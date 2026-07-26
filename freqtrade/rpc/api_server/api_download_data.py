@@ -11,13 +11,13 @@ from freqtrade.rpc.api_server.api_pairlists import handleExchangePayload
 from freqtrade.rpc.api_server.api_schemas import BgJobStarted, DownloadDataPayload
 from freqtrade.rpc.api_server.deps import get_config, get_exchange
 from freqtrade.rpc.api_server.webserver_bgwork import ApiBG
-from freqtrade.util.progress_tracker import get_progress_tracker
+from freqtrade.util import get_progress_tracker
 
 
 logger = logging.getLogger(__name__)
 
 # Private API, protected by authentication and webserver_mode dependency
-router = APIRouter(tags=["download-data", "webserver"])
+router = APIRouter()
 
 
 def __run_download(job_id: str, config_loc: Config):
@@ -63,6 +63,7 @@ def pairlists_evaluate(
     config_loc["timeframes"] = payload.timeframes
     config_loc["erase"] = payload.erase
     config_loc["download_trades"] = payload.download_trades
+    config_loc["prepend_data"] = payload.prepend_data
     if payload.candle_types is not None:
         config_loc["candle_types"] = payload.candle_types
 
