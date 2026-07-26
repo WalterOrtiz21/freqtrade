@@ -85,24 +85,23 @@ def numba_lorentzian_distance_prediction(features_norm, labels, max_bars_back, n
         start_index = i - max_bars_back
         if start_index < 0: start_index = 0
         
-        # Pine Script label semantics:
-        # y_train_series = src[4] < src[0] → compares price 4 bars AGO vs current price.
-        # Both are known at bar i → NO lookahead bias in the labels.
-        # We include all bars up to and including i in the search.
-        # The current bar (j == i, relative distance 0) is always skipped by the
-        # modulo check below: (i - j) % 4 == 0 → (i - i) % 4 = 0 → skipped.
-        end_index = i + 1
+        # FIX LOOKAHEAD BIAS:
+        # Labels are defined as shift(-4) (future).
+        # So label[k] contains information about price at k+4.
+        # If we are at index i, we cannot know label[i-1] because that requires price at i+3 (future).
+        # We must stop searching for neighbors at i - prediction_horizon.
+        end_index = i - prediction_horizon
         
-        if end_index <= start_index:
+        if end_index < start_index:
              predictions[i] = 0.0
              continue 
         
         for j in range(start_index, end_index):
-            # Pine Script kNN loop: for i = 0 to loopSize - 1; if i % 4
-            # Pine's 'i' is a RELATIVE counter from 0 (current bar) outward.
-            # Skip when relative distance from current bar is 0, 4, 8, 12...
-            # (i - j) replicates Pine's relative loop counter.
-            if (i - j) % 4 == 0:
+            # Pine Logic: if i % 4 (meaning i % 4 != 0)
+            # We want to process bars where index % 4 != 0.
+            # j is the absolute index here.
+
+            if j % 4 == 0:  # Skip 0, 4, 8... (Matches Pine 'if i%4' which skips when 0)
                 continue
                 
             dist = 0.0
@@ -288,7 +287,7 @@ def _numba_supertrend_recalc(close, upper, lower):
 # ESTRATEGIA
 # =============================================================================
 
-class LorentzianSuperTrend(IStrategy):
+class LorentzianSuperTrendOLD(IStrategy):
     INTERFACE_VERSION = 3
 
     # Tracking de eventos logueados (para evitar duplicados)
@@ -365,18 +364,18 @@ class LorentzianSuperTrend(IStrategy):
 
     # Protection & Risk
     stoploss_type = CategoricalParameter(['atr', 'swing'], default='atr', space='protection', optimize=True)
-    atr_stop_len = IntParameter(10, 30, default=16, space='protection', optimize=True)
-    atr_stop_mult = DecimalParameter(1.0, 5.0, default=2.0, decimals=1, space='protection', optimize=True)
-    swing_bars = IntParameter(5, 20, default=17, space='protection', optimize=True)
+    atr_stop_len = IntParameter(10, 30, default=14, space='protection', optimize=True)
+    atr_stop_mult = DecimalParameter(1.0, 5.0, default=1.5, decimals=1, space='protection', optimize=True)
+    swing_bars = IntParameter(5, 20, default=10, space='protection', optimize=True)
     
     use_breakeven = BooleanParameter(default=True, space='protection', optimize=True)
-    be_rr_long = DecimalParameter(0.5, 3.0, default=2.5, decimals=1, space='protection', optimize=True)
-    be_rr_short = DecimalParameter(0.5, 3.0, default=2.2, decimals=1, space='protection', optimize=True)
+    be_rr_long = DecimalParameter(0.5, 3.0, default=1.0, decimals=1, space='protection', optimize=True)
+    be_rr_short = DecimalParameter(0.5, 3.0, default=1.0, decimals=1, space='protection', optimize=True)
     
     use_takeprofit = BooleanParameter(default=True, space='protection', optimize=True)
-    tp_rr_long = DecimalParameter(1.0, 5.0, default=1.2, decimals=1, space='protection', optimize=True)
-    tp_rr_short = DecimalParameter(1.0, 5.0, default=1.9, decimals=1, space='protection', optimize=True)
-    tp_percent = DecimalParameter(10, 100, default=59, decimals=0, space='protection', optimize=True)
+    tp_rr_long = DecimalParameter(1.0, 5.0, default=3.0, decimals=1, space='protection', optimize=True)
+    tp_rr_short = DecimalParameter(1.0, 5.0, default=3.0, decimals=1, space='protection', optimize=True)
+    tp_percent = DecimalParameter(10, 100, default=50, decimals=0, space='protection', optimize=True)
     close_only_tp = BooleanParameter(default=False, space='protection', optimize=True)
 
     st_atr_period = IntParameter(5, 20, default=9, space='buy', optimize=True)
@@ -403,9 +402,10 @@ class LorentzianSuperTrend(IStrategy):
     startup_candle_count = 1000 
     
     # REGLA PINE SCRIPT CRUCIAL:
-    # Si está en True, solo permite salir con ganancias cuando cambia la señal.
-    # Desactivarlo permite cortar pérdidas rápido si la dirección cambia.
-    exit_profit_only = False 
+    # El script original dice: if strategy.openprofit > 0 -> close.
+    # Esto asegura que no salgamos en pérdidas por cambios de señal o supertrend,
+    # solo por Stop Loss.
+    exit_profit_only = True 
     
     can_short = True
     use_custom_stoploss = True
@@ -536,37 +536,15 @@ class LorentzianSuperTrend(IStrategy):
         # Aseguramos compatibilidad si llega numpy array
         if isinstance(series, np.ndarray):
             series = pd.Series(series)
-
+            
         clamped = series.clip(min_val, max_val)
         return (clamped - min_val) / (max_val - min_val)
 
-    def _normalize_rolling(self, series: Union[pd.Series, np.ndarray], window: int) -> pd.Series:
-        """Bounded-window variant of Pine normalize() — past-only, per-pair.
-
-        Uses a rolling last-`window` min/max instead of expanding() so the
-        normalization span is identical in backtest and in live. In live/dry
-        freqtrade only fetches a bounded candle window from the exchange
-        (Bitget caps at ~1000 candles/pair), while backtest sees the full local
-        history; expanding() would normalize over years in backtest and over
-        ~weeks in live, so the two diverge. A fixed rolling window (<= the live
-        cap) makes both converge. min_periods=1 keeps warmup behaviour identical
-        to expanding() until `window` bars of history have accumulated.
-        """
-        if isinstance(series, np.ndarray):
-            series = pd.Series(series)
-
-        roll_min = series.rolling(window, min_periods=1).min()
-        roll_max = series.rolling(window, min_periods=1).max()
-        denom = (roll_max - roll_min).replace(0, 0.000001)
-        return (series - roll_min) / denom
-
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-
-        # NOTE: historic global min/max normalization was removed (causal-fix).
-        # f2/f3 now use per-pair, past-only expanding normalization (Pine normalize()).
-        # The old _calculate_historic_minmax() computed bounds over the ENTIRE feather
-        # (future leakage) and only once on the first pair (cross-pair contamination).
-
+        
+        # Calcular min/max históricos (solo la primera vez)
+        self._calculate_historic_minmax(metadata['pair'])
+        
         # --- SELECCIÓN DE SOURCE ---
         st = self.source_type.value
         
@@ -602,14 +580,14 @@ class LorentzianSuperTrend(IStrategy):
         wt1 = tci
         wt2 = ta.SMA(wt1, timeperiod=4)
         wt_diff = wt1 - wt2
-        # Bounded rolling normalize(window=500): per-pair, past-only, live==backtest parity
-        dataframe['f2_norm'] = self._normalize_rolling(wt_diff, window=500)
+        # Usamos min/max históricos calculados dinámicamente
+        dataframe['f2_norm'] = self._normalize_fixed(wt_diff, self._historic_wt_min, self._historic_wt_max) 
         
         # --- FEATURE 3: CCI ---
         cci_raw = ta.CCI(dataframe, timeperiod=self.f3_period.value)
         cci_smooth = ta.EMA(cci_raw, timeperiod=self.f3_smoothing.value) if self.f3_smoothing.value > 1 else cci_raw
-        # Bounded rolling normalize(window=500): per-pair, past-only, live==backtest parity
-        dataframe['f3_norm'] = self._normalize_rolling(cci_smooth, window=500)
+        # Usamos min/max históricos calculados dinámicamente
+        dataframe['f3_norm'] = self._normalize_fixed(cci_smooth, self._historic_cci_min, self._historic_cci_max)
 
         # --- FEATURE 4: ADX ---
         adx_raw = ta.ADX(dataframe, timeperiod=self.f4_period.value)
@@ -798,6 +776,7 @@ class LorentzianSuperTrend(IStrategy):
             labels.astype(np.float64),
             int(self.max_bars_back.value),
             int(self.neighbors_count.value),
+            -1 # prediction_horizon = -1 to include SELF (i) in neighbors, matching Pine behavior
         )
         dataframe['prediction'] = predictions
 
