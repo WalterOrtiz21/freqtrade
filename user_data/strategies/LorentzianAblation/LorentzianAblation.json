@@ -1,0 +1,80 @@
+{
+  "strategy_name": "LorentzianAblation",
+  "params": {
+    "roi": {
+      "0": 100
+    },
+    "stoploss": {
+      "stoploss": -0.5
+    },
+    "trailing": {
+      "trailing_stop": false,
+      "trailing_stop_positive": null,
+      "trailing_stop_positive_offset": 0.0,
+      "trailing_only_offset_is_reached": false
+    },
+    "max_open_trades": {
+      "max_open_trades": 5
+    },
+    "buy": {
+      "adx_threshold": 20,
+      "f1_period": 14,
+      "f1_smoothing": 1,
+      "f2_avg_len": 11,
+      "f2_ch_len": 10,
+      "f3_period": 20,
+      "f3_smoothing": 1,
+      "f4_period": 20,
+      "f4_smoothing": 2,
+      "f5_period": 9,
+      "f5_smoothing": 1,
+      "htf_1": "none",
+      "htf_2": "4h",
+      "kernel_h": 8,
+      "kernel_lag": 2,
+      "kernel_r": 8.0,
+      "kernel_x": 25,
+      "max_bars_back": 500,
+      "ml_ema_period": 200,
+      "ml_sma_period": 200,
+      "neighbors_count": 8,
+      "position_ema_period": 200,
+      "regime_threshold": 0.1,
+      "source_type": "close",
+      "st_atr_period": 9,
+      "st_factor": 2.5,
+      "use_adx_filter": false,
+      "use_ema_filter_long": true,
+      "use_ema_filter_short": true,
+      "use_htf_filter": true,
+      "use_kernel_filter": true,
+      "use_kernel_smoothing": false,
+      "use_ml_ema_filter": false,
+      "use_ml_sma_filter": false,
+      "use_regime_filter": true,
+      "use_volatility_filter": true
+    },
+    "protection": {
+      "analysis_logging": false,
+      "atr_stop_len": 16,
+      "atr_stop_mult": 2.0,
+      "be_rr_long": 2.5,
+      "be_rr_short": 2.2,
+      "close_only_tp": false,
+      "stoploss_type": "atr",
+      "swing_bars": 17,
+      "tp_percent": 59.0,
+      "tp_rr_long": 1.2,
+      "tp_rr_short": 1.9,
+      "use_breakeven": true,
+      "use_takeprofit": true
+    },
+    "sell": {
+      "use_exit_manager": false,
+      "close_with_supertrend": true,
+      "use_dynamic_exits": false
+    }
+  },
+  "ft_stratparam_v": 1,
+  "export_time": "2026-06-30 00:36:42.119748+00:00"
+}
