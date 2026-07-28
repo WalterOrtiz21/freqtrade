@@ -308,7 +308,22 @@ class LorentzianSuperTrend(IStrategy):
     exit_manager_model_path = 'user_data/strategies/models/exit_manager.pkl'
 
     # ================= PARÁMETROS (Coinciden con JSON) =================
-    
+
+    # Signal source. Plain attribute on purpose — not a hyperopt parameter.
+    #
+    # Ablation 2026-07-27 (67 pairs, 1h, 2025-06-01..2026-06-01, gross expectancy
+    # per trade so trade-count differences do not distort the comparison):
+    #   KNN classifier      +0.3545   1539 trades   PF 1.20
+    #   position EMA dir    +0.3745   1380 trades   PF 1.21   (vs KNN: t=+0.12, n.s.)
+    #   kernel direction    +0.3262   1527 trades   PF 1.18   (vs KNN: t=-0.18, n.s.)
+    #   random x6 seeds     +0.0764  ~2950 trades   PF ~1.00
+    #
+    # The random null collapses, so the entry signal does carry information — but
+    # the KNN carries no more of it than a 200-period EMA does, while costing ~8
+    # hyperopt parameters of overfit surface, the numba KNN in the hot path, and
+    # 10% more trades. Set back to True to restore the classifier.
+    use_knn_signal = False
+
     # ML Settings
     source_type = CategoricalParameter(['close', 'hlc3', 'ohlc4', 'hl2', 'open', 'high', 'low'], default='close', space='buy', optimize=False)
     neighbors_count = IntParameter(2, 20, default=8, space='buy', optimize=False)
@@ -775,30 +790,38 @@ class LorentzianSuperTrend(IStrategy):
         dataframe['bullish'] = dataframe['close'] > position_ema
         dataframe['bearish'] = dataframe['close'] < position_ema
 
-        # --- ML LORENTZIAN PREDICTION ---
-        # CRITICAL CORRECTION: Pine uses src[4] which is 4 bars in the PAST (history referencing)
-        # Pine Strategy (line 233): y_train_series = src[4] < src[0] ? direction_s.short : src[4] > src[0] ? direction_s.long : direction_s.neutral
-        # This compares Price 4 bars ago vs Current Price.
-        # If Price(t-4) < Price(t): Price ROSE. Label = Short (-1). (Contrarian/Mean Reversion)
-        # If Price(t-4) > Price(t): Price FELL. Label = Long (1).
-        
-        # Usamos 'source' seleccionado por el usuario
-        past_source = dataframe['source'].shift(4)  # 4 bars in the PAST
-        labels = np.where(past_source < dataframe['source'], -1.0,   # Pasado < Actual → Subió → Short = -1
-                  np.where(past_source > dataframe['source'], 1.0,   # Pasado > Actual → Bajó → Long = 1
-                           0.0))
-        labels = np.nan_to_num(labels, nan=0.0)
-        
-        # Preparar features
-        feature_cols = ['f1_norm', 'f2_norm', 'f3_norm', 'f4_norm', 'f5_norm']
-        features_data = dataframe[feature_cols].fillna(0.5).values.astype(np.float64)
-        
-        predictions = numba_lorentzian_distance_prediction(
-            features_data,
-            labels.astype(np.float64),
-            int(self.max_bars_back.value),
-            int(self.neighbors_count.value),
-        )
+        # --- SIGNAL SOURCE (ver use_knn_signal arriba) ---
+        if self.use_knn_signal:
+            # CRITICAL CORRECTION: Pine uses src[4] which is 4 bars in the PAST (history referencing)
+            # Pine Strategy (line 233): y_train_series = src[4] < src[0] ? direction_s.short : src[4] > src[0] ? direction_s.long : direction_s.neutral
+            # This compares Price 4 bars ago vs Current Price.
+            # If Price(t-4) < Price(t): Price ROSE. Label = Short (-1). (Contrarian/Mean Reversion)
+            # If Price(t-4) > Price(t): Price FELL. Label = Long (1).
+
+            # Usamos 'source' seleccionado por el usuario
+            past_source = dataframe['source'].shift(4)  # 4 bars in the PAST
+            labels = np.where(past_source < dataframe['source'], -1.0,   # Pasado < Actual → Subió → Short = -1
+                      np.where(past_source > dataframe['source'], 1.0,   # Pasado > Actual → Bajó → Long = 1
+                               0.0))
+            labels = np.nan_to_num(labels, nan=0.0)
+
+            # Preparar features
+            feature_cols = ['f1_norm', 'f2_norm', 'f3_norm', 'f4_norm', 'f5_norm']
+            features_data = dataframe[feature_cols].fillna(0.5).values.astype(np.float64)
+
+            predictions = numba_lorentzian_distance_prediction(
+                features_data,
+                labels.astype(np.float64),
+                int(self.max_bars_back.value),
+                int(self.neighbors_count.value),
+            )
+        else:
+            # Position EMA direction, same series the entry filter already uses.
+            predictions = np.where(
+                dataframe['bullish'], 1.0,
+                np.where(dataframe['bearish'], -1.0, 0.0),
+            ).astype(np.float64)
+
         dataframe['prediction'] = predictions
 
         # Calcular Señal final (Signal Latching)
